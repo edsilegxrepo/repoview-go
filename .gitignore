@@ -1,25 +1,99 @@
-# Binaries for programs and plugins
+# Binaries
+*.bin
 *.exe
 *.exe~
 *.dll
+*.lib
 *.so
 *.dylib
-bin/
+/bin/
+/class/
 
-# Test binary, built with `go test -c`
-*.test
+# Linting
+.ruff_cache
+golangci-lint*
+gosec*
 
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
-
-# Go workspace file
-go.work
-
-# IDE & OS files
+# OS generated files
 .DS_Store
+.DS_Store?
+ehthumbs.db
+Icon?
 Thumbs.db
-.vscode/
-.idea/
 *.swp
 *.swo
-*~
+
+# Languages
+node_modules/
+vendor/
+__pycache__/
+
+# Secrets and environment
+.env
+*.key
+*.env
+*.crt
+*.pem
+*.p12
+*.jks
+*.gpg
+*.secret
+secrets/
+key/
+keys/
+
+# Transient
+*.out
+*.tmp
+*.test
+*.log
+coverage*
+temp/
+tmp/
+out/
+log/
+logs/
+go.work
+
+# Data
+*.db
+data/
+db/
+testfiles/
+testsamples/
+
+# Backup files (sequences)
+*.bk??
+
+# Build files
+releases/
+build/
+output/
+.editorconfig
+.windsurf
+.antigravity
+.antigravity-cli
+.gemini
+.claude
+AGENTS.md
+RULES.md
+GEMINI.md
+CLAUDE.md
+JULES.md
+SKILLS.md
+walkthrough*.md
+implementation_plan*.md
+code_review_report*.md
+tasks.md
+*.tar.gz
+
+# Code Review tooling
+repomix-output.xml
+repomix-output.md
+repomix-instruction.md
+.repomixignore
+repomix.config.json
+
+
+# --- Vendor / Local Assets ---
+**/mermaid.min.js
