@@ -49,7 +49,7 @@ flowchart TB
         REPOMD["repodata/repomd.xml"]
         PRIMARY_DB[("primary.sqlite\n(.gz/.bz2/.xz/.zst)")]
         OTHER_DB[("other.sqlite\n(changelogs)")]
-        COMPS["comps.xml\n(categories & groups)")]
+        COMPS["comps.xml\n(categories & groups)"]
         RPMS["*.rpm Packages\n(headers, scriptlets, files)"]
     end
 
