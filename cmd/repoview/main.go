@@ -31,6 +31,8 @@ import (
 	"strings"
 
 	"github.com/edsilegxrepo/repoview/internal/app"
+	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/util"
 )
 
 // Version string for the repoview binary.
@@ -54,6 +56,10 @@ func (s *stringList) Set(value string) error {
 // run parses arguments, executes the generation pipeline, and returns the appropriate exit code.
 // It accepts stdout and stderr writers to allow in-process unit testing without global state leaks.
 func run(args []string, stdout, stderr io.Writer) int {
+	// Enforce standard umask (0022) so directories (0755) and files (0644)
+	// are created with web-accessible permissions even if the parent environment (systemd/cron) has a restrictive umask.
+	util.SetUmask(util.DefaultUmask)
+
 	var (
 		repoDir     string
 		outputDir   string
@@ -63,6 +69,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		title       string
 		url         string
 		baseURL     string
+		format      string
 		force       bool
 		quiet       bool
 		showVer     bool
@@ -78,6 +85,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&title, "title", "Repoview", "Repository title")
 	fs.StringVar(&url, "url", "", "Repository URL (for RSS feed)")
 	fs.StringVar(&baseURL, "baseurl", "", "Repository base URL for client configuration")
+	fs.StringVar(&format, "format", "auto", "Repository format: auto, rpm, or deb")
 	fs.StringVar(&templateDir, "template-dir", "", "Template directory")
 	fs.BoolVar(&force, "force", false, "Force regeneration")
 	fs.BoolVar(&quiet, "quiet", false, "Quiet mode")
@@ -110,6 +118,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printOption("title <text>", "Repository title", "Repoview")
 		printOption("url <url>", "Repository URL (for RSS feed)", "")
 		printOption("baseurl <url>", "Repository base URL for client configuration", "")
+		printOption("format <type>", "Repository format (auto, rpm, deb)", "auto")
 		printOption("template-dir <dir>", "Template directory", "embedded")
 		printOption("comps <file>", "Alternative comps.xml file", "")
 		printOption("ignore-package <glob>", "Ignore package glob (can be repeated)", "")
@@ -142,6 +151,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return app.ExitRepoMetadataError
 	}
 
+	// Validate format option
+	var repoFormat models.RepoFormat
+	switch strings.ToLower(format) {
+	case "auto", "":
+		repoFormat = "" // Auto-detection
+	case "rpm":
+		repoFormat = models.FormatRPM
+	case "deb":
+		repoFormat = models.FormatDEB
+	default:
+		_, _ = fmt.Fprintf(stderr, "Error: invalid repository format '%s' (must be 'auto', 'rpm', or 'deb')\n", format)
+		return app.ExitUsageError
+	}
+
 	// Resolve relative outputDir against repoDir, matching Python repoview behavior
 	if !filepath.IsAbs(outputDir) {
 		outputDir = filepath.Join(repoDir, outputDir)
@@ -165,6 +188,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Title:       title,
 		URL:         url,
 		BaseURL:     baseURL,
+		Format:      repoFormat,
 		Force:       force,
 		Quiet:       quiet,
 		IgnoreList:  ignoreList,
@@ -192,7 +216,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			case strings.Contains(errMsg, "safety violation"):
 				_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
 				return app.ExitUsageError
-			case strings.Contains(errMsg, "repomd") || strings.Contains(errMsg, "primary") || strings.Contains(errMsg, "sqlite") || strings.Contains(errMsg, "decompress"):
+			case strings.Contains(errMsg, "repomd") || strings.Contains(errMsg, "primary") || strings.Contains(errMsg, "sqlite") || strings.Contains(errMsg, "decompress") || strings.Contains(errMsg, "packages") || strings.Contains(errMsg, "debian"):
 				_, _ = fmt.Fprintf(stderr, "Repository Metadata Error: %v\n", err)
 				return app.ExitRepoMetadataError
 			case strings.Contains(errMsg, "template"):

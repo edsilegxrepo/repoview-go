@@ -23,25 +23,46 @@ package logic
 import (
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
 
 	rpmver "github.com/knqyf263/go-rpm-version"
+	debversion "pault.ag/go/debian/version"
 )
 
 // SortPackagesByEVR sorts a slice of packages by Epoch, Version, Release (descending)
-// and Arch (ascending).
+// and Arch (ascending), supporting both RPM and Debian package formats.
 // CRITICAL: This sort order is used to determine which package version is the "latest"
 // and orders all versions/architectures on the package detail page.
 func SortPackagesByEVR(pkgs []*models.Package) {
 	sort.Slice(pkgs, func(i, j int) bool {
-		cmp := CompareEVR(pkgs[i], pkgs[j])
+		cmp := CompareVersions(pkgs[i], pkgs[j])
 		if cmp != 0 {
 			return cmp > 0
 		}
 		// When EVR is identical, sort by Arch ascending (matching Python repoview's ORDER BY arch ASC)
 		return pkgs[i].Arch < pkgs[j].Arch
 	})
+}
+
+// CompareVersions evaluates version precedence according to the package format.
+// For Debian packages (FormatDEB), it delegates to pault.ag/go/debian/version.
+// For RPM packages, it delegates to CompareEVR.
+func CompareVersions(p1, p2 *models.Package) int {
+	if p1.Format == models.FormatDEB || p2.Format == models.FormatDEB {
+		v1Str := p1.EVR()
+		v2Str := p2.EVR()
+
+		v1, err1 := debversion.Parse(v1Str)
+		v2, err2 := debversion.Parse(v2Str)
+		if err1 == nil && err2 == nil {
+			return debversion.Compare(v1, v2)
+		}
+		return strings.Compare(v1Str, v2Str)
+	}
+
+	return CompareEVR(p1, p2)
 }
 
 // CompareEVR returns 1 if p1 > p2, -1 if p1 < p2, 0 if equal.

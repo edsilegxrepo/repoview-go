@@ -68,15 +68,22 @@ func FirstLetter(text string) string {
 
 // YMD formats a Unix timestamp into an ISO calendar date string (YYYY-MM-DD).
 // Used for package build dates, changelog entries, and release tags.
+// Returns "N/A" if stamp <= 0 to prevent displaying timezone-shifted Unix epoch (e.g. 1969-12-31).
 // Python equivalent: _ymd
 func YMD(stamp int64) string {
-	t := time.Unix(stamp, 0)
+	if stamp <= 0 {
+		return "N/A"
+	}
+	t := time.Unix(stamp, 0).UTC()
 	return t.Format("2006-01-02")
 }
 
 // RSSTime formats a Unix timestamp into RFC1123Z UTC format required for RSS 2.0 feeds.
-// Example: "Mon, 02 Jan 2006 15:04:05 +0000".
+// Example: "Mon, 02 Jan 2006 15:04:05 +0000". If stamp <= 0, defaults to current time.
 func RSSTime(stamp int64) string {
+	if stamp <= 0 {
+		stamp = time.Now().Unix()
+	}
 	t := time.Unix(stamp, 0).UTC()
 	return t.Format(time.RFC1123Z)
 }

@@ -31,7 +31,7 @@ import (
 //
 // The filtering logic matches globs against both the simple package Name AND the
 // full NVRA (Name-Version-Release-Arch) string to support complex exclusion patterns.
-func FilterPackages(pkgs []*models.Package, ignoreGlobs []string, excludeArches []string) ([]*models.Package, error) {
+func FilterPackages(pkgs []*models.Package, ignoreGlobs, excludeArches []string) ([]*models.Package, error) {
 	if len(ignoreGlobs) == 0 && len(excludeArches) == 0 {
 		return pkgs, nil
 	}
@@ -82,6 +82,16 @@ func FilterPackages(pkgs []*models.Package, ignoreGlobs []string, excludeArches 
 				return nil, err
 			}
 			if matchedName {
+				ignored = true
+				break
+			}
+
+			// Also match against archive filename (e.g. *.deb, *.rpm)
+			matchedArchive, err := filepath.Match(pattern, p.ArchiveFilename())
+			if err != nil {
+				return nil, err
+			}
+			if matchedArchive {
 				ignored = true
 				break
 			}

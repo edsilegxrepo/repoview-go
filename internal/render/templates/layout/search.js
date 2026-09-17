@@ -39,11 +39,7 @@
 	// =========================================================================
 	function initTheme() {
 		const savedTheme = localStorage.getItem("repoview-theme");
-		const systemPrefersDark = window.matchMedia?.(
-			"(prefers-color-scheme: dark)",
-		).matches;
-
-		const initialTheme = savedTheme || (systemPrefersDark ? "dark" : "light");
+		const initialTheme = savedTheme || "dark";
 		applyTheme(initialTheme);
 
 		const themeBtn = document.getElementById("themeToggleBtn");
@@ -59,7 +55,7 @@
 
 	function toggleTheme() {
 		const currentTheme =
-			document.documentElement.getAttribute("data-theme") || "light";
+			document.documentElement.getAttribute("data-theme") || "dark";
 		const nextTheme = currentTheme === "dark" ? "light" : "dark";
 		localStorage.setItem("repoview-theme", nextTheme);
 		applyTheme(nextTheme);
@@ -445,7 +441,12 @@
 		if (!tabs.length || !cmdDisplay || !copyBtn) return;
 
 		function getCmd(tool, pkgName, href) {
-			if (tool === "dnf") {
+			if (tool === "apt") {
+				return `sudo apt install ${pkgName}`;
+			} else if (tool === "dpkg") {
+				const filename = href.split("/").pop() || `${pkgName}.deb`;
+				return `sudo dpkg -i ${filename}`;
+			} else if (tool === "dnf") {
 				return `sudo dnf install ${pkgName}`;
 			} else if (tool === "yum") {
 				return `sudo yum install ${pkgName}`;
@@ -609,16 +610,14 @@
 		if (!isBaseURLConfigured && window.location.protocol.startsWith("http")) {
 			const detectedBaseURL = getDetectedBaseURL();
 			if (snippetCode) {
-				snippetCode.textContent = snippetCode.textContent.replace(
-					/^baseurl=.*$/m,
-					`baseurl=${detectedBaseURL}`,
-				);
+				snippetCode.textContent = snippetCode.textContent
+					.replace(/^baseurl=.*$/m, `baseurl=${detectedBaseURL}`)
+					.replace(/^URIs: .*$/m, `URIs: ${detectedBaseURL}`);
 			}
 			if (fastSetupCmd) {
-				fastSetupCmd.textContent = fastSetupCmd.textContent.replace(
-					/^baseurl=.*$/m,
-					`baseurl=${detectedBaseURL}`,
-				);
+				fastSetupCmd.textContent = fastSetupCmd.textContent
+					.replace(/^baseurl=.*$/m, `baseurl=${detectedBaseURL}`)
+					.replace(/^URIs: .*$/m, `URIs: ${detectedBaseURL}`);
 			}
 		}
 
@@ -640,6 +639,8 @@
 				const match = content.match(/^\[([^\]]+)\]/m);
 				if (match?.[1]) {
 					fileName = `${match[1]}.repo`;
+				} else if (content.includes("Types: deb")) {
+					fileName = "repository.sources";
 				}
 
 				const blob = new Blob([content], { type: "text/plain;charset=utf-8" });

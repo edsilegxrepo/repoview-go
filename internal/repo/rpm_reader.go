@@ -34,7 +34,7 @@ import (
 
 // ReadRPMDetails parses the RPM file header directly and extracts detailed inspection data
 // including digital signatures, build host, source RPM, scriptlets, and file list.
-func ReadRPMDetails(rpmPath string) (*models.RPMDetails, error) {
+func ReadRPMDetails(rpmPath string) (*models.PackageDetails, error) {
 	// #nosec G304 -- rpmPath is validated against directory traversal by repository discovery
 	f, err := os.Open(filepath.Clean(rpmPath))
 	if err != nil {
@@ -53,11 +53,11 @@ func ReadRPMDetails(rpmPath string) (*models.RPMDetails, error) {
 		}
 	}
 
-	details := &models.RPMDetails{}
+	details := &models.PackageDetails{}
 
 	// 1. Basic Metadata
 	details.BuildHost, _ = header.GetString(rpmutils.BUILDHOST)
-	details.SourceRPM, _ = header.GetString(rpmutils.SOURCERPM)
+	details.SourcePackage, _ = header.GetString(rpmutils.SOURCERPM)
 	details.InstalledSize, _ = header.InstalledSize()
 
 	// 2. Signature
@@ -81,7 +81,7 @@ func ReadRPMDetails(rpmPath string) (*models.RPMDetails, error) {
 	postUn, _ := header.GetString(rpmutils.POSTUN)
 	postUnProg, _ := header.GetString(rpmutils.POSTUNPROG)
 
-	scriptlets := &models.RPMScriptlets{
+	scriptlets := &models.PackageScriptlets{
 		PreIn:      strings.TrimSpace(preIn),
 		PreInProg:  strings.TrimSpace(preInProg),
 		PostIn:     strings.TrimSpace(postIn),
@@ -99,10 +99,10 @@ func ReadRPMDetails(rpmPath string) (*models.RPMDetails, error) {
 	// 4. File List with attributes
 	files, err := header.GetFiles()
 	if err == nil && len(files) > 0 {
-		details.Files = make([]models.RPMFile, 0, len(files))
+		details.Files = make([]models.PackageFile, 0, len(files))
 		for _, fi := range files {
 			modeStr := formatFileMode(fi.Mode())
-			details.Files = append(details.Files, models.RPMFile{
+			details.Files = append(details.Files, models.PackageFile{
 				Mode:  modeStr,
 				User:  fi.UserName(),
 				Group: fi.GroupName(),
@@ -117,7 +117,7 @@ func ReadRPMDetails(rpmPath string) (*models.RPMDetails, error) {
 
 // ReadRPMFiles extracts only the file list with modes and sizes from an RPM header.
 // Used for on-demand package page rendering to avoid keeping millions of file entries in memory.
-func ReadRPMFiles(rpmPath string) ([]models.RPMFile, error) {
+func ReadRPMFiles(rpmPath string) ([]models.PackageFile, error) {
 	// #nosec G304 -- rpmPath is validated against directory traversal by repository discovery
 	f, err := os.Open(filepath.Clean(rpmPath))
 	if err != nil {
@@ -140,9 +140,9 @@ func ReadRPMFiles(rpmPath string) ([]models.RPMFile, error) {
 		return nil, err
 	}
 
-	res := make([]models.RPMFile, 0, len(files))
+	res := make([]models.PackageFile, 0, len(files))
 	for _, fi := range files {
-		res = append(res, models.RPMFile{
+		res = append(res, models.PackageFile{
 			Mode:  formatFileMode(fi.Mode()),
 			User:  fi.UserName(),
 			Group: fi.GroupName(),
@@ -209,8 +209,14 @@ func EnrichPackagesWithRPMDetails(repoDir string, pkgs []*models.Package) {
 				if p.InstalledSize == 0 && details.InstalledSize > 0 {
 					p.InstalledSize = details.InstalledSize
 				}
-				if p.SourceRPM == "" && details.SourceRPM != "" {
-					p.SourceRPM = details.SourceRPM
+				if p.SourcePackage == "" && details.SourcePackage != "" {
+					p.SourcePackage = details.SourcePackage
+				}
+				if p.SourceRPM == "" && details.SourcePackage != "" {
+					p.SourceRPM = details.SourcePackage
+				}
+				if p.Format == "" {
+					p.Format = models.FormatRPM
 				}
 			}
 		}()

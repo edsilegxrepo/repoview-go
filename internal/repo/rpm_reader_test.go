@@ -38,8 +38,8 @@ func TestReadRPMDetails(t *testing.T) {
 		t.Errorf("expected non-empty BuildHost")
 	}
 
-	if details.SourceRPM == "" {
-		t.Errorf("expected non-empty SourceRPM")
+	if details.SourcePackage == "" {
+		t.Errorf("expected non-empty SourcePackage")
 	}
 
 	if details.InstalledSize == 0 {
@@ -83,5 +83,17 @@ func TestEnrichPackagesWithRPMDetails(t *testing.T) {
 
 	if pkg.BuildHost == "" {
 		t.Errorf("expected pkg.BuildHost to be populated")
+	}
+
+	if pkg.SourceRPM == "" {
+		t.Errorf("expected pkg.SourceRPM to be backfilled")
+	}
+
+	if pkg.SourcePackage == "" {
+		t.Errorf("expected pkg.SourcePackage to be backfilled")
+	}
+
+	if pkg.Format != models.FormatRPM {
+		t.Errorf("expected pkg.Format to be %s, got %s", models.FormatRPM, pkg.Format)
 	}
 }

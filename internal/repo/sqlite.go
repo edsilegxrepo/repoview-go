@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -125,7 +126,7 @@ func NewRepositoryAccess(primaryPath, otherPath string) (*RepositoryAccess, erro
 }
 
 // Close closes the database connections and all cached prepared statements
-func (r *RepositoryAccess) Close() {
+func (r *RepositoryAccess) Close() error {
 	if r.changelogStmt != nil {
 		_ = r.changelogStmt.Close()
 	}
@@ -142,8 +143,9 @@ func (r *RepositoryAccess) Close() {
 		_ = r.obsStmt.Close()
 	}
 	if r.PrimaryDB != nil {
-		_ = r.PrimaryDB.Close()
+		return r.PrimaryDB.Close()
 	}
+	return nil
 }
 
 // GetAllPackages retrieves all packages from the primary database
@@ -188,10 +190,12 @@ func (r *RepositoryAccess) GetAllPackages() ([]*models.Package, error) {
 		p.URL = url.String
 		p.License = license.String
 		p.SourceRPM = sourceRPM.String
+		p.SourcePackage = sourceRPM.String
 		p.Vendor = vendor.String
 		p.RpmGroup = group.String
 		p.BuildHost = buildHost.String
 		p.InstalledSize = installedSize.Int64
+		p.Format = models.FormatRPM
 
 		packages = append(packages, &p)
 	}
@@ -417,3 +421,24 @@ func (r *RepositoryAccess) GetPackageDependencies(pkgKey int64) (*models.Package
 
 	return deps, nil
 }
+
+// EnrichPackageDetails concurrently parses the local RPM files for all packages
+// and populates deep inspection details (scriptlets, signatures, files).
+func (r *RepositoryAccess) EnrichPackageDetails(repoDir string, pkgs []*models.Package) {
+	EnrichPackagesWithRPMDetails(repoDir, pkgs)
+}
+
+// ReadPackageFiles extracts on-demand file manifests during page render.
+func (r *RepositoryAccess) ReadPackageFiles(repoDir string, pkg *models.Package) ([]models.PackageFile, error) {
+	if pkg.LocationHref == "" {
+		return nil, nil
+	}
+	rpmPath := filepath.Join(repoDir, pkg.LocationHref)
+	rel, err := filepath.Rel(repoDir, rpmPath)
+	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return nil, fmt.Errorf("invalid package location: %s", pkg.LocationHref)
+	}
+	return ReadRPMFiles(rpmPath)
+}
+
+var _ RepoReader = (*RepositoryAccess)(nil)

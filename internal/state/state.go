@@ -32,6 +32,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/edsilegxrepo/repoview/internal/util"
 )
 
 // StateStore manages the incremental build state to optimize subsequent runs.
@@ -107,11 +109,12 @@ func (s *StateStore) Save() error {
 	}
 
 	tmpPath := s.path + ".tmp"
-	// #nosec G304 -- tmpPath is internal state store path; permissions 0600 prevent unauthorized state access
-	f, err := os.OpenFile(filepath.Clean(tmpPath), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// #nosec G304, G306 -- tmpPath is internal state store path; permissions ensure standard readability
+	f, err := os.OpenFile(filepath.Clean(tmpPath), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, util.DefaultFilePerm)
 	if err != nil {
 		return fmt.Errorf("failed to create temporary state file: %w", err)
 	}
+	_ = os.Chmod(tmpPath, util.DefaultFilePerm)
 
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")

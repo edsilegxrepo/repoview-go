@@ -7,13 +7,13 @@
 // the generation pipeline.
 //
 // CORE COMPONENTS:
-//   - Package: Core entity representing an RPM package, enriched with changelogs, dependencies,
-//     and binary header inspections.
-//   - DependencyEntry: A single RPM prerequisite, capability, conflict, or obsoletion.
-//   - PackageDependencies: Aggregate collection of all 4 dependency vectors.
-//   - RPMDetails: Deep inspection details from the RPM package header (scriptlets, signatures, files).
-//   - RPMScriptlets: Pre/post install and uninstall shell scripts.
-//   - RPMFile: Individual installed file path with permissions and size.
+//   - Package: Core entity representing a package, enriched with changelogs, dependencies,
+//     and binary archive inspections.
+//   - DependencyEntry: A single prerequisite, capability, conflict, or obsoletion.
+//   - PackageDependencies: Aggregate collection of dependency vectors.
+//   - PackageDetails: Deep inspection details from the package header/archive (scriptlets, signatures, files).
+//   - PackageScriptlets: Pre/post install and uninstall shell scripts.
+//   - PackageFile: Individual installed file path with permissions and size.
 //   - ChangelogEntry: Historical package changelog note with date and author.
 //
 // FUNCTIONALITY:
@@ -35,35 +35,50 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
 
-// Package represents a row in the packages table of primary.sqlite, enriched
+// RepoFormat identifies the underlying distribution packaging system.
+type RepoFormat string
+
+const (
+	FormatRPM RepoFormat = "rpm"
+	FormatDEB RepoFormat = "deb"
+)
+
+// Package represents a package row in primary.sqlite or deb822 Packages index, enriched
 // with metadata from other repository sources during processing.
 type Package struct {
-	PkgKey       int64  `db:"pkgKey"`        // Primary key in SQLite primary.sqlite database
+	PkgKey       int64  `db:"pkgKey"`        // Primary key in SQLite primary.sqlite database (or synthetic key)
 	Name         string `db:"name"`          // Package name (e.g. "nginx", "kernel")
-	Epoch        string `db:"epoch"`         // RPM epoch number ("0" if unversioned)
+	Epoch        string `db:"epoch"`         // Epoch number ("0" if unversioned)
 	Version      string `db:"version"`       // Upstream source version (e.g. "1.20.1")
-	Release      string `db:"release"`       // Distribution release string (e.g. "10.el9")
-	Arch         string `db:"arch"`          // Hardware architecture ("x86_64", "noarch", "src")
+	Release      string `db:"release"`       // Distribution release string (e.g. "10.el9", "1ubuntu1")
+	Arch         string `db:"arch"`          // Hardware architecture ("x86_64", "amd64", "noarch", "all")
 	Summary      string `db:"summary"`       // Short one-line summary of package function
 	Description  string `db:"description"`   // Full multi-line package description
 	URL          string `db:"url"`           // Upstream project homepage URL
 	TimeBuild    int64  `db:"time_build"`    // Unix build timestamp
 	License      string `db:"rpm_license"`   // Software license identifier (e.g. "GPL-2.0-or-later")
 	SourceRPM    string `db:"rpm_sourcerpm"` // Source RPM package name from which this was built
-	SizePackage  int64  `db:"size_package"`  // Compressed RPM package file size in bytes
-	LocationHref string `db:"location_href"` // Relative path to the RPM file in the repository
+	SizePackage  int64  `db:"size_package"`  // Compressed package file size in bytes
+	LocationHref string `db:"location_href"` // Relative path to the package file in the repository
 	Vendor       string `db:"rpm_vendor"`    // Organization or entity packaging this RPM
 	RpmGroup     string `db:"rpm_group"`     // Legacy RPM group string from spec file
 
 	BuildHost     string `db:"rpm_buildhost"`  // Hostname of the builder system
 	InstalledSize int64  `db:"size_installed"` // Uncompressed disk footprint in bytes
 
+	// Format and cross-platform extensions
+	Format        RepoFormat `json:"format,omitempty"`         // "rpm" or "deb"
+	Maintainer    string     `json:"maintainer,omitempty"`     // Debian maintainer (RFC 822 string)
+	SourcePackage string     `json:"source_package,omitempty"` // Format-agnostic source package name
+	Section       string     `json:"section,omitempty"`        // Format-agnostic taxonomy / section
+	SHA256        string     `json:"sha256,omitempty"`         // Package SHA256 digest from index
+
 	// Enriched fields - populated during processing
-	Changelog    *ChangelogEntry      // Latest changelog entry, fetched from other.sqlite
+	Changelog    *ChangelogEntry      // Latest changelog entry, fetched from other.sqlite or deb changelog
 	AllVersions  []*Package           // List of all versions of this package (for detail page history)
-	Group        string               // Resolved functional group name (from Comps or RPM header)
-	Details      *RPMDetails          // Deep RPM inspection metadata (scriptlets, signatures, files)
-	Dependencies *PackageDependencies // RPM dependencies (requires, provides, conflicts, obsoletes)
+	Group        string               // Resolved functional group name (from Comps, Section, or RPM header)
+	Details      *PackageDetails      // Deep package inspection metadata (scriptlets, signatures, files)
+	Dependencies *PackageDependencies // Package dependencies (requires, provides, conflicts, obsoletes, recommends, suggests)
 }
 
 // DependencyEntry represents a single RPM dependency requirement, capability, conflict, or obsoletion.
@@ -113,34 +128,36 @@ func (d *DependencyEntry) FormattedRelation() string {
 	return evr
 }
 
-// PackageDependencies aggregates all dependency vectors for an RPM package.
+// PackageDependencies aggregates all dependency vectors for a package.
 type PackageDependencies struct {
-	Requires  []*DependencyEntry `json:"requires,omitempty"`  // Mandatory prerequisite capabilities
-	Provides  []*DependencyEntry `json:"provides,omitempty"`  // Capabilities offered by this package
-	Conflicts []*DependencyEntry `json:"conflicts,omitempty"` // Incompatible conflicting packages
-	Obsoletes []*DependencyEntry `json:"obsoletes,omitempty"` // Legacy packages replaced by this one
+	Requires   []*DependencyEntry `json:"requires,omitempty"`   // Mandatory prerequisite capabilities (RPM Requires, DEB Depends & Pre-Depends)
+	Provides   []*DependencyEntry `json:"provides,omitempty"`   // Capabilities offered by this package
+	Conflicts  []*DependencyEntry `json:"conflicts,omitempty"`  // Incompatible conflicting packages (RPM Conflicts, DEB Conflicts & Breaks)
+	Obsoletes  []*DependencyEntry `json:"obsoletes,omitempty"`  // Legacy packages replaced by this one (RPM Obsoletes, DEB Replaces)
+	Recommends []*DependencyEntry `json:"recommends,omitempty"` // Strong suggestions (DEB Recommends)
+	Suggests   []*DependencyEntry `json:"suggests,omitempty"`   // Optional enhancements (DEB Suggests)
 }
 
-// HasAny returns true if at least one dependency relationship exists across all 4 vectors.
+// HasAny returns true if at least one dependency relationship exists across all vectors.
 func (pd *PackageDependencies) HasAny() bool {
-	return pd != nil && (len(pd.Requires) > 0 || len(pd.Provides) > 0 || len(pd.Conflicts) > 0 || len(pd.Obsoletes) > 0)
+	return pd != nil && (len(pd.Requires) > 0 || len(pd.Provides) > 0 || len(pd.Conflicts) > 0 || len(pd.Obsoletes) > 0 || len(pd.Recommends) > 0 || len(pd.Suggests) > 0)
 }
 
-// RPMDetails stores deep inspection information extracted from the RPM package header.
-type RPMDetails struct {
-	BuildHost     string         `json:"build_host,omitempty"`     // Builder host FQDN
-	SourceRPM     string         `json:"source_rpm,omitempty"`     // Source RPM archive name
-	InstalledSize int64          `json:"installed_size,omitempty"` // Total uncompressed bytes on disk
-	Signature     string         `json:"signature,omitempty"`      // GPG/PGP signature summary string
-	KeyID         string         `json:"key_id,omitempty"`         // Hexadecimal GPG signing Key ID
-	SigType       string         `json:"sig_type,omitempty"`       // Signature digest type (e.g. RSA/SHA256)
-	SigDate       string         `json:"sig_date,omitempty"`       // Human-readable signing date
-	Scriptlets    *RPMScriptlets `json:"scriptlets,omitempty"`     // Shell installation hooks
-	Files         []RPMFile      `json:"files,omitempty"`          // Installed file manifest
+// PackageDetails stores deep inspection information extracted from the package header or archive.
+type PackageDetails struct {
+	BuildHost     string             `json:"build_host,omitempty"`     // Builder host FQDN
+	SourcePackage string             `json:"source_package,omitempty"` // Format-agnostic source package/archive name
+	InstalledSize int64              `json:"installed_size,omitempty"` // Total uncompressed bytes on disk
+	Signature     string             `json:"signature,omitempty"`      // GPG/PGP signature summary string
+	KeyID         string             `json:"key_id,omitempty"`         // Hexadecimal GPG signing Key ID
+	SigType       string             `json:"sig_type,omitempty"`       // Signature digest type (e.g. RSA/SHA256)
+	SigDate       string             `json:"sig_date,omitempty"`       // Human-readable signing date
+	Scriptlets    *PackageScriptlets `json:"scriptlets,omitempty"`     // Shell installation hooks
+	Files         []PackageFile      `json:"files,omitempty"`          // Installed file manifest
 }
 
-// RPMScriptlets stores shell scripts executed during package installation and removal cycles.
-type RPMScriptlets struct {
+// PackageScriptlets stores shell scripts executed during package installation and removal cycles.
+type PackageScriptlets struct {
 	PreIn      string `json:"prein,omitempty"`       // Pre-install script body
 	PreInProg  string `json:"prein_prog,omitempty"`  // Pre-install interpreter (e.g. "/bin/sh")
 	PostIn     string `json:"postin,omitempty"`      // Post-install script body
@@ -152,12 +169,12 @@ type RPMScriptlets struct {
 }
 
 // HasAny returns true if at least one installation or removal scriptlet body exists.
-func (s *RPMScriptlets) HasAny() bool {
+func (s *PackageScriptlets) HasAny() bool {
 	return s != nil && (s.PreIn != "" || s.PostIn != "" || s.PreUn != "" || s.PostUn != "")
 }
 
-// RPMFile represents a single installed file and its metadata extracted from the RPM cpio header.
-type RPMFile struct {
+// PackageFile represents a single installed file and its metadata extracted from the package archive.
+type PackageFile struct {
 	Mode  string `json:"mode"`  // POSIX permissions (e.g. "-rwxr-xr-x")
 	User  string `json:"user"`  // Owning user name (e.g. "root")
 	Group string `json:"group"` // Owning group name (e.g. "root")
@@ -172,14 +189,44 @@ type ChangelogEntry struct {
 	Changelog string `db:"changelog"` // Changelog entry description text
 }
 
-// EVR returns the Epoch-Version-Release tuple string in standard RPM notation.
-// If epoch is empty, "0" is defaulted.
+// EVR returns the Epoch-Version-Release tuple string.
+// For Debian packages, returns standard Debian version string (omitting epoch if 0 or empty).
+// For RPM packages, returns Epoch:Version-Release notation (defaulting epoch to "0").
 func (p *Package) EVR() string {
+	if p.Format == FormatDEB {
+		ver := p.Version
+		if p.Release != "" {
+			ver = ver + "-" + p.Release
+		}
+		if p.Epoch != "" && p.Epoch != "0" {
+			ver = p.Epoch + ":" + ver
+		}
+		return ver
+	}
 	e := p.Epoch
 	if e == "" {
 		e = "0"
 	}
 	return e + ":" + p.Version + "-" + p.Release
+}
+
+// VersionRelease returns the formatted version and release string.
+// If Release is empty (as in native Debian packages), it cleanly omits the trailing dash.
+// If Epoch is set and non-zero, it is prepended (e.g. "1:1.20-1.el9").
+func (p *Package) VersionRelease() string {
+	ver := p.Version
+	if p.Release != "" {
+		ver = ver + "-" + p.Release
+	}
+	if p.Epoch != "" && p.Epoch != "0" {
+		ver = p.Epoch + ":" + ver
+	}
+	return ver
+}
+
+// VR is a convenient alias for VersionRelease.
+func (p *Package) VR() string {
+	return p.VersionRelease()
 }
 
 // Filename generates a safe, unique filename for the package's HTML page.
@@ -190,11 +237,23 @@ func (p *Package) Filename() string {
 	return util.SanitizeFilename(p.Name) + ".html"
 }
 
-// RPMFilename returns the base filename of the RPM package, deriving it from
-// LocationHref if available, or formatting standard N-V-R.A.rpm.
-func (p *Package) RPMFilename() string {
+// ArchiveFilename returns the base filename of the package archive (.rpm or .deb),
+// deriving it from LocationHref if available, or formatting standard naming.
+func (p *Package) ArchiveFilename() string {
 	if p.LocationHref != "" {
 		return filepath.Base(p.LocationHref)
 	}
+	if p.Format == FormatDEB {
+		ver := p.Version
+		if p.Release != "" {
+			ver = ver + "-" + p.Release
+		}
+		return fmt.Sprintf("%s_%s_%s.deb", p.Name, ver, p.Arch)
+	}
 	return fmt.Sprintf("%s-%s-%s.%s.rpm", p.Name, p.Version, p.Release, p.Arch)
+}
+
+// RPMFilename returns the base filename of the package (alias for ArchiveFilename).
+func (p *Package) RPMFilename() string {
+	return p.ArchiveFilename()
 }

@@ -1,11 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <title>RepoView: {{ .Repo.Title }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    (function() {
+      var theme = localStorage.getItem("repoview-theme") || "dark";
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
   <link rel="stylesheet" href="layout/repostyle.css" type="text/css">
-  {{ if .URL }}<link rel="alternate" type="application/rss+xml" title="RSS" href="latest-feed.xml">{{ end }}
+  <link rel="alternate" type="application/rss+xml" title="RSS" href="latest-feed.xml">
   <meta name="robots" content="index,follow">
 </head>
 <body>
@@ -21,18 +27,25 @@
                     <span>{{ .Repo.Title }}</span>
                 </a>
                 <div class="header-actions">
-                    <button id="themeToggleBtn" class="icon-btn" title="Toggle theme">
-                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
-                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                    <button id="themeToggleBtn" class="icon-btn" title="Switch to light theme">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="5"></circle>
+                            <line x1="12" y1="1" x2="12" y2="3"></line>
+                            <line x1="12" y1="21" x2="12" y2="23"></line>
+                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                            <line x1="1" y1="12" x2="3" y2="12"></line>
+                            <line x1="21" y1="12" x2="23" y2="12"></line>
+                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
                         </svg>
                     </button>
-                    <button type="button" class="icon-btn btn-open-repo-modal" title="Configure DNF/YUM Repository (.repo file)" aria-haspopup="dialog" aria-controls="repoConfigModal">
+                    <button type="button" class="icon-btn btn-open-repo-modal" title="Configure {{ if eq .Repo.Format "deb" }}APT Repository (.sources file){{ else }}DNF/YUM Repository (.repo file){{ end }}" aria-haspopup="dialog" aria-controls="repoConfigModal">
                         <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
                             <circle cx="12" cy="12" r="3"></circle>
                             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
                         </svg>
                     </button>
-                    {{ if .URL }}
                     <a href="latest-feed.xml" class="icon-btn" title="RSS Feed" target="_blank">
                         <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
                             <path d="M4 11a9 9 0 0 1 9 9"></path>
@@ -40,7 +53,6 @@
                             <circle cx="5" cy="19" r="1"></circle>
                         </svg>
                     </a>
-                    {{ end }}
                 </div>
             </div>
             <div class="search-container">
@@ -144,13 +156,13 @@
                     </div>
                 </div>
                 {{ end }}
-                <button type="button" class="btn-configure-repo btn-open-repo-modal" title="Configure DNF/YUM Repository">
+                <button type="button" class="btn-configure-repo btn-open-repo-modal" title="Configure {{ if eq .Repo.Format "deb" }}APT Repository{{ else }}DNF/YUM Repository{{ end }}">
                     <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                         <polyline points="7 10 12 15 17 10"></polyline>
                         <line x1="12" y1="15" x2="12" y2="3"></line>
                     </svg>
-                    <span>Configure DNF / YUM (.repo)</span>
+                    <span>Configure {{ if eq .Repo.Format "deb" }}APT (.sources){{ else }}DNF / YUM (.repo){{ end }}</span>
                 </button>
                 <div class="stat-label">Generated: {{ now | ymd }}</div>
             </div>
@@ -211,7 +223,7 @@
                                 <span class="date-badge">{{ .TimeBuild | ymd }}</span>
                             </td>
                             <td>
-                                <a href="{{ .Filename }}" class="pkg-name-link">{{ .Name }}-{{ .Version }}-{{ .Release }}</a>
+                                <a href="{{ .Filename }}" class="pkg-name-link">{{ .Name }}-{{ .VersionRelease }}</a>
                                 <span class="arch-badge" style="margin-left: 0.5rem;">{{ .Arch }}</span>
                             </td>
                             <td style="text-align: right;">
@@ -247,22 +259,29 @@
             <div class="modal-body">
                 <div class="modal-section">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <label class="modal-label">1. Repository Configuration File (.repo)</label>
-                        <button type="button" class="cmd-copy-btn" id="btnDownloadRepoFile" title="Download .repo file directly to your computer">
+                        <label class="modal-label">{{ if eq .Repo.Format "deb" }}1. APT Sources Configuration (.sources){{ else }}1. Repository Configuration File (.repo){{ end }}</label>
+                        <button type="button" class="cmd-copy-btn" id="btnDownloadRepoFile" title="Download configuration file directly to your computer">
                             <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                                 <polyline points="7 10 12 15 17 10"></polyline>
                                 <line x1="12" y1="15" x2="12" y2="3"></line>
                             </svg>
-                            <span>Download .repo</span>
+                            <span>Download {{ if eq .Repo.Format "deb" }}.sources{{ else }}.repo{{ end }}</span>
                         </button>
                     </div>
                     <div class="repo-snippet-box">
+                        {{ if eq .Repo.Format "deb" }}
+                        <pre><code id="repoSnippetCode" data-configured-baseurl="{{ .Repo.BaseURL }}">Types: deb
+URIs: {{ if .Repo.BaseURL }}{{ .Repo.BaseURL }}{{ else }}$URL{{ end }}
+Suites: ./
+Trusted: yes</code></pre>
+                        {{ else }}
                         <pre><code id="repoSnippetCode" data-configured-baseurl="{{ .Repo.BaseURL }}">[{{ if .Repo.RepoID }}{{ .Repo.RepoID }}{{ else }}custom-repository{{ end }}]
 name={{ .Repo.Title }}
 baseurl={{ if .Repo.BaseURL }}{{ .Repo.BaseURL }}{{ else }}$URL{{ end }}
 enabled=1
 gpgcheck=0</code></pre>
+                        {{ end }}
                         <button type="button" class="cmd-copy-btn repo-copy-float" id="btnCopyRepoSnippet" title="Copy configuration snippet">
                             <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
@@ -276,6 +295,14 @@ gpgcheck=0</code></pre>
                 <div class="modal-section">
                     <label class="modal-label">2. Fast 1-Line Setup on Linux</label>
                     <div class="cmd-box">
+                        {{ if eq .Repo.Format "deb" }}
+                        <code id="repoFastSetupCmd" data-configured-baseurl="{{ .Repo.BaseURL }}">sudo tee /etc/apt/sources.list.d/{{ if .Repo.RepoID }}{{ .Repo.RepoID }}{{ else }}repo{{ end }}.sources &gt; /dev/null &lt;&lt; 'EOF'
+Types: deb
+URIs: {{ if .Repo.BaseURL }}{{ .Repo.BaseURL }}{{ else }}$URL{{ end }}
+Suites: ./
+Trusted: yes
+EOF &amp;&amp; sudo apt update</code>
+                        {{ else }}
                         <code id="repoFastSetupCmd" data-configured-baseurl="{{ .Repo.BaseURL }}">sudo tee /etc/yum.repos.d/{{ if .Repo.RepoID }}{{ .Repo.RepoID }}{{ else }}repo{{ end }}.repo &gt; /dev/null &lt;&lt; 'EOF'
 [{{ if .Repo.RepoID }}{{ .Repo.RepoID }}{{ else }}custom-repository{{ end }}]
 name={{ .Repo.Title }}
@@ -283,6 +310,7 @@ baseurl={{ if .Repo.BaseURL }}{{ .Repo.BaseURL }}{{ else }}$URL{{ end }}
 enabled=1
 gpgcheck=0
 EOF</code>
+                        {{ end }}
                         <button type="button" class="cmd-copy-btn" id="btnCopyFastSetup" title="Copy setup script">
                             <span class="copy-text">Copy</span>
                         </button>

@@ -19,6 +19,7 @@ import (
 
 	"github.com/edsilegxrepo/repoview/internal/app"
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/util"
 )
 
 // TEST STRATEGY:
@@ -94,6 +95,16 @@ func TestLive_EndToEndWorkflow(t *testing.T) {
 		if fi.Size() == 0 {
 			t.Errorf("generated file is empty: %s", p)
 		}
+		if perm := fi.Mode().Perm(); perm != util.DefaultFilePerm {
+			t.Errorf("expected %04o file permissions for %s, got %04o", util.DefaultFilePerm, f, perm)
+		}
+	}
+
+	layoutDirInfo, err := os.Stat(filepath.Join(outDir, "layout"))
+	if err != nil {
+		t.Errorf("failed to stat layout directory: %v", err)
+	} else if perm := layoutDirInfo.Mode().Perm(); perm != util.DefaultDirPerm {
+		t.Errorf("expected %04o permissions for layout directory, got %04o", util.DefaultDirPerm, perm)
 	}
 
 	// 3. Start live HTTP server on ephemeral port to simulate real production client access

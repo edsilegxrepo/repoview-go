@@ -10,6 +10,7 @@ import (
 
 	"github.com/edsilegxrepo/repoview/internal/logic"
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/util"
 )
 
 // TEST STRATEGY:
@@ -97,10 +98,26 @@ func TestTemplateRendering(t *testing.T) {
 		t.Fatalf("WriteAssets failed: %v", err)
 	}
 
-	// 5. Test Atomic WriteToFile
+	layoutDirInfo, err := os.Stat(filepath.Join(r.OutDir, "layout"))
+	if err != nil {
+		t.Fatalf("failed to stat layout dir: %v", err)
+	}
+	if perm := layoutDirInfo.Mode().Perm(); perm != util.DefaultDirPerm {
+		t.Errorf("expected layout dir to have %04o permissions, got %04o", util.DefaultDirPerm, perm)
+	}
+
+	// 5. Test Atomic WriteToFile with permissions check
 	testContent := []byte("<!DOCTYPE html><html><body>atomic content</body></html>")
 	if err := r.WriteToFile("testpage.html", testContent); err != nil {
 		t.Fatalf("WriteToFile failed: %v", err)
+	}
+
+	fileInfo, err := os.Stat(filepath.Join(r.OutDir, "testpage.html"))
+	if err != nil {
+		t.Fatalf("failed to stat written testpage.html: %v", err)
+	}
+	if perm := fileInfo.Mode().Perm(); perm != util.DefaultFilePerm {
+		t.Errorf("expected written file to have %04o permissions, got %04o", util.DefaultFilePerm, perm)
 	}
 
 	// 6. Test Path Traversal Protection
@@ -220,5 +237,96 @@ func TestRenderer_TemplateFunctions(t *testing.T) {
 	res := buf.String()
 	if !strings.Contains(res, "50.0%") {
 		t.Errorf("expected 50.0%% in compression savings, got: %s", res)
+	}
+}
+
+func TestRenderer_DebianRendering(t *testing.T) {
+	outDir := t.TempDir()
+	r, err := NewRenderer(outDir, "", "Debian Test Repo", "1.0", []string{"N"})
+	if err != nil {
+		t.Fatalf("failed to create renderer: %v", err)
+	}
+	r.SetFormat(models.FormatDEB)
+
+	debPkg := &models.Package{
+		Format:        models.FormatDEB,
+		Name:          "nginx",
+		Version:       "1.24.0",
+		Release:       "2",
+		Arch:          "amd64",
+		Summary:       "small, powerful, scalable web/proxy server",
+		Description:   "Detailed Debian package description.",
+		Maintainer:    "Debian Nginx Maintainers <pkg-nginx-maintainers@example.com>",
+		Section:       "httpd",
+		SizePackage:   500000,
+		InstalledSize: 1500000,
+		LocationHref:  "pool/main/n/nginx/nginx_1.24.0-2_amd64.deb",
+		Dependencies: &models.PackageDependencies{
+			Requires: []*models.DependencyEntry{
+				{Name: "libc6", Flags: ">=", Version: "2.34"},
+			},
+			Recommends: []*models.DependencyEntry{
+				{Name: "logrotate"},
+			},
+		},
+		Details: &models.PackageDetails{
+			Scriptlets: &models.PackageScriptlets{
+				PostIn: "/usr/sbin/service nginx start",
+			},
+		},
+	}
+	debPkg.AllVersions = []*models.Package{debPkg}
+
+	group := &logic.GroupData{
+		ID:       "httpd",
+		Name:     "httpd",
+		Filename: "httpd.group.html",
+		Packages: []*models.Package{debPkg},
+	}
+
+	// 1. RenderPackage verification
+	pkgHTML, err := r.RenderPackage(debPkg, group)
+	if err != nil {
+		t.Fatalf("RenderPackage failed for Debian: %v", err)
+	}
+	pkgStr := string(pkgHTML)
+
+	if !strings.Contains(pkgStr, "sudo apt install nginx") {
+		t.Errorf("expected 'sudo apt install nginx' in package HTML")
+	}
+	if !strings.Contains(pkgStr, "data-tool=\"apt\"") {
+		t.Errorf("expected apt install tab in package HTML")
+	}
+	if !strings.Contains(pkgStr, "data-tool=\"dpkg\"") {
+		t.Errorf("expected dpkg install tab in package HTML")
+	}
+	if !strings.Contains(pkgStr, "Debian Nginx Maintainers") {
+		t.Errorf("expected maintainer in package HTML")
+	}
+	if !strings.Contains(pkgStr, "Depends (1)") {
+		t.Errorf("expected 'Depends (1)' tab in package HTML")
+	}
+	if !strings.Contains(pkgStr, "Recommends (1)") {
+		t.Errorf("expected 'Recommends (1)' tab in package HTML")
+	}
+	if !strings.Contains(pkgStr, "postinst maintainer script:") {
+		t.Errorf("expected postinst maintainer script header in package HTML")
+	}
+	if !strings.Contains(pkgStr, "nginx_1.24.0-2_amd64.deb") {
+		t.Errorf("expected debian archive filename in package HTML")
+	}
+
+	// 2. RenderIndex verification
+	idxHTML, err := r.RenderIndex([]*logic.GroupData{group}, []*models.Package{debPkg}, "http://example.com/debian")
+	if err != nil {
+		t.Fatalf("RenderIndex failed for Debian: %v", err)
+	}
+	idxStr := string(idxHTML)
+
+	if !strings.Contains(idxStr, "Types: deb") {
+		t.Errorf("expected 'Types: deb' snippet in index HTML")
+	}
+	if !strings.Contains(idxStr, ".sources") {
+		t.Errorf("expected '.sources' in index HTML")
 	}
 }

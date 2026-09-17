@@ -266,7 +266,66 @@ func (s *GroupingService) getCompsGroups() []*GroupData {
 	return groups
 }
 
-// getRpmGroups organizes packages based on their embedded RPM Group header.
+// MapDebianSectionToGroup maps standard Debian/Ubuntu package sections
+// to canonical Repoview taxonomy categories.
+func MapDebianSectionToGroup(section string) string {
+	s := strings.ToLower(strings.TrimSpace(section))
+	// Strip component prefix if present (e.g. "main/devel" -> "devel", "universe/web" -> "web")
+	if idx := strings.LastIndex(s, "/"); idx != -1 {
+		s = s[idx+1:]
+	}
+
+	switch s {
+	case "admin":
+		return "applications/system"
+	case "cli-mono", "gnu-r", "haskell", "interpreters", "java", "javascript", "lisp", "ocaml", "perl", "php", "python", "ruby", "rust":
+		return "development/languages"
+	case "comm", "hamradio":
+		return "applications/communications"
+	case "database":
+		return "applications/databases"
+	case "debug":
+		return "development/debug"
+	case "devel", "vcs":
+		return "development/tools"
+	case "doc":
+		return "documentation"
+	case "editors":
+		return "applications/editors"
+	case "education":
+		return "applications/education"
+	case "electronics", "embedded", "math", "science":
+		return "applications/engineering"
+	case "fonts", "x11":
+		return "user interface/x"
+	case "games":
+		return "amusements/games"
+	case "gnome", "gnustep", "kde", "xfce":
+		return "user interface/desktops"
+	case "graphics", "sound", "video":
+		return "applications/multimedia"
+	case "httpd", "web", "net", "mail", "news", "zope":
+		return "applications/internet"
+	case "introspection", "libdevel", "libs", "oldlibs":
+		return "development/libraries"
+	case "kernel":
+		return "system environment/kernel"
+	case "shells":
+		return "system/shells"
+	case "tex":
+		return "applications/publishing"
+	case "text":
+		return "applications/text"
+	case "utils":
+		return "applications/system"
+	case "default", "unspecified", "unknown", "misc", "":
+		return ""
+	default:
+		return ""
+	}
+}
+
+// getRpmGroups organizes packages based on their embedded RPM Group header or Debian Section.
 // This is used as a fallback strategy when 'comps.xml' is not present.
 func (s *GroupingService) getRpmGroups() []*GroupData {
 	groupsMap := make(map[string]*GroupData)
@@ -287,10 +346,19 @@ func (s *GroupingService) getRpmGroups() []*GroupData {
 		versions := pkgVersions[name]
 		latest := getLatestVersion(versions)
 
-		// Use the group from the latest version.
-		// If unspecified or missing, infer from package name, summary, and description.
+		// Determine the group from latest version's group or section.
 		grpName := strings.TrimSpace(latest.RpmGroup)
-		if grpName == "" || strings.EqualFold(grpName, "unspecified") || strings.EqualFold(grpName, "unknown") {
+
+		// Check Debian section mapping if available
+		if latest.Section != "" {
+			if mapped := MapDebianSectionToGroup(latest.Section); mapped != "" {
+				grpName = mapped
+			}
+		}
+
+		// If unspecified, missing, or generic (e.g. "default", "misc", "unknown"),
+		// infer from package name, summary, and description.
+		if grpName == "" || strings.EqualFold(grpName, "unspecified") || strings.EqualFold(grpName, "unknown") || strings.EqualFold(grpName, "default") || strings.EqualFold(grpName, "misc") {
 			inferred := InferGroupForPackage(latest)
 			if inferred != "" {
 				grpName = inferred
@@ -298,6 +366,13 @@ func (s *GroupingService) getRpmGroups() []*GroupData {
 				grpName = "unspecified"
 			}
 		} else {
+			// For broad categories like "development/tools" or "applications/system",
+			// check if specific package rules can provide higher fidelity (e.g. clamav -> security, proxysql -> databases).
+			if grpName == "development/tools" || grpName == "applications/system" {
+				if specific := InferGroupForPackage(latest); specific != "" && specific != "unspecified" && specific != "development/tools" && specific != "applications/system" {
+					grpName = specific
+				}
+			}
 			// Parity: normalize to lowercase
 			grpName = strings.ToLower(grpName)
 		}
@@ -418,6 +493,24 @@ func InferGroupForPackage(p *models.Package) string {
 	}
 
 	// 2. Specific package prefixes and families
+	if strings.HasPrefix(name, "libreoffice") || strings.HasPrefix(name, "libobasis") || strings.HasPrefix(name, "openoffice") {
+		return "applications/productivity"
+	}
+	if name == "rclone" {
+		return "applications/internet"
+	}
+	if name == "miller" || name == "mlr" {
+		return "applications/text"
+	}
+	if name == "gcsfuse" || strings.Contains(name, "fuse") {
+		if strings.HasSuffix(name, "-libs") || strings.HasSuffix(name, "-devel") {
+			return "system environment/libraries"
+		}
+		return "system environment/base"
+	}
+	if strings.HasPrefix(name, "proxysql") {
+		return "applications/databases"
+	}
 	if strings.HasPrefix(name, "openssh") || strings.HasPrefix(name, "pam_ssh") || strings.Contains(name, "ssh-agent") {
 		return "productivity/networking/ssh"
 	}

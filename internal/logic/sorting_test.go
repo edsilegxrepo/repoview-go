@@ -100,3 +100,73 @@ func TestParseEpoch(t *testing.T) {
 		t.Errorf("expected 5 for epoch '5'")
 	}
 }
+
+func TestCompareVersions_Debian(t *testing.T) {
+	// Tilde sorting: 1.0~beta1 < 1.0
+	p1 := &models.Package{Format: models.FormatDEB, Version: "1.0~beta1", Release: "1"}
+	p2 := &models.Package{Format: models.FormatDEB, Version: "1.0", Release: "1"}
+	if cmp := CompareVersions(p1, p2); cmp >= 0 {
+		t.Errorf("expected 1.0~beta1 < 1.0 in Debian, got %d", cmp)
+	}
+	if cmp := CompareVersions(p2, p1); cmp <= 0 {
+		t.Errorf("expected 1.0 > 1.0~beta1 in Debian, got %d", cmp)
+	}
+
+	// Epoch: 1:1.0 > 2.0
+	pEpoch := &models.Package{Format: models.FormatDEB, Epoch: "1", Version: "1.0", Release: "1"}
+	pNoEpoch := &models.Package{Format: models.FormatDEB, Epoch: "0", Version: "2.0", Release: "1"}
+	if cmp := CompareVersions(pEpoch, pNoEpoch); cmp <= 0 {
+		t.Errorf("expected 1:1.0 > 2.0 in Debian, got %d", cmp)
+	}
+
+	// Revision: 2.0-1 < 2.0-2
+	pRev1 := &models.Package{Format: models.FormatDEB, Version: "2.0", Release: "1"}
+	pRev2 := &models.Package{Format: models.FormatDEB, Version: "2.0", Release: "2"}
+	if cmp := CompareVersions(pRev1, pRev2); cmp >= 0 {
+		t.Errorf("expected 2.0-1 < 2.0-2 in Debian, got %d", cmp)
+	}
+
+	// Identical
+	pIdent1 := &models.Package{Format: models.FormatDEB, Epoch: "1", Version: "2.0", Release: "3"}
+	pIdent2 := &models.Package{Format: models.FormatDEB, Epoch: "1", Version: "2.0", Release: "3"}
+	if cmp := CompareVersions(pIdent1, pIdent2); cmp != 0 {
+		t.Errorf("expected 0 for identical Debian packages, got %d", cmp)
+	}
+}
+
+func TestSortPackagesByEVR_Debian(t *testing.T) {
+	pkgs := []*models.Package{
+		{Format: models.FormatDEB, Name: "pkg", Version: "1.0", Release: "1", Arch: "amd64"},
+		{Format: models.FormatDEB, Name: "pkg", Version: "1.0~rc1", Release: "1", Arch: "amd64"},
+		{Format: models.FormatDEB, Name: "pkg", Epoch: "1", Version: "0.1", Release: "1", Arch: "amd64"},
+		{Format: models.FormatDEB, Name: "pkg", Version: "1.0", Release: "2", Arch: "amd64"},
+		{Format: models.FormatDEB, Name: "pkg", Version: "1.0", Release: "2", Arch: "arm64"},
+	}
+
+	SortPackagesByEVR(pkgs)
+
+	// Expected order (descending EVR, ascending Arch for ties):
+	// 1. 1:0.1-1.amd64 (epoch 1)
+	// 2. 1.0-2.amd64 (arch tie-breaker)
+	// 3. 1.0-2.arm64
+	// 4. 1.0-1.amd64
+	// 5. 1.0~rc1-1.amd64 (tilde sorts before release 1.0)
+
+	expected := []struct {
+		epoch, version, release, arch string
+	}{
+		{"1", "0.1", "1", "amd64"},
+		{"", "1.0", "2", "amd64"},
+		{"", "1.0", "2", "arm64"},
+		{"", "1.0", "1", "amd64"},
+		{"", "1.0~rc1", "1", "amd64"},
+	}
+
+	for i, exp := range expected {
+		p := pkgs[i]
+		if p.Epoch != exp.epoch || p.Version != exp.version || p.Release != exp.release || p.Arch != exp.arch {
+			t.Errorf("pkg[%d] = %s:%s-%s.%s; want %s:%s-%s.%s",
+				i, p.Epoch, p.Version, p.Release, p.Arch, exp.epoch, exp.version, exp.release, exp.arch)
+		}
+	}
+}

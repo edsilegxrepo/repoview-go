@@ -39,13 +39,13 @@ Architectural specification, technical design choices, concurrency patterns, sec
 
 ## 1. Architecture and Design Choices
 
-RepoView-Go is a high-performance, air-gap compliant static site generator engineered to transform RPM repository metadata (`repodata/`) and package headers into a modern, responsive, and easily navigable web portal.
+RepoView-Go is a high-performance, air-gap compliant static site generator engineered to transform RPM repository metadata (`repodata/`) and Debian repository metadata (`dists/` or flat indices) into a modern, responsive, and easily navigable web portal.
 
 ### High-Level Architecture Diagram
 
 ```mermaid
 flowchart TB
-    subgraph Storage["Source RPM Repository"]
+    subgraph StorageRPM["Source RPM Repository"]
         REPOMD["repodata/repomd.xml"]
         PRIMARY_DB[("primary.sqlite\n(.gz/.bz2/.xz/.zst)")]
         OTHER_DB[("other.sqlite\n(changelogs)")]
@@ -53,36 +53,51 @@ flowchart TB
         RPMS["*.rpm Packages\n(headers, scriptlets, files)"]
     end
 
+    subgraph StorageDEB["Source Debian Repository"]
+        DISTS["dists/<suite>/<component>/\nbinary-<arch>/Packages(.gz)"]
+        RELEASE["Release / InRelease"]
+        FLAT["Flat Packages Index"]
+        DEBS["*.deb Packages\n(ar, control.tar, data.tar)"]
+    end
+
     subgraph CLI["CLI Entrypoint (cmd/repoview)"]
-        MAIN["main.go\n• Flag Parsing\n• Safety Validation\n• Exit Code Mapping"]
+        MAIN["main.go\n• Flag Parsing (--format)\n• Safety Validation\n• Exit Code Mapping"]
     end
 
     subgraph CoreEngine["Application Core (internal/app)"]
-        GEN["Generator (generator.go)\n• Orchestration Pipeline\n• Sibling Discovery\n• Stale Cleanup"]
+        GEN["Generator (generator.go)\n• Orchestration Pipeline\n• Format Auto-Detection\n• Sibling Discovery\n• Stale Cleanup"]
         SAFETY["Safety Validator\n• Root Guard\n• Self-Destruct Guard"]
     end
 
     subgraph Ingestion["Repository Access Layer (internal/repo)"]
-        DECOMP["Decompressor (decompress.go)\n• Gzip, Zstd, XZ, Bz2\n• Ephemeral Temp Extraction"]
-        PARSE_MD["Repomd Parser (repomd.go)\n• XML Extraction\n• Path Traversal Neutralization"]
-        PARSE_COMPS["Comps Parser (comps.go)\n• Hierarchical Group Trees\n• Localized String Handling"]
-        SQLITE["SQLite Access (sqlite.go)\n• Connection Pooling\n• Batch Changelog Queries\n• Prepared Statement Cache"]
-        RPM_INSPECT["RPM Reader (rpm_reader.go)\n• Header Inspection\n• Scriptlet Extraction\n• On-Demand File List Extraction"]
+        READER["RepoReader Interface\n(reader.go)"]
+        subgraph RPM_INGEST["RPM Access (sqlite.go, repomd.go)"]
+            DECOMP["Decompressor (decompress.go)"]
+            PARSE_MD["Repomd Parser (repomd.go)"]
+            SQLITE["SQLite Access (sqlite.go)\n• Connection Pooling\n• Batch Changelogs"]
+            RPM_INSPECT["RPM Reader (rpm_reader.go)\n• Headers, Scriptlets, Files"]
+        end
+        subgraph DEB_INGEST["Debian Access (internal/repo/deb)"]
+            DISCOVER["Suite & Arch Discovery (discovery.go)"]
+            DEB_REPO["DebRepository (repository.go)\n• Deb822 Packages Parser"]
+            DEB_DETAILS["Deb Details Reader (details.go)\n• control.tar (Maintainer Scripts)\n• data.tar (File Manifest)\n• ar Build Timestamps"]
+            DEB_CHANGELOG["Changelog Parser (changelog.go)"]
+        end
     end
 
     subgraph Logic["Domain & Business Logic (internal/logic & internal/models)"]
-        MODELS["Models (internal/models)\n• Package, NVRA, EVR\n• Repomd, Comps, SearchDoc"]
+        MODELS["Unified Models (internal/models)\n• Package, PackageDetails\n• PackageFile, PackageScriptlets\n• SourcePackage, EVR"]
         FILTER["Filter Service (filter.go)\n• Glob Name/NVRA Filtering\n• Hardware Arch Filtering"]
-        GROUP["Grouping Service (grouping.go)\n• Comps Category Hierarchy\n• RPM Group Inference Heuristics\n• Alphabetical Letter Buckets"]
-        SORT["Sorting Service (sorting.go)\n• RPM EVR Spec Comparison\n• Epoch Supremacy & Tie-Breaking"]
+        GROUP["Grouping Service (grouping.go)\n• Comps / RPM Groups / Debian Sections\n• Alphabetical Letter Buckets"]
+        SORT["Sorting Service (sorting.go)\n• RPM EVR (go-rpm-version)\n• Debian EVR (pault.ag/go/debian/version)"]
     end
 
     subgraph StateManagement["State & Cache Layer (internal/state)"]
-        STATE["StateStore (state.go)\n• SHA-256 Content Hashing\n• Atomic Temp File Swap\n• Stale File Tracking\n• Thread-Safe Concurrent Read/Write"]
+        STATE["StateStore (state.go)\n• SHA-256 Content Hashing\n• Atomic Temp File Swap\n• Stale File Tracking"]
     end
 
     subgraph Presentation["Presentation Layer (internal/render)"]
-        RENDERER["Renderer (renderer.go)\n• Embedded Go HTML Templates\n• Helper Functions (HumanSize, RSSTime)\n• Custom Template Overrides\n• Static Asset Copying"]
+        RENDERER["Renderer (renderer.go)\n• Embedded Go HTML Templates\n• Helper Functions (HumanSize, RSSTime)\n• .repo / .sources Generation\n• Static Asset Copying"]
         ASSETS["Embedded Assets\n• CSS (Theme, Glassmorphism, Responsive)\n• Vanilla JS Search & Filter Engine\n• Zero External CDNs"]
     end
 
@@ -95,10 +110,12 @@ flowchart TB
         STATIC_FILES["Static CSS / JS / Favicon"]
     end
 
-    REPOMD & PRIMARY_DB & OTHER_DB & COMPS & RPMS --> Ingestion
+    REPOMD & PRIMARY_DB & OTHER_DB & COMPS & RPMS --> RPM_INGEST
+    DISTS & RELEASE & FLAT & DEBS --> DEB_INGEST
+    RPM_INGEST & DEB_INGEST --> READER
     MAIN --> SAFETY --> GEN
-    GEN --> Ingestion
-    Ingestion --> Logic
+    GEN --> READER
+    READER --> Logic
     Logic --> Presentation
     GEN --> Presentation
     GEN --> StateManagement
@@ -113,19 +130,17 @@ The application follows a clean, modular architecture separating concerns betwee
 
 - **`cmd/repoview`**: Entry point and CLI frontend. Handles long-only argument parsing, flag accumulation, directory validation, and exit code mapping before invoking the orchestration layer.
 - **`internal/app`**: Core orchestration layer. The `Generator` struct manages the end-to-end workflow: repository safety validation, metadata loading, package filtering, group tree organization, sibling discovery, parallel rendering scheduling, and stale file cleanup.
-- **`internal/repo`**: Data Access Layer (DAL). Handles:
-  - Parsing `repomd.xml` to locate repository database locations while enforcing path traversal barriers.
-  - Transparent stream decompression for `.gz`, `.bz2`, `.xz`, and `.zst` archives with automatic ephemeral cleanup.
-  - Efficient querying of SQLite databases (`primary.sqlite`, `other.sqlite`) using connection pooling, batch parameter blocks, and prepared statement caching.
-  - Parsing `comps.xml` for category and group definitions.
-  - Direct RPM lead and header inspection for scriptlets, signatures, and on-demand file list extraction.
+- **`internal/repo`**: Data Access Layer (DAL). Unifies package repository access through the `RepoReader` interface:
+  - **`reader.go`**: Defines the format-agnostic `RepoReader` abstraction (`GetAllPackages`, `EnrichPackagesWithDetails`, `EnrichPackagesWithChangelogs`, `ReadPackageFiles`, `Close`).
+  - **RPM Access (`sqlite.go`, `repomd.go`, `rpm_reader.go`)**: Parses `repomd.xml`, decompresses metadata archives, queries `primary.sqlite`/`other.sqlite` with connection pooling and chunked changelog queries, and inspects `.rpm` headers.
+  - **Debian Access (`internal/repo/deb`)**: Discovers `dists/<suite>/<component>/binary-<arch>` layouts and flat trees, streams RFC 822 `Packages` indexes via `pault.ag/go/debian`, extracts maintainer scripts from `control.tar`, extracts file manifests from `data.tar`, parses `changelog.Debian.gz`, and extracts package build timestamps directly from `ar` member headers.
 - **`internal/logic`**: Domain and Business Logic Layer. Contains:
-  - **Grouping**: Organizes packages by Comps categories/groups, RPM header groups with heuristic fallback inference, and alphabetical letter buckets.
-  - **Sorting**: Implements strict upstream RPM Epoch-Version-Release (EVR) comparison semantics using `go-rpm-version`.
+  - **Grouping**: Organizes packages by Comps categories/groups, RPM header groups with heuristic inference, Debian section taxonomies (`admin`, `devel`, `net`, `web`, etc.), and alphabetical letter buckets.
+  - **Sorting**: Implements dual EVR comparison semantics—RPM EVR via `go-rpm-version` and Debian EVR via `pault.ag/go/debian/version`.
   - **Filtering**: Applies glob-based package name/NVRA matching and hardware architecture exclusions (`--ignore-package`, `--exclude-arch`).
-- **`internal/render`**: Presentation Layer. Renders HTML5 pages, RSS 2.0 feeds, and search indices using Go's standard `html/template`. Layout templates and static assets (CSS, Vanilla JS) are compiled into the binary via `embed.FS` for complete portability.
+- **`internal/render`**: Presentation Layer. Renders HTML5 pages, RSS 2.0 feeds, search indices, and client configuration snippets (`.repo` for YUM/DNF and Deb822 `.sources` for APT) using Go's standard `html/template`. Layout templates and static assets (CSS, Vanilla JS) are compiled into the binary via `embed.FS`.
 - **`internal/state`**: State and Cache Management. Maintains an incremental state store (`.state.json`) with SHA-256 content hashing to avoid redundant disk writes, detect modified pages, and identify stale/orphaned files for pruning.
-- **`internal/models`**: Domain data structures representing repository metadata, packages, dependencies, scriptlets, comps definitions, and search index documents.
+- **`internal/models`**: Generalized, format-agnostic domain data structures representing repository metadata, packages (`Package`, `PackageDetails`, `PackageFile`, `PackageScriptlets`, `SourcePackage`), dependencies, comps definitions, and search index documents.
 - **`internal/util`**: Low-level formatting, temporal conversions (RFC 822 / RFC 1123), binary byte size calculations (KiB, MiB, GiB, TiB), and secure filename sanitization routines.
 
 ### Architectural Design Patterns
@@ -143,8 +158,10 @@ The application follows a clean, modular architecture separating concerns betwee
 2. **Air-Gap Compliance (Zero External Network Calls)**:
    - Enterprise repositories frequently reside in high-security, network-isolated environments (e.g., DoD air-gapped enclaves, offline air-cooled datacenters, VPC private subnets).
    - RepoView-Go bundles 100% of its presentation dependencies (fonts, styles, icons, search scripts) as embedded Go assets (`embed.FS`). Zero external requests to CDN fonts, analytics, or third-party CDNs are emitted.
-3. **Dual-Format Metadata Compatibility**:
-   - RPM repositories generated across distinct tooling generations (original `createrepo`, modern `createrepo_c`, or DNF/RHEL repositories) exhibit format variations. RepoView-Go supports XML revision tracking as both an attribute (`<repomd revision="...">`) and a child element (`<revision>...</revision>`).
+3. **Multi-Format Repository Architecture (RPM & Debian)**:
+   - RepoView-Go decouples presentation and organization from underlying packaging formats through a unified `RepoReader` interface.
+   - RPM repositories generated across distinct tooling generations (original `createrepo`, modern `createrepo_c`, or DNF/RHEL) are parsed via SQLite and `repomd.xml`.
+   - Debian and Ubuntu repositories are ingested via standard `dists/<suite>/<component>/binary-<arch>` structures or flat layouts, with native support for Deb822 indexes and `ar`/`tar` archive inspection.
 4. **State-Driven Incremental Builds**:
    - Repository regeneration avoids redundant disk I/O. The `StateStore` tracks SHA-256 content hashes of all generated artifacts. If package metadata has not changed, write operations are omitted, reducing run times by >90% on subsequent updates.
 5. **Streaming & Bounded Resident Memory**:
@@ -152,7 +169,7 @@ The application follows a clean, modular architecture separating concerns betwee
 
 ### Foundational Assumptions
 
-- **Repository Structure**: The input target must be a readable directory conforming to standard RPM repository conventions (containing a `repodata/` directory with `repomd.xml` and SQLite databases).
+- **Repository Structure**: The input target must be a readable directory conforming to standard RPM repository conventions (containing `repodata/` with `repomd.xml`) or Debian repository conventions (containing `dists/` with suite metadata or flat `Packages` indices).
 - **Filesystem Permissions**: The user executing `repoview` possesses write permissions to `--output-dir` and `--state-dir`.
 - **Operating Environment**: Compiled for Linux or Windows (via WSL or CGo-enabled native build) with access to a C compiler for SQLite3 integration.
 
@@ -164,8 +181,10 @@ The application follows a clean, modular architecture separating concerns betwee
 | **Path Traversal** | Malicious `repomd.xml` contains `<location href="../../etc/passwd"/>` | `ParseRepomd()` cleans all relative paths and enforces strict directory prefix matching against the repo base. |
 | **Metadata Corruption** | Truncated `.state.json` or unreadable SQLite database | `StateStore` catches JSON parsing errors and automatically falls back to an empty cache state; SQLite queries emit structured domain errors and cleanly rollback. |
 | **Compression Formats** | Compressed repodata in Gzip, Zstd, XZ, or Bzip2 | Dynamic header magic sniffing detects algorithm regardless of file extension; stream decompression handles truncated archives gracefully. |
-| **Missing Comps XML** | Repository lacks group categorization file | `GroupingService` implements a 3-tier fallback: (1) Comps XML, (2) Heuristic RPM Group name inference, (3) Alphabetical initial letter grouping. |
-| **EVR Comparisons** | Tildes (`~`), Carets (`^`), and missing Epochs | `CompareEVR()` complies with RPM specification: `~` sorts before empty version (pre-release), `^` sorts after (snapshot), missing epochs default to 0 without string allocation. |
+| **Missing Groups / Comps** | Repository lacks group categorization file | `GroupingService` implements format-specific fallbacks: (1) Comps XML or Debian Section taxonomies, (2) Heuristic package name inference, (3) Alphabetical initial letter grouping. |
+| **EVR Comparisons** | Tildes (`~`), Carets (`^`), and missing Epochs | `CompareEVR()` complies with package specifications: RPM EVR via `go-rpm-version` and Debian EVR via `pault.ag/go/debian/version`. Missing epochs default to 0 without allocation. |
+| **Debian Multi-Component** | Multi-suite or multi-component repositories | `DebRepository` discovers all components in `dists/<suite>`, aggregates package indices, and prioritizes concrete architectures over `all`. |
+| **Debian Build Dates** | Deb822 lacks explicit build timestamp headers | Extracted directly from the numeric modification timestamp inside the outer `ar` archive container header. |
 | **Stale Artifacts** | Packages removed from upstream repository | `Generator.cleanupStale()` cross-references previous state store entries with the current execution and unlinks orphaned HTML/JSON files. |
 
 ### Performance & Efficiency Engineering
@@ -182,28 +201,28 @@ The application follows a clean, modular architecture separating concerns betwee
 
 ```text
 [1. CLI Entrypoint]
-  │   Parse long-only flags, validate paths, map exit codes.
+  │   Parse long-only flags (--format auto|rpm|deb), validate paths, map exit codes.
   ▼
-[2. Safety Guard Validation]
-  │   Confirm outputDir != repoDir, outputDir != root, outputDir != repoParent.
+[2. Safety Guard Validation & Format Resolution]
+  │   Confirm outputDir safety; detect format (repodata/ vs dists/ or Packages).
   ▼
-[3. Metadata Decompression & Extraction]
-  │   Parse repomd.xml -> Decompress primary.sqlite & other.sqlite to t.TempDir().
+[3. Metadata Ingestion via RepoReader]
+  │   RPM: Parse repomd.xml -> Decompress primary & other sqlite -> Batch enrich changelogs.
+  │   DEB: Discover suite/component -> Stream Deb822 Packages -> Parse changelogs & ar dates.
   ▼
-[4. SQLite Ingestion & Batch Enrichment]
-  │   Load packages -> Batch enrich changelogs (chunks of 500) -> Inspect RPM headers.
+[4. Categorization & Hierarchy Logic]
+  │   RPM: Parse comps.xml / infer RPM groups -> Alphabetical indexing.
+  │   DEB: Map Debian sections (admin, devel, net, web, etc.) -> Alphabetical indexing.
   ▼
-[5. Categorization & Hierarchy Logic]
-  │   Parse comps.xml -> Build Group Tree -> Infer missing groups -> Alphabetical indexing.
-  ▼
-[6. Parallel Page Rendering (Worker Pool)]
+[5. Parallel Page Rendering (Worker Pool)]
   │   sem := make(chan struct{}, NumCPU * 2)
   │   Render package HTML pages (on-demand file lists) -> HasChanged() hash check -> Write.
   ▼
-[7. Static Asset & Index Generation]
-  │   Render index.html, *.group.html, search.json, latest-feed.xml, copy embedded CSS/JS.
+[6. Static Asset, Feed & Index Generation]
+  │   Render index.html, *.group.html, search.json, latest-feed.xml (universal RSS).
+  │   Generate client configuration (.repo for RPM, .sources for Debian) & copy embedded assets.
   ▼
-[8. Stale File Pruning & State Persistence]
+[7. Stale File Pruning & State Persistence]
       Identify unreferenced previous files -> os.Remove() -> Atomically save .state.json.
 ```
 
@@ -221,11 +240,12 @@ graph TD
     end
 
     subgraph REPO["internal/repo"]
-        REPOMD["ParseRepomd"]
+        READER["RepoReader Interface"]
+        SQLITE["RepositoryAccess (RPM)"]
+        DEB_REPO["DebRepository (Debian)"]
         DECOMP["DecompressFile"]
-        SQLITE["RepositoryAccess"]
-        COMPS_PARSER["ParseComps"]
         RPM["EnrichPackagesWithRPMDetails"]
+        DEB_DET["ReadDebDetails"]
     end
 
     subgraph LOGIC["internal/logic"]
@@ -235,7 +255,8 @@ graph TD
     end
 
     subgraph MODELS["internal/models"]
-        PKG["Package"]
+        PKG["Package / PackageDetails"]
+        ADAPTER_DEB["adapter_deb.go"]
         REPOMD_M["Repomd"]
         COMPS_M["Comps"]
         SEARCH_M["SearchDoc"]
@@ -256,7 +277,9 @@ graph TD
 
     MAIN --> APP
     GEN --> SAFETY
-    GEN --> REPO
+    GEN --> READER
+    READER --> SQLITE
+    READER --> DEB_REPO
     GEN --> LOGIC
     GEN --> STATE
     GEN --> RENDER
@@ -278,33 +301,37 @@ sequenceDiagram
     actor User as Operator / CI Runner
     participant Main as cmd/repoview (main.go)
     participant Gen as internal/app (Generator)
-    participant Repo as internal/repo (SQLite & Decompress)
+    participant Reader as internal/repo (RepoReader)
     participant Logic as internal/logic (Grouping & Sorting)
     participant State as internal/state (StateStore)
     participant Render as internal/render (Renderer)
     participant Disk as Filesystem (outputDir)
 
-    User->>Main: repoview --output-dir /www/repo /srv/rpm/el9
+    User->>Main: repoview --format auto /srv/repo
     Main->>Gen: NewGenerator(Config) -> Run()
     Gen->>Gen: validateOutputDirSafety()
     
     rect rgb(240, 245, 255)
-        note over Gen, Repo: Phase 1: Ingestion & Decompression
-        Gen->>Repo: ParseRepomd("repodata/repomd.xml")
-        Repo-->>Gen: Database locations (primary, other)
-        Gen->>Repo: Decompress primary.sqlite & other.sqlite
-        Repo-->>Gen: Open RepositoryAccess connection
-        Gen->>Repo: GetAllPackages()
-        Repo-->>Gen: []Package (2,000+ items)
-        Gen->>Repo: EnrichPackagesWithChangelogs(batch: 500)
-        Gen->>Repo: EnrichPackagesWithRPMDetails()
+        note over Gen, Reader: Phase 1: Format Resolution & Ingestion
+        Gen->>Gen: Detect format (RPM or Debian)
+        alt RPM Repository
+            Gen->>Reader: Init RepositoryAccess (repomd + SQLite)
+            Reader->>Reader: Decompress primary.sqlite & other.sqlite
+        else Debian Repository
+            Gen->>Reader: Init DebRepository (dists or flat)
+            Reader->>Reader: Parse Deb822 Packages index
+        end
+        Gen->>Reader: GetAllPackages()
+        Reader-->>Gen: []Package
+        Gen->>Reader: EnrichPackagesWithChangelogs()
+        Gen->>Reader: EnrichPackagesWithDetails()
     end
 
     rect rgb(245, 255, 240)
         note over Gen, Logic: Phase 2: Domain Organization
         Gen->>Logic: FilterPackages(excludeArch, ignoreList)
-        Gen->>Logic: GroupingService.GetGroups(comps)
-        Logic-->>Gen: Comps Tree, RPM Groups, Letter Groups
+        Gen->>Logic: GroupingService.GetGroups()
+        Logic-->>Gen: Comps / Sections / RPM Groups / Letter Groups
         Gen->>Logic: SortPackagesByEVR()
     end
 
@@ -314,7 +341,7 @@ sequenceDiagram
         Gen->>Render: NewRenderer(templates, assets)
         
         loop Bounded Parallel Worker Pool (NumCPU * 2)
-            Gen->>Repo: ReadRPMFiles(pkg) [On-Demand]
+            Gen->>Reader: ReadPackageFiles(pkg) [On-Demand]
             Gen->>Render: RenderPackage(pkg, group)
             Render-->>Gen: HTML Content
             Gen->>State: HasChanged(filename, content)
@@ -326,7 +353,7 @@ sequenceDiagram
         end
 
         Gen->>Render: RenderIndex(), RenderGroup(), RenderRSS(), RenderSearchIndex()
-        Gen->>Disk: Write index.html, search.json, latest-feed.xml
+        Gen->>Disk: Write index.html, search.json, latest-feed.xml, client repo config
         Gen->>Render: WriteAssets() -> Copy CSS & JS
     end
 
@@ -420,6 +447,7 @@ All external dependencies have been audited for reliability, active maintenance,
 | **`github.com/ulikunitz/xz`** | `v0.5.16` | BSD-3-Clause | Pure Go XZ decompression library handling `.xz` compressed SQLite databases. |
 | **`github.com/knqyf263/go-rpm-version`** | Latest | MIT | Upstream-compliant RPM EVR (Epoch-Version-Release) parsing and comparison engine. |
 | **`github.com/sassoftware/go-rpmutils`** | `v0.4.0` | Apache-2.0 | RPM payload reader for extracting RPM lead, signatures, scriptlets, and file lists directly from `.rpm` files. |
+| **`pault.ag/go/debian`** | `v0.21.0` | MIT | Debian control file, Deb822 index parsing, and Debian EVR version comparison engine. |
 
 ### Build Tooling & System Dependencies
 
@@ -435,6 +463,7 @@ graph TD
         CMD["github.com/edsilegxrepo/repoview/cmd/repoview"]
         APP["github.com/edsilegxrepo/repoview/internal/app"]
         REPO["github.com/edsilegxrepo/repoview/internal/repo"]
+        REPO_DEB["github.com/edsilegxrepo/repoview/internal/repo/deb"]
         LOGIC["github.com/edsilegxrepo/repoview/internal/logic"]
         MODELS["github.com/edsilegxrepo/repoview/internal/models"]
         RENDER["github.com/edsilegxrepo/repoview/internal/render"]
@@ -448,10 +477,12 @@ graph TD
         XZ["github.com/ulikunitz/xz"]
         RPM_VER["github.com/knqyf263/go-rpm-version"]
         RPM_UTILS["github.com/sassoftware/go-rpmutils"]
+        DEB_MOD["pault.ag/go/debian"]
     end
 
     CMD --> APP
     APP --> REPO
+    REPO --> REPO_DEB
     APP --> LOGIC
     APP --> RENDER
     APP --> STATE
@@ -461,8 +492,11 @@ graph TD
     REPO --> COMPRESS
     REPO --> XZ
     REPO --> RPM_UTILS
+    REPO_DEB --> DEB_MOD
 
+    MODELS --> DEB_MOD
     LOGIC --> RPM_VER
+    LOGIC --> DEB_MOD
 ```
 
 ---

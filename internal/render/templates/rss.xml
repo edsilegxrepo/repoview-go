@@ -2,16 +2,16 @@
 <rss version="2.0">
 <channel>
   <title>{{ .Repo.Title }}</title>
-  <link>{{ .URL }}/repoview/latest-feed.xml</link>
+  <link>{{ if .URL }}{{ .URL }}/repoview/latest-feed.xml{{ else }}latest-feed.xml{{ end }}</link>
   <description>Latest packages for {{ .Repo.Title }}</description>
   <lastBuildDate>{{ now | rssTime }}</lastBuildDate>
   <generator>RepoView-Go</generator>
   {{ range .Latest }}
   <item>
-    <guid>{{ $.URL }}/repoview/{{ .Filename }}+{{ if .Epoch }}{{ .Epoch }}{{ else }}0{{ end }}:{{ .Version }}-{{ .Release }}.{{ .Arch }}</guid>
-    <link>{{ $.URL }}/repoview/{{ .Filename }}</link>
+    <guid>{{ if $.URL }}{{ $.URL }}/repoview/{{ end }}{{ .Filename }}+{{ if .Epoch }}{{ .Epoch }}{{ else }}0{{ end }}:{{ .VersionRelease }}.{{ .Arch }}</guid>
+    <link>{{ if $.URL }}{{ $.URL }}/repoview/{{ end }}{{ .Filename }}</link>
     <pubDate>{{ .TimeBuild | rssTime }}</pubDate>
-    <title>Update: {{ .Name }}-{{ .Version }}-{{ .Release }}</title>
+    <title>Update: {{ .Name }}-{{ .VersionRelease }}</title>
     <description><![CDATA[
       <p>
         <strong>Package:</strong> {{ .Name }}<br/>
@@ -25,7 +25,7 @@
       <table border="0" cellpadding="0" cellspacing="5">
       {{ range .AllVersions }}
         <tr>
-          <td valign="top"><a href="{{ $.URL }}/{{ .LocationHref }}">{{ .Name }}-{{ .Version }}-{{ .Release }}.{{ .Arch }}</a>
+          <td valign="top"><a href="{{ if $.URL }}{{ $.URL }}/{{ else }}../{{ end }}{{ .LocationHref }}">{{ .Name }}-{{ .VersionRelease }}.{{ .Arch }}</a>
             [<span style="white-space: nowrap">{{ .SizePackage | humanSize }}</span>]</td>
           {{ if .Changelog }}
           <td valign="top">

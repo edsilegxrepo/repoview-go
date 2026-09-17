@@ -47,6 +47,12 @@ func TestRSSTime(t *testing.T) {
 	if got != expected {
 		t.Errorf("RSSTime(%d) = %q; want %q", stamp, got, expected)
 	}
+
+	// Test zero/negative timestamp fallback
+	zeroRss := RSSTime(0)
+	if !strings.HasSuffix(zeroRss, "+0000") || len(zeroRss) == 0 {
+		t.Errorf("RSSTime(0) = %q; expected valid UTC formatted string", zeroRss)
+	}
 }
 
 // TestFirstLetter validates Unicode-safe extraction and casing of the initial character.
@@ -68,5 +74,21 @@ func TestFirstLetter(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("FirstLetter(%q) = %q; want %q", tc.input, got, tc.expected)
 		}
+	}
+}
+
+func TestYMD(t *testing.T) {
+	// 1612800000 = 2021-02-08
+	stamp := int64(1612800000)
+	got := YMD(stamp)
+	if got != "2021-02-08" {
+		t.Errorf("YMD(%d) = %q; want %q", stamp, got, "2021-02-08")
+	}
+
+	if got := YMD(0); got != "N/A" {
+		t.Errorf("YMD(0) = %q; want %q", got, "N/A")
+	}
+	if got := YMD(-100); got != "N/A" {
+		t.Errorf("YMD(-100) = %q; want %q", got, "N/A")
 	}
 }

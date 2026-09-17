@@ -52,7 +52,7 @@ RepoView-Go employs a multi-tiered testing strategy structured to detect deep ar
 flowchart TB
     subgraph TestExecution["Test Runner (go test)"]
         UT["Unit Tests (Default)\n• Sub-second execution (&lt;0.2s)\n• Zero external dependencies\n• Synthetic in-memory fixtures"]
-        IT["Integration Tests (-tags=integration)\n• Real RPM Repositories (&gt;2,000 pkgs)\n• Unmocked SQLite3 & Decompression\n• Live HTTP Server & Listeners\n• Compiled Binary Subprocess"]
+        IT["Integration Tests (-tags=integration)\n• Real Repositories (RPM &amp; Debian)\n• Unmocked Ingestion &amp; Decompression\n• Live HTTP Server &amp; Listeners\n• Compiled Binary Subprocess"]
     end
 
     subgraph UnitLayer["Unit Test Isolation Layer"]
@@ -62,13 +62,14 @@ flowchart TB
         MODELS_T["internal/models/*_test.go"]
         RENDER_T["internal/render/*_test.go"]
         REPO_T["internal/repo/*_test.go"]
+        DEB_T["internal/repo/deb/*_test.go"]
         STATE_T["internal/state/*_test.go"]
         UTIL_T["internal/util/*_test.go"]
     end
 
     subgraph IntegrationLayer["E2E Integration Layer"]
-        E2E["tests/integration/e2e_test.go"]
-        REAL_REPO[("Real RPM Repository\n/u01/wwwroot/test/el9/base/x86_64")]
+        RPM_E2E["tests/integration/e2e_test.go\n(Live RPM Repo: 2,036 pkgs)"]
+        DEB_E2E["tests/integration/deb_e2e_test.go\n(Live Debian Repo: pool/dists)"]
         EPHEMERAL_HTTP["net/http Ephemeral Server\nhttp://127.0.0.1:{random_port}"]
         HTTP_CLIENT["HTTP Client Verification\n• index.html\n• search.json\n• pkg.html\n• latest-feed.xml"]
         CLI_BIN["Compiled repoview Binary\nSubprocess exec.Command"]
@@ -83,8 +84,8 @@ flowchart TB
 
     UnitLayer --> TDIR
     IntegrationLayer --> TDIR
-    IntegrationLayer --> REAL_REPO
-    IntegrationLayer --> EPHEMERAL_HTTP --> HTTP_CLIENT
+    RPM_E2E --> EPHEMERAL_HTTP --> HTTP_CLIENT
+    DEB_E2E --> EPHEMERAL_HTTP
     IntegrationLayer --> CLI_BIN
 ```
 
@@ -218,10 +219,12 @@ repoview-go/
 │   │   ├── sorting.go
 │   │   └── sorting_test.go                # RPM EVR comparison and epoch parsing
 │   ├── models/
+│   │   ├── adapter_deb.go                 # control.BinaryIndex & Dependency declarative mappers
+│   │   ├── adapter_deb_test.go            # Deb822 mapping & dependency validation
 │   │   ├── comps.go
 │   │   ├── comps_test.go                  # Comps XML unmarshaling and localization
 │   │   ├── package.go
-│   │   ├── package_test.go                # Dependencies, scriptlets, NVRA, filenames
+│   │   ├── package_test.go                # Dependencies, scriptlets, NVRA, filenames, EVR
 │   │   ├── repomd.go
 │   │   ├── repomd_test.go                 # Repomd dual-format revision parsing
 │   │   ├── search.go
@@ -234,12 +237,22 @@ repoview-go/
 │   │   ├── comps_test.go                  # Comps XML parsing and error handling
 │   │   ├── decompress.go
 │   │   ├── decompress_test.go             # Gzip, Zstd, XZ decompression & sniffing
+│   │   ├── reader.go                      # RepoReader unified ingestion interface
 │   │   ├── repomd.go
 │   │   ├── repomd_test.go                 # Repomd parsing, path traversal, validation
 │   │   ├── rpm_reader.go
 │   │   ├── rpm_reader_test.go             # RPM header reader & package enrichment
 │   │   ├── sqlite.go
-│   │   └── sqlite_test.go                 # SQLite lifecycle, changelogs, dependencies
+│   │   ├── sqlite_test.go                 # SQLite lifecycle, changelogs, dependencies
+│   │   └── deb/
+│   │       ├── changelog.go               # Debian changelog reader (pault.ag/go/debian)
+│   │       ├── changelog_test.go          # Changelog parsing tests
+│   │       ├── details.go                 # Maintainer scripts (control.tar) & file manifest (data.tar)
+│   │       ├── details_test.go            # Synthetic .deb in-memory inspection tests
+│   │       ├── discovery.go               # Pool/dists and flat repository discovery
+│   │       ├── discovery_test.go          # Layout resolution & arch priority tests
+│   │       ├── repository.go              # DebRepository satisfying repo.RepoReader
+│   │       └── repository_test.go         # Index parsing, caching, and error tests
 │   ├── state/
 │   │   ├── state.go
 │   │   └── state_test.go                  # Atomic save, concurrency, corrupt recovery
@@ -250,7 +263,8 @@ repoview-go/
 │       └── sanitize_test.go               # Filename and URL path sanitization
 └── tests/
     └── integration/
-        └── e2e_test.go                    # Live E2E suite, HTTP server, CLI subprocess
+        ├── e2e_test.go                    # Live RPM E2E suite, HTTP server, CLI subprocess
+        └── deb_e2e_test.go                # Live Debian E2E suite, HTTP server, CLI subprocess
 ```
 
 ---
@@ -338,6 +352,22 @@ repoview-go/
 | SQLite Engine | `TestRepositoryAccess_Lifecycle` | Tests SQLite connection, package queries, changelog batching, dependency queries. | **PASS**: Queries return accurately; connections closed cleanly without leak. |
 | SQLite Engine | `TestCleanAuthor` | Tests changelog author cleaning regex. | **PASS**: Strips excess brackets, email wrappers, and invalid characters. |
 
+### Debian Ingestion & Introspection (`internal/repo/deb`)
+
+| Logical Group | Test Name | Technical Purpose / Description | Success Criteria (PASS/FAIL) |
+| :--- | :--- | :--- | :--- |
+| DEB Discovery | `TestDiscover_DistsLayout` | Discovers standard `dists/<suite>/<component>/binary-<arch>` repository layout. | **PASS**: Resolves suite, component, arch, PackagesFile, ReleaseFile, and BaseDir. |
+| DEB Discovery | `TestDiscover_FlatLayoutGz` | Discovers flat single-directory Debian repository with `Packages.gz`. | **PASS**: Flags `IsFlat=true` and sets PackagesFile path. |
+| DEB Discovery | `TestDiscover_DirectBinaryLeaf` | Discovers metadata when pointed directly at `binary-<arch>` leaf directory. | **PASS**: Infers suite, component, arch, and repository BaseDir. |
+| DEB Discovery | `TestDiscover_ArchPriority_PicksConcreteOverAll` | Ensures concrete architectures (e.g. `arm64`) are prioritized over `binary-all`. | **PASS**: Resolves `arm64` over `all`. |
+| DEB Discovery | `TestDiscover_NotFound` | Handles directory lacking Debian repository metadata. | **PASS**: Returns descriptive error without panicking. |
+| DEB Ingestion | `TestDebRepository_GetAllPackages` | Parses Deb822 `Packages` index and maps to `models.Package`. | **PASS**: Extracts EVR, dependencies, scriptlet targets, and sizes. |
+| DEB Ingestion | `TestDebRepository_GzippedIndex` | Parses gzipped `Packages.gz` index. | **PASS**: Decompresses and extracts packages accurately. |
+| DEB Ingestion | `TestDebRepository_EdgeCasesAndErrors` | Tests error conditions: nil locs, empty packages file, traversal paths, missing deb files. | **PASS**: Gracefully returns appropriate errors and validates Close cleanup hook. |
+| DEB Introspection | `TestReadDebDetails_And_Files` | Reads maintainer scripts from `control.tar` and file manifests from `data.tar`. | **PASS**: Extracts `preinst`, `postinst`, `prerm`, `postrm`, files, and changelogs. |
+| DEB Changelog | `TestParseChangelog` | Parses Debian changelog entries from `changelog.Debian.gz`. | **PASS**: Extracts author, timestamp, and changelog description. |
+| DEB Changelog | `TestParseChangelog_Empty` | Handles empty or invalid changelog streams. | **PASS**: Gracefully returns error or nil entry. |
+
 ### Cache State Management & Concurrency (`internal/state`)
 
 | Logical Group | Test Name | Technical Purpose / Description | Success Criteria (PASS/FAIL) |
@@ -360,12 +390,18 @@ repoview-go/
 
 | Logical Group | Test Name | Technical Purpose / Description | Success Criteria (PASS/FAIL) |
 | :--- | :--- | :--- | :--- |
-| E2E / Live Repo | `TestLive_EndToEndWorkflow/Live_IndexHTML` | Runs generator against real repository (2,036 RPMs) and verifies `index.html`. | **PASS**: Generation completes without error; `index.html` exists and exceeds 10 KB. |
-| E2E / Live Server | `TestLive_EndToEndWorkflow/Live_SearchJSON` | Boots ephemeral HTTP server and verifies `/search.json` endpoint over HTTP. | **PASS**: HTTP GET returns 200 OK, `application/json` MIME type, parses valid package list. |
-| E2E / Live Server | `TestLive_EndToEndWorkflow/Live_PackagePage` | Verifies real package page endpoint (e.g. `/nginx.html`) over live HTTP server. | **PASS**: HTTP GET returns 200 OK, valid HTML5 structure, contains package summary. |
-| E2E / Live Server | `TestLive_EndToEndWorkflow/Live_RSSFeed` | Verifies `/latest-feed.xml` endpoint over live HTTP server. | **PASS**: HTTP GET returns 200 OK, contains `<rss version="2.0">`. |
-| E2E / Incremental | `TestLive_EndToEndWorkflow/Live_IncrementalRun` | Performs secondary execution against identical repo to verify state caching. | **PASS**: Secondary pass succeeds; file timestamps indicate unchanged files skipped. |
-| E2E / Subprocess | `TestLive_SubprocessCLI` | Compiles real `repoview` binary and executes CLI command via `os/exec`. | **PASS**: Binary builds, CLI runs with `--repo` and `--output-dir`, exits with code 0. |
+| E2E / Live RPM | `TestLive_EndToEndWorkflow/Live_IndexHTML` | Runs generator against real RPM repository (2,036 RPMs) and verifies `index.html`. | **PASS**: Generation completes without error; `index.html` exists and exceeds 10 KB. |
+| E2E / Live RPM | `TestLive_EndToEndWorkflow/Live_SearchJSON` | Boots ephemeral HTTP server and verifies `/search.json` endpoint over HTTP. | **PASS**: HTTP GET returns 200 OK, `application/json` MIME type, parses valid package list. |
+| E2E / Live RPM | `TestLive_EndToEndWorkflow/Live_PackagePage` | Verifies real package page endpoint (e.g. `/nginx.html`) over live HTTP server. | **PASS**: HTTP GET returns 200 OK, valid HTML5 structure, contains package summary. |
+| E2E / Live RPM | `TestLive_EndToEndWorkflow/Live_RSSFeed` | Verifies `/latest-feed.xml` endpoint over live HTTP server. | **PASS**: HTTP GET returns 200 OK, contains `<rss version="2.0">`. |
+| E2E / Live RPM | `TestLive_EndToEndWorkflow/Live_IncrementalRun` | Performs secondary execution against identical repo to verify state caching. | **PASS**: Secondary pass succeeds; file timestamps indicate unchanged files skipped. |
+| E2E / Live RPM | `TestLive_SubprocessCLI` | Compiles real `repoview` binary and executes CLI command against RPM repo via `os/exec`. | **PASS**: Binary builds, CLI runs with `--repo` and `--output-dir`, exits with code 0. |
+| E2E / Live DEB | `TestLive_Debian_EndToEndWorkflow/Live_Debian_IndexHTML` | Generates full view from authentic Debian repo (pool/dists) and verifies `index.html`. | **PASS**: Generation completes in milliseconds; contains Deb822 `.sources` configuration. |
+| E2E / Live DEB | `TestLive_Debian_EndToEndWorkflow/Live_Debian_SearchJSON` | Verifies search index over live HTTP server for Debian packages. | **PASS**: Returns 200 OK; JSON index includes `nginx` and `curl`. |
+| E2E / Live DEB | `TestLive_Debian_EndToEndWorkflow/Live_Debian_PackagePage` | Verifies Debian package page over live HTTP server (`apt`/`dpkg` install bar, scriptlets, changelog). | **PASS**: Returns 200 OK; renders `sudo apt install`, maintainer scriptlets, and extracted changelog. |
+| E2E / Live DEB | `TestLive_Debian_EndToEndWorkflow/Live_Debian_RSSFeed` | Verifies RSS feed generation for Debian packages. | **PASS**: Returns 200 OK; valid RSS 2.0 XML with package items. |
+| E2E / Live DEB | `TestLive_Debian_EndToEndWorkflow/Live_Debian_IncrementalRun` | Validates rapid incremental generation and state caching on Debian repo. | **PASS**: Completes in <20ms; preserves cache state. |
+| E2E / Live DEB | `TestLive_Debian_SubprocessCLI` | Executes compiled `repoview` binary with `--format deb` and auto-detection on Debian repo. | **PASS**: Subprocess succeeds with code 0; produces valid index pages. |
 
 ---
 
@@ -377,15 +413,16 @@ RepoView-Go enforces an architectural quality standard where **every package mus
 
 | Package | Purpose | Statements Covered | Percentage | Status |
 | :--- | :--- | :---: | :---: | :---: |
-| `cmd/repoview` | CLI Entrypoint, flags, options, exit codes | 41 / 47 | **87.2%** | ✅ PASS (>80%) |
-| `internal/app` | Core generator, pipeline workflow, safety checks | 182 / 216 | **84.3%** | ✅ PASS (>80%) |
-| `internal/logic` | EVR sorting, filtering, comps & RPM grouping | 196 / 240 | **81.7%** | ✅ PASS (>80%) |
-| `internal/models` | Domain models, XML unmarshaling, search index | 47 / 51 | **92.2%** | ✅ PASS (>80%) |
-| `internal/render` | HTML/RSS template rendering, asset delivery | 147 / 178 | **82.6%** | ✅ PASS (>80%) |
-| `internal/repo` | Repomd, comps, RPM headers, SQLite access | 200 / 247 | **81.0%** | ✅ PASS (>80%) |
-| `internal/state` | Persistent state cache, dirty tracking, pruning | 55 / 64 | **85.9%** | ✅ PASS (>80%) |
-| `internal/util` | Human formatting, date conversions, sanitization | 24 / 27 | **88.9%** | ✅ PASS (>80%) |
-| **Total Codebase** | **Complete Project Statement Coverage** | **892 / 1070** | **83.5%** | **✅ PASS (>80%)** |
+| `cmd/repoview` | CLI Entrypoint, flags, options, exit codes | 162 / 175 | **92.6%** | ✅ PASS (>80%) |
+| `internal/app` | Core generator, pipeline workflow, safety checks | 431 / 501 | **86.0%** | ✅ PASS (>80%) |
+| `internal/logic` | EVR sorting, filtering, comps & RPM grouping | 356 / 443 | **80.4%** | ✅ PASS (>80%) |
+| `internal/models` | Domain models, XML unmarshaling, search index | 140 / 149 | **94.0%** | ✅ PASS (>80%) |
+| `internal/render` | HTML/RSS template rendering, asset delivery | 135 / 166 | **81.3%** | ✅ PASS (>80%) |
+| `internal/repo` | Repomd, comps, RPM headers, SQLite access | 399 / 482 | **82.8%** | ✅ PASS (>80%) |
+| `internal/repo/deb` | Debian discovery, RFC 822 parser, ar/tar inspection | 418 / 466 | **89.7%** | ✅ PASS (>80%) |
+| `internal/state` | Persistent state cache, dirty tracking, pruning | 81 / 93 | **87.1%** | ✅ PASS (>80%) |
+| `internal/util` | Human formatting, date conversions, sanitization | 53 / 56 | **94.6%** | ✅ PASS (>80%) |
+| **Total Codebase** | **Complete Project Statement Coverage** | **2175 / 2531** | **85.9%** | **✅ PASS (>80%)** |
 
 > [!NOTE]
 > All unit tests execute in under **0.2 seconds** aggregate time, ensuring developer productivity remains unhindered.
@@ -482,6 +519,24 @@ go test -tags=integration -v ./tests/integration/...
 # 5. Run Everything (Unit + Integration + Race)
 # -------------------------------------------------------------
 go test -tags=integration -race -v ./...
+
+# -------------------------------------------------------------
+# 6. Quality, Formatting, Linter & Security Audit Pipeline
+# -------------------------------------------------------------
+# Formatting enforcement (standard Go formatting)
+gofumpt -l -w ./...
+
+# Standard Go compiler static analysis
+go vet ./...
+
+# Exhaustive zero-config multi-linter pass
+golangci-lint run ./... --no-config
+
+# Vulnerability database scanning against known CVEs
+govulncheck ./...
+
+# AST-based AST security inspection
+gosec ./...
 ```
 
 ### PowerShell (Windows native / WSL bridge)

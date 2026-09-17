@@ -103,3 +103,30 @@ func TestStringList(t *testing.T) {
 		t.Errorf("expected 'pattern1*, pattern2*', got %q", list.String())
 	}
 }
+
+func TestRun_FormatFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	repoDir := t.TempDir()
+
+	// 1. Invalid format
+	code := run([]string{"--format", "invalid_format", repoDir}, &stdout, &stderr)
+	if code != app.ExitUsageError {
+		t.Errorf("expected ExitUsageError (2) for invalid format, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid repository format") {
+		t.Errorf("expected stderr to contain 'invalid repository format', got: %s", stderr.String())
+	}
+
+	// 2. Valid format flags (deb and rpm) with missing repo metadata
+	stderr.Reset()
+	codeDeb := run([]string{"--format", "deb", repoDir}, &stdout, &stderr)
+	if codeDeb != app.ExitRepoMetadataError {
+		t.Errorf("expected ExitRepoMetadataError (3) for empty repo dir, got %d", codeDeb)
+	}
+
+	stderr.Reset()
+	codeRPM := run([]string{"--format", "rpm", repoDir}, &stdout, &stderr)
+	if codeRPM != app.ExitRepoMetadataError {
+		t.Errorf("expected ExitRepoMetadataError (3) for empty repo dir, got %d", codeRPM)
+	}
+}

@@ -44,6 +44,7 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/models"
 	"github.com/edsilegxrepo/repoview/internal/render"
 	"github.com/edsilegxrepo/repoview/internal/repo"
+	"github.com/edsilegxrepo/repoview/internal/repo/deb"
 	"github.com/edsilegxrepo/repoview/internal/state"
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
@@ -76,19 +77,20 @@ func (e *PartialFailureError) Error() string {
 
 // Config holds the configuration for the Generator
 type Config struct {
-	RepoDir     string   // Root directory of the source RPM repository
-	OutputDir   string   // Target directory for generated HTML and assets
-	StateDir    string   // Directory for saving incremental state JSON files
-	CompsFile   string   // Path to an alternative comps.xml file
-	TemplateDir string   // Path to custom templates (embedded templates used if empty)
-	Title       string   // Display title for the repository view
-	URL         string   // Public base URL of the repository (for RSS feed)
-	BaseURL     string   // Explicit base URL for client repository configuration (.repo)
-	Force       bool     // If true, forces complete regeneration ignoring state cache
-	Quiet       bool     // If true, suppresses standard informational output
-	IgnoreList  []string // Glob patterns of package names/NVRAs to ignore
-	ExcludeArch []string // Hardware architectures to exclude from generation
-	Version     string   // Repoview tool version string
+	RepoDir     string            // Root directory of the source RPM repository
+	OutputDir   string            // Target directory for generated HTML and assets
+	StateDir    string            // Directory for saving incremental state JSON files
+	CompsFile   string            // Path to an alternative comps.xml file
+	TemplateDir string            // Path to custom templates (embedded templates used if empty)
+	Title       string            // Display title for the repository view
+	URL         string            // Public base URL of the repository (for RSS feed)
+	BaseURL     string            // Explicit base URL for client repository configuration (.repo)
+	Format      models.RepoFormat // Repository format: auto, rpm, or deb
+	Force       bool              // If true, forces complete regeneration ignoring state cache
+	Quiet       bool              // If true, suppresses standard informational output
+	IgnoreList  []string          // Glob patterns of package names/NVRAs to ignore
+	ExcludeArch []string          // Hardware architectures to exclude from generation
+	Version     string            // Repoview tool version string
 }
 
 // Generator orchestrates the repository view generation process.
@@ -118,28 +120,28 @@ func (g *Generator) Run() error {
 	}
 
 	// 1. Setup Repo Access
-	locs, db, cleanup, err := g.prepareRepository()
+	reader, locs, cleanup, err := g.prepareRepository()
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
 	// 2. Fetch & Filter Packages
-	allPkgs, err := g.loadPackages(db)
+	allPkgs, err := g.loadPackages(reader)
 	if err != nil {
 		return err
 	}
 
 	// Enrich all packages with changelogs in bulk (Performance Optimization)
 	g.say("Enriching packages with changelogs...")
-	if err := db.EnrichPackagesWithChangelogs(allPkgs); err != nil {
+	if err := reader.EnrichPackagesWithChangelogs(allPkgs); err != nil {
 		log.Printf("Warning: failed to enrich packages: %v", err)
 	}
 	g.say("done\n")
 
-	// Enrich packages with RPM header inspection (Scriptlets, Signatures, File Lists)
-	g.say("Inspecting RPM package headers...")
-	repo.EnrichPackagesWithRPMDetails(g.config.RepoDir, allPkgs)
+	// Enrich packages with package details (Scriptlets, Signatures, File Lists)
+	g.say("Inspecting package metadata on disk...")
+	reader.EnrichPackageDetails(g.config.RepoDir, allPkgs)
 	g.say("done\n")
 
 	// 3. Process Groups
@@ -147,7 +149,6 @@ func (g *Generator) Run() error {
 	if err != nil {
 		return err
 	}
-
 	allGroups := append(groups, letterGroups...)
 
 	// 4. Setup Output & Renderer
@@ -156,6 +157,7 @@ func (g *Generator) Run() error {
 		return err
 	}
 	renderer.SetGroups(groups)
+	renderer.SetFormat(g.config.Format)
 
 	// Sibling repository detection (architectures and channels)
 	siblings := detectSiblingRepos(g.config.RepoDir)
@@ -186,7 +188,7 @@ func (g *Generator) Run() error {
 	generatedFiles = append(generatedFiles, groupFiles...)
 
 	// 6. Render Packages
-	pkgFiles, errorCount, err := g.renderPackages(db, renderer, stateStore, pkgVersions, pkgPrimaryGroup)
+	pkgFiles, errorCount, err := g.renderPackages(reader, renderer, stateStore, pkgVersions, pkgPrimaryGroup)
 	if err != nil {
 		return err
 	}
@@ -217,9 +219,26 @@ func (g *Generator) Run() error {
 	return nil
 }
 
-// prepareRepository parses repomd.xml, decompresses databases, and opens connection.
-func (g *Generator) prepareRepository() (*repo.RepoLocations, *repo.RepositoryAccess, func(), error) {
+// prepareRepository parses repomd.xml or Debian metadata, decompresses databases, and opens reader.
+func (g *Generator) prepareRepository() (repo.RepoReader, *repo.RepoLocations, func(), error) {
 	g.say("Examining repository...")
+	format := g.config.Format
+	if format == "" || format == "auto" {
+		format = detectFormat(g.config.RepoDir)
+		g.config.Format = format
+	}
+
+	if format == models.FormatDEB {
+		g.say("Detected Debian repository format\n")
+		debLocs, err := deb.Discover(g.config.RepoDir)
+		if err != nil {
+			return nil, nil, func() {}, fmt.Errorf("failed to discover Debian repository: %w", err)
+		}
+		reader := deb.NewDebRepository(debLocs, nil)
+		return reader, nil, func() { _ = reader.Close() }, nil
+	}
+
+	g.say("Detected RPM repository format\n")
 	locs, err := repo.ParseRepomd(g.config.RepoDir)
 	if err != nil {
 		return nil, nil, func() {}, fmt.Errorf("failed to parse repomd.xml: %w", err)
@@ -248,18 +267,18 @@ func (g *Generator) prepareRepository() (*repo.RepoLocations, *repo.RepositoryAc
 	g.say("done\n")
 
 	cleanup := func() {
-		db.Close()
+		_ = db.Close()
 		cleanupO()
 		cleanupP()
 	}
 
-	return locs, db, cleanup, nil
+	return db, locs, cleanup, nil
 }
 
 // loadPackages fetches all packages and filters them based on config.
-func (g *Generator) loadPackages(db *repo.RepositoryAccess) ([]*models.Package, error) {
+func (g *Generator) loadPackages(reader repo.RepoReader) ([]*models.Package, error) {
 	g.say("Reading packages...")
-	allPkgs, err := db.GetAllPackages()
+	allPkgs, err := reader.GetAllPackages()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read packages: %w", err)
 	}
@@ -278,7 +297,10 @@ func (g *Generator) loadPackages(db *repo.RepositoryAccess) ([]*models.Package, 
 // processGroups loads comps.xml (if available or specified) and organizes packages into groups.
 func (g *Generator) processGroups(locs *repo.RepoLocations, allPkgs []*models.Package) ([]*logic.GroupData, []*logic.GroupData, []string, error) {
 	var comps *models.Comps
-	compsSrc := locs.Groups
+	var compsSrc string
+	if locs != nil {
+		compsSrc = locs.Groups
+	}
 	if g.config.CompsFile != "" {
 		compsSrc = g.config.CompsFile
 	}
@@ -331,7 +353,7 @@ func (g *Generator) setupRenderer(letters []string) (*render.Renderer, *state.St
 		}
 	}
 
-	if err := os.MkdirAll(g.config.OutputDir, 0o750); err != nil {
+	if err := util.EnsureDir(g.config.OutputDir); err != nil {
 		return nil, nil, fmt.Errorf("failed to create output dir: %w", err)
 	}
 
@@ -340,7 +362,7 @@ func (g *Generator) setupRenderer(letters []string) (*render.Renderer, *state.St
 
 	if g.config.StateDir != "" {
 		stateDir = g.config.StateDir
-		if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		if err := util.EnsureDir(stateDir); err != nil {
 			log.Printf("Warning: failed to create state dir: %v", err)
 		}
 		hash := sha256.Sum256([]byte(g.config.OutputDir))
@@ -392,7 +414,7 @@ func (g *Generator) renderGroups(renderer *render.Renderer, stateStore *state.St
 }
 
 // renderPackages renders all package pages in parallel using a bounded worker pool.
-func (g *Generator) renderPackages(db *repo.RepositoryAccess, renderer *render.Renderer, stateStore *state.StateStore, pkgVersions map[string][]*models.Package, pkgPrimaryGroup map[string]*logic.GroupData) ([]string, int64, error) {
+func (g *Generator) renderPackages(db repo.RepoReader, renderer *render.Renderer, stateStore *state.StateStore, pkgVersions map[string][]*models.Package, pkgPrimaryGroup map[string]*logic.GroupData) ([]string, int64, error) {
 	var generatedFiles []string
 	var mu sync.Mutex
 	var errorCount int64
@@ -418,7 +440,7 @@ func (g *Generator) renderPackages(db *repo.RepositoryAccess, renderer *render.R
 
 			latest.AllVersions = versions
 
-			// Populate package dependencies from SQLite (using cached prepared statements)
+			// Populate package dependencies from reader (using cached prepared statements or index)
 			if db != nil && latest.Dependencies == nil {
 				deps, err := db.GetPackageDependencies(latest.PkgKey)
 				if err == nil {
@@ -428,16 +450,20 @@ func (g *Generator) renderPackages(db *repo.RepositoryAccess, renderer *render.R
 
 			// On-demand file list loading: only load files when rendering this specific package page,
 			// and immediately release file list from heap memory upon render completion to keep resident RAM minimal.
-			if latest.Details != nil && len(latest.Details.Files) == 0 && latest.LocationHref != "" {
-				rpmPath := filepath.Join(g.config.RepoDir, latest.LocationHref)
-				files, err := repo.ReadRPMFiles(rpmPath)
-				if err == nil {
-					latest.Details.Files = files
-					defer func() {
-						if latest.Details != nil {
-							latest.Details.Files = nil
+			if latest.LocationHref != "" && db != nil {
+				if latest.Details == nil || len(latest.Details.Files) == 0 {
+					files, err := db.ReadPackageFiles(g.config.RepoDir, latest)
+					if err == nil && len(files) > 0 {
+						if latest.Details == nil {
+							latest.Details = &models.PackageDetails{}
 						}
-					}()
+						latest.Details.Files = files
+						defer func() {
+							if latest.Details != nil {
+								latest.Details.Files = nil
+							}
+						}()
+					}
 				}
 			}
 
@@ -524,7 +550,12 @@ func (g *Generator) renderIndices(renderer *render.Renderer, stateStore *state.S
 		latestPkgs = latestPkgs[:limit]
 	}
 
-	idxContent, err := renderer.RenderIndex(availableGroups, latestPkgs, g.config.URL)
+	effectiveRSSURL := g.config.URL
+	if effectiveRSSURL == "" && g.config.BaseURL != "" {
+		effectiveRSSURL = g.config.BaseURL
+	}
+
+	idxContent, err := renderer.RenderIndex(availableGroups, latestPkgs, effectiveRSSURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render index: %w", err)
 	}
@@ -537,20 +568,18 @@ func (g *Generator) renderIndices(renderer *render.Renderer, stateStore *state.S
 	}
 	generatedFiles = append(generatedFiles, "index.html")
 
-	if g.config.URL != "" {
-		rssContent, err := renderer.RenderRSS(latestPkgs, g.config.URL)
-		if err != nil {
-			log.Printf("Failed to render RSS: %v", err)
-		} else {
-			rssHasChanged := stateStore.HasChanged("latest-feed.xml", rssContent)
-			if g.config.Force || rssHasChanged {
-				g.say("Writing latest-feed.xml\n")
-				if err := renderer.WriteToFile("latest-feed.xml", rssContent); err != nil {
-					log.Printf("Failed to write RSS: %v", err)
-				}
+	rssContent, err := renderer.RenderRSS(latestPkgs, effectiveRSSURL)
+	if err != nil {
+		log.Printf("Failed to render RSS: %v", err)
+	} else {
+		rssHasChanged := stateStore.HasChanged("latest-feed.xml", rssContent)
+		if g.config.Force || rssHasChanged {
+			g.say("Writing latest-feed.xml\n")
+			if err := renderer.WriteToFile("latest-feed.xml", rssContent); err != nil {
+				log.Printf("Failed to write RSS: %v", err)
 			}
-			generatedFiles = append(generatedFiles, "latest-feed.xml")
 		}
+		generatedFiles = append(generatedFiles, "latest-feed.xml")
 	}
 
 	return generatedFiles, nil
@@ -595,8 +624,12 @@ func mapPrimaryGroups(allGroups []*logic.GroupData) map[string]*logic.GroupData 
 }
 
 // detectSiblingRepos searches nearby directories for sibling repository channels (e.g. base, extras)
-// or architectures (e.g. x86_64, aarch64) that contain repodata.
+// or architectures (e.g. x86_64, aarch64) that contain repodata or Debian binary directories.
 func detectSiblingRepos(repoDir string) []*logic.SiblingRepo {
+	if debSiblings := detectDebianSiblings(repoDir); len(debSiblings) > 0 {
+		return debSiblings
+	}
+
 	var siblings []*logic.SiblingRepo
 
 	absRepoDir, err := filepath.Abs(repoDir)
@@ -654,12 +687,80 @@ func detectSiblingRepos(repoDir string) []*logic.SiblingRepo {
 	return siblings
 }
 
+// detectDebianSiblings inspects adjacent directories in a dists hierarchy.
+func detectDebianSiblings(repoDir string) []*logic.SiblingRepo {
+	var siblings []*logic.SiblingRepo
+	absDir, _ := filepath.Abs(repoDir)
+
+	// Case 1: Currently inside binary-<arch> leaf (e.g. dists/noble/main/binary-amd64)
+	if strings.HasPrefix(filepath.Base(absDir), "binary-") {
+		currentArch := filepath.Base(absDir)
+		componentDir := filepath.Dir(absDir)
+		suiteDir := filepath.Dir(componentDir)
+
+		// 1. Architecture siblings within the same component
+		var archSiblings []*logic.SiblingRepo
+		if entries, err := os.ReadDir(componentDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() && strings.HasPrefix(e.Name(), "binary-") {
+					archSiblings = append(archSiblings, &logic.SiblingRepo{
+						Name:     strings.TrimPrefix(e.Name(), "binary-"),
+						RelURL:   fmt.Sprintf("../%s/repoview/index.html", e.Name()),
+						IsActive: e.Name() == currentArch,
+					})
+				}
+			}
+			if len(archSiblings) > 1 {
+				siblings = append(siblings, archSiblings...)
+			}
+		}
+
+		// 2. Component siblings across the same suite (e.g. main vs universe)
+		if entries, err := os.ReadDir(suiteDir); err == nil && len(siblings) <= 1 {
+			var compSiblings []*logic.SiblingRepo
+			currentComponent := filepath.Base(componentDir)
+			for _, e := range entries {
+				siblingLeaf := filepath.Join(suiteDir, e.Name(), currentArch)
+				if fi, err := os.Stat(siblingLeaf); err == nil && fi.IsDir() {
+					compSiblings = append(compSiblings, &logic.SiblingRepo{
+						Name:     e.Name(),
+						RelURL:   fmt.Sprintf("../../%s/%s/repoview/index.html", e.Name(), currentArch),
+						IsActive: e.Name() == currentComponent,
+					})
+				}
+			}
+			if len(compSiblings) > 1 {
+				siblings = append(siblings, compSiblings...)
+			}
+		}
+	}
+	return siblings
+}
+
+// detectFormat sniffs signatures in the root repository folder.
+func detectFormat(repoDir string) models.RepoFormat {
+	if _, err := os.Stat(filepath.Join(repoDir, "repodata", "repomd.xml")); err == nil {
+		return models.FormatRPM
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "dists")); err == nil {
+		return models.FormatDEB
+	}
+	if matches, _ := filepath.Glob(filepath.Join(repoDir, "Packages*")); len(matches) > 0 {
+		return models.FormatDEB
+	}
+	base := filepath.Base(repoDir)
+	if strings.HasPrefix(base, "binary-") {
+		return models.FormatDEB
+	}
+	return models.FormatRPM // Default fallback
+}
+
 // validateOutputDirSafety ensures that outputDir is safe to write/delete without risking data loss.
 // It verifies that outputDir:
 // 1. Is not identical to the repository directory
 // 2. Is not a parent of the repository directory
 // 3. Is not the filesystem root
-// 4. Does not contain a repodata directory
+// 4. Does not contain a repodata or dists directory
 func validateOutputDirSafety(repoDir, outputDir string) error {
 	absRepo, err := filepath.Abs(repoDir)
 	if err != nil {
@@ -687,10 +788,14 @@ func validateOutputDirSafety(repoDir, outputDir string) error {
 		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir cannot be the filesystem root (%s)", absOut)}
 	}
 
-	// 4. Output directory cannot contain repodata
+	// 4. Output directory cannot contain repodata or dists
 	repodataCheck := filepath.Join(absOut, "repodata")
 	if fi, err := os.Stat(repodataCheck); err == nil && fi.IsDir() {
 		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) contains a repodata directory; refusing to delete or overwrite repository contents", absOut)}
+	}
+	distsCheck := filepath.Join(absOut, "dists")
+	if fi, err := os.Stat(distsCheck); err == nil && fi.IsDir() {
+		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) contains a dists directory; refusing to delete or overwrite repository contents", absOut)}
 	}
 
 	return nil

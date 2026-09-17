@@ -314,3 +314,85 @@ func TestCompsGroups(t *testing.T) {
 		t.Errorf("expected latest nginx version 1.22, got %v", nginxPkg)
 	}
 }
+
+func TestMapDebianSectionToGroup(t *testing.T) {
+	tests := []struct {
+		section  string
+		expected string
+	}{
+		{"database", "applications/databases"},
+		{"main/database", "applications/databases"},
+		{"universe/web", "applications/internet"},
+		{"httpd", "applications/internet"},
+		{"devel", "development/tools"},
+		{"libdevel", "development/libraries"},
+		{"libs", "development/libraries"},
+		{"admin", "applications/system"},
+		{"shells", "system/shells"},
+		{"tex", "applications/publishing"},
+		{"text", "applications/text"},
+		{"python", "development/languages"},
+		{"default", ""},
+		{"unspecified", ""},
+		{"misc", ""},
+		{"", ""},
+	}
+
+	for _, tc := range tests {
+		got := MapDebianSectionToGroup(tc.section)
+		if got != tc.expected {
+			t.Errorf("MapDebianSectionToGroup(%q) = %q; want %q", tc.section, got, tc.expected)
+		}
+	}
+}
+
+func TestDebianGrouping_Inference(t *testing.T) {
+	pkgs := []*models.Package{
+		{Format: models.FormatDEB, Name: "libreoffice26.8", Version: "1.0", Section: "default"},
+		{Format: models.FormatDEB, Name: "libobasis26.8-core", Version: "1.0", Section: ""},
+		{Format: models.FormatDEB, Name: "rclone", Version: "1.0", Section: "default"},
+		{Format: models.FormatDEB, Name: "gcsfuse", Version: "1.0", Section: "unspecified"},
+		{Format: models.FormatDEB, Name: "miller", Version: "1.0", Section: ""},
+		{Format: models.FormatDEB, Name: "proxysql", Version: "1.0", Section: "database"},
+		{Format: models.FormatDEB, Name: "clamav", Version: "1.0", Section: "devel"},
+	}
+
+	service := NewGroupingService(pkgs, nil)
+	groups, err := service.GetGroups()
+	if err != nil {
+		t.Fatalf("GetGroups failed: %v", err)
+	}
+
+	groupMap := make(map[string]*GroupData)
+	for _, g := range groups {
+		groupMap[g.Name] = g
+	}
+
+	// Verify "default" and "unspecified" groups do NOT exist
+	if groupMap["default"] != nil {
+		t.Errorf("group 'default' should have been eliminated")
+	}
+	if groupMap["unspecified"] != nil {
+		t.Errorf("group 'unspecified' should have been eliminated")
+	}
+
+	// Verify inferred groups
+	if groupMap["applications/productivity"] == nil || len(groupMap["applications/productivity"].Packages) != 2 {
+		t.Errorf("expected 2 packages in applications/productivity (libreoffice, libobasis)")
+	}
+	if groupMap["applications/internet"] == nil {
+		t.Errorf("expected rclone in applications/internet")
+	}
+	if groupMap["system environment/base"] == nil {
+		t.Errorf("expected gcsfuse in system environment/base")
+	}
+	if groupMap["applications/text"] == nil {
+		t.Errorf("expected miller in applications/text")
+	}
+	if groupMap["applications/databases"] == nil {
+		t.Errorf("expected proxysql in applications/databases")
+	}
+	if groupMap["system environment/security"] == nil {
+		t.Errorf("expected clamav in system environment/security")
+	}
+}

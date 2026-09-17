@@ -47,7 +47,14 @@ func TestValidateOutputDirSafety(t *testing.T) {
 		t.Errorf("expected error when outputDir contains repodata, got nil")
 	}
 
-	// 5. Normal output directory must succeed
+	// 5. Directory containing dists must fail with safety error
+	fakeDebRepo := filepath.Join(tempDir, "deb_repo")
+	_ = os.MkdirAll(filepath.Join(fakeDebRepo, "dists"), 0o755)
+	if err := validateOutputDirSafety(repoDir, fakeDebRepo); err == nil {
+		t.Errorf("expected error when outputDir contains dists, got nil")
+	}
+
+	// 6. Normal output directory must succeed
 	validOut := filepath.Join(repoDir, "repoview")
 	if err := validateOutputDirSafety(repoDir, validOut); err != nil {
 		t.Errorf("expected valid outputDir to succeed, got: %v", err)

@@ -57,6 +57,7 @@ type RepoContext struct {
 	Siblings  []*logic.SiblingRepo   // Neighboring repository channels or architectures
 	RepoID    string                 // Normalized repository identifier for .repo configuration
 	BaseURL   string                 // Explicit or derived repository HTTP/HTTPS base URL
+	Format    models.RepoFormat      // Underlying repository format ("rpm" or "deb")
 }
 
 // Renderer handles the generation of HTML and XML files using templates.
@@ -84,6 +85,11 @@ func (r *Renderer) SetSiblings(siblings []*logic.SiblingRepo) {
 func (r *Renderer) SetRepoMeta(repoID, baseURL string) {
 	r.RepoCtx.RepoID = repoID
 	r.RepoCtx.BaseURL = baseURL
+}
+
+// SetFormat sets the repository package format in the global repo context.
+func (r *Renderer) SetFormat(format models.RepoFormat) {
+	r.RepoCtx.Format = format
 }
 
 // NewRenderer initializes a new Renderer instance.
@@ -281,7 +287,7 @@ func (r *Renderer) WriteToFile(filename string, content []byte) error {
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := util.EnsureDir(dir); err != nil {
 		return fmt.Errorf("failed to create directory for %s: %w", fullPath, err)
 	}
 
@@ -291,6 +297,14 @@ func (r *Renderer) WriteToFile(filename string, content []byte) error {
 		return fmt.Errorf("failed to create temp file for %s: %w", fullPath, err)
 	}
 	tmpName := tmpFile.Name()
+
+	// Ensure the generated web file has DefaultFilePerm permissions (os.CreateTemp defaults to 0600)
+	// #nosec G302, G306 -- public web pages require standard permissions for web server access
+	if err := os.Chmod(tmpName, util.DefaultFilePerm); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("failed to chmod temp file for %s: %w", fullPath, err)
+	}
 
 	if _, err := tmpFile.Write(content); err != nil {
 		_ = tmpFile.Close()
@@ -321,7 +335,7 @@ func (r *Renderer) WriteToFile(filename string, content []byte) error {
 // It supports both embedded assets and custom assets from the filesystem.
 func (r *Renderer) WriteAssets() error {
 	layoutDir := filepath.Join(r.OutDir, "layout")
-	if err := os.MkdirAll(layoutDir, 0o750); err != nil {
+	if err := util.EnsureDir(layoutDir); err != nil {
 		return err
 	}
 
@@ -342,15 +356,14 @@ func (r *Renderer) WriteAssets() error {
 			}
 			destPath := filepath.Join(layoutDir, relPath)
 			if d.IsDir() {
-				return os.MkdirAll(destPath, 0o750)
+				return util.EnsureDir(destPath)
 			}
 			// #nosec G304, G122 -- path is discovered from walking validated user templateDir
 			content, err := os.ReadFile(filepath.Clean(path))
 			if err != nil {
 				return err
 			}
-			// #nosec G306, G703 -- static web assets require 0644 permissions for web servers
-			return os.WriteFile(destPath, content, 0o644)
+			return util.WriteWebFile(destPath, content)
 		})
 	}
 
@@ -365,7 +378,7 @@ func (r *Renderer) WriteAssets() error {
 		}
 		destPath := filepath.Join(layoutDir, relPath)
 		if d.IsDir() {
-			return os.MkdirAll(destPath, 0o750)
+			return util.EnsureDir(destPath)
 		}
 
 		// Read file content
@@ -375,7 +388,6 @@ func (r *Renderer) WriteAssets() error {
 		}
 
 		// Write to output
-		// #nosec G306 -- static web assets require 0644 permissions for web servers
-		return os.WriteFile(destPath, content, 0o644)
+		return util.WriteWebFile(destPath, content)
 	})
 }

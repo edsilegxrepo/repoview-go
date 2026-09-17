@@ -5,7 +5,34 @@ All notable changes to the `repoview-go` project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-09-16
+## [v0.2.0] - 2026-09-17
+
+### Debian Repository Support & Architectural Generalization
+
+A major release expanding **RepoView-Go** into a multi-format repository browser with native Debian/Ubuntu (`.deb`) support, format-adaptive UI workflows, unified domain models, and web-accessible permission standards.
+
+#### Debian (`.deb`) Support & Pipeline
+- **Native Debian Ingestion**: Added full support for Debian repositories parsing `deb822` `Packages` and `Release` indexes using `pault.ag/go/debian`.
+- **Multi-Component Aggregation**: Discovers and aggregates packages across multi-component suites (`main`, `universe`, `multiverse`, `restricted`) and `binary-all` with cross-component deduplication.
+- **Deep `.deb` Binary Inspection**: Extracts maintainer scripts (`preinst`, `postinst`, `prerm`, `postrm`), installed file manifests, and changelogs (`changelog.Debian.gz`) from `ar`/`tar` archive members with seek position recovery.
+- **Build Timestamp Extraction**: Direct extraction of archive creation timestamps from `ar` headers, eliminating `1969-12-31` Unix epoch fallback dates.
+- **Section Taxonomy Mapping**: Mapped all 33 Debian Policy sections to canonical Repoview categories with automated heuristic inference for unclassified packages.
+- **Debian Version Sorting**: Integrated exact Debian EVR comparison semantics via `pault.ag/go/debian/version`.
+- **Automatic Format Detection**: Added repository auto-detection with CLI override flag (`--format auto|rpm|deb`).
+
+#### Domain Models & Unified Ingestion
+- **Format-Agnostic Abstractions**: Modernized data models to `PackageDetails`, `PackageFile`, `PackageScriptlets`, and format-neutral `SourcePackage`.
+- **Unified `RepoReader` Interface**: Standardized ingestion and on-demand file inspection across both SQLite/RPM and Deb822/DEB backends.
+- **Zero RPM Regressions**: Preserved full parity for RPM database fields (`SourceRPM`, `RpmGroup`), CPIO file manifests, GPG signature verification (`rpm -vK`), and Comps XML grouping.
+
+#### User Interface & Experience
+- **Dark Theme Default**: Switched default visual mode to dark theme - **Format-Adaptive Install Tabs**: Displays tailored client install commands (`apt` / `dpkg` on Debian; `dnf` / `yum` on RPM) with 1-click clipboard copy.
+- **Deb822 Sources Generation**: Client setup modal automatically outputs modern Deb822 `.sources` configuration snippets alongside standard RPM `.repo` files.
+
+#### Security, Permissions & Quality Assurance
+- **Web-Accessible Permissions Hardening**: Enforced standard umask (`0022`), `0755` directory traversal, and `0644` file permissions (`util.EnsureDir`, `util.WriteWebFile`) across all generated static output files.
+
+## [v0.1.0] - 2026-09-16
 
 ### Initial Release
 

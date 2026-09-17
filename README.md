@@ -1,11 +1,11 @@
 # RepoView-Go
 
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue.svg)](https://golang.org)
-[![Coverage](https://img.shields.io/badge/Coverage-83.5%25-brightgreen.svg)](TESTING.md)
+[![Coverage](https://img.shields.io/badge/Coverage-85.9%25-brightgreen.svg)](TESTING.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Air--Gap Compliant](https://img.shields.io/badge/Air--Gap-100%25%20Compliant-success.svg)](ARCHITECTURE.md)
 
-**RepoView-Go** is a high-performance, modern replacement for the legacy Python `repoview` utility. It compiles RPM repository metadata (`repodata/`) and package headers into a modern, static, searchable web browsing portal for YUM/DNF repositories.
+**RepoView-Go** is a high-performance replacement for the legacy Python `repoview` utility. It compiles repository metadata and package headers—supporting both **RPM (YUM/DNF)** and **Debian/Ubuntu (APT/dpkg)** repositories—into a modern, static, searchable web browsing portal.
 
 ---
 
@@ -22,7 +22,8 @@
 3. [Code Quality Assessment and Best Practices](#3-code-quality-assessment-and-best-practices)
 4. [Command Line Arguments](#4-command-line-arguments)
 5. [Usage and Deployment Examples](#5-usage-and-deployment-examples)
-   - [Basic Repository Generation](#basic-repository-generation)
+   - [Basic Repository Generation (RPM)](#basic-repository-generation-rpm)
+   - [Debian / Ubuntu Repository Generation](#debian--ubuntu-repository-generation)
    - [Incremental Build & Cache Utilization](#incremental-build--cache-utilization)
    - [Enterprise Customization](#enterprise-customization)
    - [Automated Production Deployment (Systemd Timer)](#automated-production-deployment-systemd-timer)
@@ -34,13 +35,16 @@
 
 ## 1. Application Overview and Objectives
 
-The primary objective of `repoview-go` is to deliver a blazingly fast, reliable, and air-gap compliant static site generator for enterprise RPM repositories. It replaces the obsolete Python 2 `repoview` implementation (which relied on the unmaintained `kid` templating engine and suffered from quadratic slowdowns on large repositories) with an optimized, concurrent Go architecture.
+The primary objective of `repoview-go` is to deliver a blazingly fast, reliable, and air-gap compliant static site generator for enterprise Linux repositories. It replaces the obsolete Python 2 `repoview` implementation (which relied on the unmaintained `kid` templating engine and suffered from quadratic slowdowns on large repositories) with an optimized, concurrent Go architecture supporting both **RPM (YUM/DNF)** and **Debian/Ubuntu (APT/dpkg)** repository structures.
 
 ### Key Objectives
 
+- **Multi-Format Repository Ingestion**: Transparently ingests RPM repositories (`repodata/` XML and SQLite, `comps.xml`, `.rpm` packages) and Debian repositories (`dists/` suite/component hierarchies, flat repositories, `Packages` indices, and `.deb` archives).
 - **100% Static Output (Zero Server-Side Runtime)**: Generates static HTML5, CSS, JSON, and XML files that can be hosted on any web server (Nginx, Apache, Caddy, AWS S3, Cloudflare Pages) without server-side application runtimes or active database connections.
 - **Air-Gap Compliance (Zero External Network Calls)**: All fonts, layout templates, glassmorphic stylesheets, and search engines are bundled directly into the binary via `embed.FS`. The generated site makes **zero outbound HTTP calls** to public CDNs, Google Fonts, or external analytics.
 - **Sub-Second Client-Side Search**: Automatically indexes package names, summaries, architectures, and descriptions into a compact `search.json` file. An embedded, zero-dependency Vanilla JS search engine powers real-time filtering directly in the client browser.
+- **Client Configuration Generation**: Generates ready-to-copy client repository configuration files: `.repo` files for YUM/DNF clients and modern Deb822 `.sources` format files for APT clients.
+- **Universal RSS 2.0 Feeds**: Unconditionally produces `latest-feed.xml` containing newly added or updated packages, complete with a persistent RSS feed button in the web interface.
 - **High Concurrency & Multi-Core Scaling**: Implements a bounded goroutine worker pool (`runtime.NumCPU() * 2`) to render thousands of package pages in parallel without exhausting filesystem descriptors or memory.
 - **Content-Hashed Incremental Builds**: Tracks SHA-256 content hashes in `.state.json`. Unmodified packages are skipped during subsequent runs, reducing update times by >90% while automatically pruning deleted (stale) packages.
 - **Strict Legacy Layout Compatibility**: Preserves canonical URL routing (`index.html`, `*.group.html`, `<name>.html`, `latest-feed.xml`), ensuring drop-in replacement compatibility for existing mirror infrastructures.
@@ -92,6 +96,7 @@ All third-party dependencies are continuously audited using `govulncheck` and pi
 | `github.com/ulikunitz/xz` | `v0.5.16` | BSD-3-Clause | Pure Go XZ decompression engine. Protected against integer overflows and malicious headers. Zero known CVEs. |
 | `github.com/knqyf263/go-rpm-version` | Latest | MIT | Upstream RPM EVR comparison engine. Pure Go, allocation-free comparison logic. Zero known CVEs. |
 | `github.com/sassoftware/go-rpmutils` | `v0.4.0` | Apache-2.0 | RPM payload reader for lead, header, scriptlet, and file extraction. Protected against malformed headers. Zero known CVEs. |
+| `pault.ag/go/debian` | `v0.21.0` | MIT | Debian control, Deb822 index parsing, and Debian EVR version comparisons. Zero known CVEs. |
 
 ### Unprivileged Context Enforcement
 
@@ -119,15 +124,16 @@ The RepoView-Go codebase has been engineered to meet rigorous enterprise softwar
   Synchronized access to shared data structures is guaranteed via `sync.RWMutex`, `sync.Mutex`, and `sync/atomic` counters.
 - **Memory Optimization (On-Demand Loading)**: For repositories with 50,000+ packages, package file lists are loaded into memory on-demand only during package page rendering and immediately freed via `defer` pointer nulling, keeping resident RAM below 200 MB.
 - **Batch Database Processing**: SQLite changelogs and dependencies are fetched using dynamic SQL parameter blocks in chunks of 500 packages, eliminating per-package round-trips.
-- **Comprehensive Test Coverage**: Tested to **83.5% statement coverage** across the entire codebase, with every individual package independently exceeding 80%:
-  - `cmd/repoview`: **87.2%**
-  - `internal/app`: **84.3%**
-  - `internal/logic`: **81.7%**
-  - `internal/models`: **92.2%**
-  - `internal/render`: **82.6%**
-  - `internal/repo`: **81.0%**
-  - `internal/state`: **85.9%**
-  - `internal/util`: **88.9%**
+- **Comprehensive Test Coverage**: Tested to **85.9% statement coverage** across the entire codebase, with every individual package independently exceeding 80%:
+  - `cmd/repoview`: **92.6%**
+  - `internal/app`: **86.0%**
+  - `internal/logic`: **80.4%**
+  - `internal/models`: **94.0%**
+  - `internal/render`: **81.3%**
+  - `internal/repo`: **82.8%**
+  - `internal/repo/deb`: **89.7%**
+  - `internal/state`: **87.1%**
+  - `internal/util`: **94.6%**
 - **Zero Repository Pollution**: All unit and integration test fixtures execute exclusively within `t.TempDir()` sandboxes.
 
 ---
@@ -146,9 +152,10 @@ Usage: repoview [options] <repodir>
 | `--state-dir` | `string` | *(Output Dir)* | Directory where `.state.json` is stored for incremental builds. |
 | `--title` | `string` | `Repoview` | Repository title displayed prominently in the web interface header and RSS feed. |
 | `--url` | `string` | *(Empty)* | Public HTTP(S) URL of the repository (required for generating `latest-feed.xml`). |
-| `--baseurl` | `string` | *(Auto-detected)* | Base URL injected into client `.repo` configuration snippets. If omitted, detects browser URL. |
+| `--baseurl` | `string` | *(Auto-detected)* | Base URL injected into client `.repo` and `.sources` configuration snippets. |
+| `--format` | `string` | `auto` | Repository format: `auto` (auto-detects format), `rpm` (YUM/DNF), or `deb` (APT/dpkg). |
 | `--template-dir` | `string` | *(Embedded)* | Path to an external directory containing custom `.html` templates and `layout/` assets. |
-| `--comps` | `string` | *(repodata)* | Path to an alternative `comps.xml` package group definition file. |
+| `--comps` | `string` | *(repodata)* | Path to an alternative `comps.xml` package group definition file (RPM). |
 | `--ignore-package` | `string list` | *(None)* | Glob pattern to exclude packages by name or NVRA (e.g. `*debuginfo*`). Can be repeated. |
 | `--exclude-arch` | `string list` | *(None)* | Hardware architecture to exclude (e.g. `src`, `i686`). Can be repeated. |
 | `--force` | `bool` | `false` | Force complete regeneration of all HTML pages, bypassing incremental state cache. |
@@ -159,9 +166,9 @@ Usage: repoview [options] <repodir>
 
 ## 5. Usage and Deployment Examples
 
-### Basic Repository Generation
+### Basic Repository Generation (RPM)
 
-Generate a static repository portal in the default `./repoview` subdirectory:
+Generate a static repository portal for an RPM repository in the default `./repoview` subdirectory:
 
 ```bash
 repoview /var/www/html/repo/el9/base/x86_64
@@ -188,6 +195,42 @@ Writing latest-feed.xml
 Cleaning up stale files...
 Complete.
 ```
+
+---
+
+### Debian / Ubuntu Repository Generation
+
+Generate a static repository portal for an APT repository (standard `dists/` pool layout or flat directory structure):
+
+```bash
+repoview \
+  --title "Debian 12 (Bookworm) - Main" \
+  --url "https://apt.example.com/debian/repoview" \
+  --baseurl "https://apt.example.com/debian" \
+  /var/www/html/repo/debian/bookworm
+```
+
+**Console Output:**
+```text
+Examining repository...done
+Discovered Debian repository: suite=bookworm, component=main, arch=amd64
+Reading packages...found 1420 packages
+Filtered down to 1420 packages
+Inspecting Debian package headers...done
+ organizing groups...done (18 groups, 26 letters)
+Generating pages...
+Writing group web.group.html
+Writing group admin.group.html
+Writing package curl.html
+Writing package nginx.html
+Writing search.json
+Writing index.html
+Writing latest-feed.xml
+Cleaning up stale files...
+Complete.
+```
+
+*(Debian package pages automatically feature `sudo apt install <pkg>` installation snippets, maintainer scripts extracted from `control.tar`, file manifests from `data.tar`, and a copy-ready Deb822 `.sources` file in the sidebar).*
 
 ---
 

@@ -152,7 +152,9 @@ func TestRepositoryAccess_Lifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRepositoryAccess failed: %v", err)
 	}
-	defer repoAccess.Close()
+	defer func() {
+		_ = repoAccess.Close()
+	}()
 
 	// 1. Test GetAllPackages
 	pkgs, err := repoAccess.GetAllPackages()
@@ -165,6 +167,15 @@ func TestRepositoryAccess_Lifecycle(t *testing.T) {
 	pkg := pkgs[0]
 	if pkg.Name != "demo" || pkg.Version != "1.0" || pkg.InstalledSize != 2097152 {
 		t.Errorf("unexpected package data: %+v", pkg)
+	}
+	if pkg.SourceRPM != "demo-1.0-1.src.rpm" {
+		t.Errorf("expected SourceRPM to be demo-1.0-1.src.rpm, got %s", pkg.SourceRPM)
+	}
+	if pkg.SourcePackage != "demo-1.0-1.src.rpm" {
+		t.Errorf("expected SourcePackage to be demo-1.0-1.src.rpm, got %s", pkg.SourcePackage)
+	}
+	if pkg.Format != models.FormatRPM {
+		t.Errorf("expected Format to be %s, got %s", models.FormatRPM, pkg.Format)
 	}
 
 	// 2. Test GetChangelogForPackage
@@ -219,5 +230,42 @@ func TestCleanAuthor(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("cleanAuthor(%q) = %q; want %q", tt.input, got, tt.expected)
 		}
+	}
+}
+
+func TestRepositoryAccess_EnrichAndReadFiles(t *testing.T) {
+	primaryPath, otherPath := setupTestDBs(t)
+	ra, err := NewRepositoryAccess(primaryPath, otherPath)
+	if err != nil {
+		t.Fatalf("failed to open repo access: %v", err)
+	}
+	defer func() { _ = ra.Close() }()
+
+	tempDir := t.TempDir()
+
+	// 1. EnrichPackageDetails
+	pkg := &models.Package{
+		Name:         "demo",
+		LocationHref: "demo-1.0.rpm",
+	}
+	ra.EnrichPackageDetails(tempDir, []*models.Package{pkg})
+
+	// 2. ReadPackageFiles with empty location href
+	emptyPkg := &models.Package{LocationHref: ""}
+	files, err := ra.ReadPackageFiles(tempDir, emptyPkg)
+	if err != nil || len(files) != 0 {
+		t.Errorf("expected nil files and error for empty href, got files=%v err=%v", files, err)
+	}
+
+	// 3. ReadPackageFiles with traversal path
+	evilPkg := &models.Package{LocationHref: "../../evil.rpm"}
+	if _, err := ra.ReadPackageFiles(tempDir, evilPkg); err == nil {
+		t.Errorf("expected error for traversal path, got nil")
+	}
+
+	// 4. ReadPackageFiles with missing file
+	missingPkg := &models.Package{LocationHref: "missing.rpm"}
+	if _, err := ra.ReadPackageFiles(tempDir, missingPkg); err == nil {
+		t.Errorf("expected error for missing rpm file, got nil")
 	}
 }
