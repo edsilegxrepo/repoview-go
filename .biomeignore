@@ -1,0 +1,2 @@
+# Ignore Go HTML templates from Biome parser (Go template expressions are parsed by html/template)
+**/*.html

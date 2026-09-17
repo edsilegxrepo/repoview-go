@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>RepoView: {{ .Repo.Title }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="layout/repostyle.css" type="text/css">
+  {{ if .URL }}<link rel="alternate" type="application/rss+xml" title="RSS" href="latest-feed.xml">{{ end }}
+  <meta name="robots" content="index,follow">
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="brand-row">
+                <a href="index.html" class="brand-title">
+                    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                        <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                    </svg>
+                    <span>{{ .Repo.Title }}</span>
+                </a>
+                <div class="header-actions">
+                    <button id="themeToggleBtn" class="icon-btn" title="Toggle theme">
+                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                        </svg>
+                    </button>
+                    <button type="button" class="icon-btn btn-open-repo-modal" title="Configure DNF/YUM Repository (.repo file)" aria-haspopup="dialog" aria-controls="repoConfigModal">
+                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                    </button>
+                    {{ if .URL }}
+                    <a href="latest-feed.xml" class="icon-btn" title="RSS Feed" target="_blank">
+                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                            <path d="M4 11a9 9 0 0 1 9 9"></path>
+                            <path d="M4 4a16 16 0 0 1 16 16"></path>
+                            <circle cx="5" cy="19" r="1"></circle>
+                        </svg>
+                    </a>
+                    {{ end }}
+                </div>
+            </div>
+            <div class="search-container">
+                <div class="search-input-wrapper">
+                    <svg class="search-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    <input type="text" id="pkgSearchInput" placeholder="Search packages..." autocomplete="off">
+                    <span class="kbd-hint">/</span>
+                </div>
+                <div id="searchResults"></div>
+            </div>
+        </div>
+
+        <nav class="sidebar-tree">
+            <div class="nav-section">
+                <div class="nav-section-title">Navigation</div>
+                <ul class="nav-list">
+                    <li>
+                        <a href="index.html" class="nav-item-link active">
+                            <span class="nav-item-label">Repository Home</span>
+                        </a>
+                    </li>
+                </ul>
+            </div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">
+                    <span>Package Groups</span>
+                    <span class="count-badge">{{ len .Repo.Groups }}</span>
+                </div>
+                <div class="nav-tree">
+                    {{ range .Repo.GroupTree }}
+                    {{ if .IsLeaf }}
+                    <div class="nav-tree-leaf">
+                        <a href="{{ .Filename }}" class="nav-item-link" title="{{ .Name }}">
+                            <span class="nav-item-label">{{ .Name }}</span>
+                            <span class="count-badge">{{ .TotalPackages }}</span>
+                        </a>
+                    </div>
+                    {{ else }}
+                    <details class="nav-tree-category" open>
+                        <summary class="nav-tree-summary" title="{{ .Name }} ({{ .TotalPackages }} packages)">
+                            <span class="nav-tree-title">
+                                <span class="nav-tree-icon">&#9656;</span>
+                                <span class="nav-tree-cat-name">{{ .Name }}</span>
+                            </span>
+                            <span class="count-badge">{{ .TotalPackages }}</span>
+                        </summary>
+                        <ul class="nav-tree-list">
+                            {{ range .Subgroups }}
+                            <li>
+                                <a href="{{ .Filename }}" class="nav-tree-item-link" title="{{ .FullName }}">
+                                    <span class="nav-tree-branch">&#9500;&#9472;</span>
+                                    <span class="nav-tree-sub-name">{{ .Name }}</span>
+                                    <span class="count-badge">{{ .Count }}</span>
+                                </a>
+                            </li>
+                            {{ end }}
+                        </ul>
+                    </details>
+                    {{ end }}
+                    {{ end }}
+                </div>
+            </div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">By Letter</div>
+                <div class="letter-matrix">
+                    {{ range .Repo.Letters }}
+                    <a href="letter_{{ . | lower }}.group.html" class="letter-matrix-link">{{ . }}</a>
+                    {{ end }}
+                </div>
+            </div>
+        </nav>
+
+        <footer class="sidebar-footer">
+            <span>RepoView-Go</span>
+            <a href="https://github.com/mshedsilegx/repoview-ng" target="_blank" rel="noopener">v{{ .Repo.MyVersion }}</a>
+        </footer>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item active" aria-current="page">Home</li>
+                </ol>
+            </nav>
+            <div class="top-bar-actions">
+                {{ if gt (len .Repo.Siblings) 1 }}
+                <div class="sibling-switcher">
+                    <span class="switcher-label">Channel/Arch:</span>
+                    <div class="sibling-chips">
+                        {{ range .Repo.Siblings }}
+                        <a href="{{ .RelURL }}" class="sibling-chip {{ if .IsActive }}active{{ end }}" title="Switch to {{ .Name }} repository">
+                            {{ .Name }}
+                        </a>
+                        {{ end }}
+                    </div>
+                </div>
+                {{ end }}
+                <button type="button" class="btn-configure-repo btn-open-repo-modal" title="Configure DNF/YUM Repository">
+                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>Configure DNF / YUM (.repo)</span>
+                </button>
+                <div class="stat-label">Generated: {{ now | ymd }}</div>
+            </div>
+        </header>
+
+        <main class="content-area">
+            <div class="stats-banner">
+                <div class="stat-chip">
+                    <span class="stat-label">Repository:</span>
+                    <span class="stat-value">{{ .Repo.Title }}</span>
+                </div>
+                <div class="stat-chip">
+                    <span class="stat-label">Package Groups:</span>
+                    <span class="stat-value">{{ len .Groups }}</span>
+                </div>
+                <div class="stat-chip">
+                    <span class="stat-label">Latest Packages:</span>
+                    <span class="stat-value">{{ len .Latest }}</span>
+                </div>
+                <div class="stat-chip">
+                    <span class="stat-label">Status:</span>
+                    <span class="stat-value" style="color: #10b981;">Online</span>
+                </div>
+            </div>
+
+            <div class="section-header">
+                <h2 class="section-title">Available Package Groups</h2>
+                <span class="stat-label">{{ len .Groups }} total</span>
+            </div>
+
+            <div class="groups-dense-grid">
+                {{ range .Groups }}
+                <a href="{{ .Filename }}" class="group-dense-card" title="{{ .Name }}">
+                    <span class="group-card-name">{{ .Name }}</span>
+                    <span class="count-badge">{{ len .Packages }} pkgs</span>
+                </a>
+                {{ end }}
+            </div>
+
+            <div class="section-header">
+                <h2 class="section-title">Recent Package Updates</h2>
+                <span class="stat-label">Last {{ len .Latest }} packages</span>
+            </div>
+
+            <div class="table-container">
+                <table class="pkg-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 140px;">Build Date</th>
+                            <th>Package</th>
+                            <th style="width: 80px; text-align: right;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{ range .Latest }}
+                        <tr>
+                            <td>
+                                <span class="date-badge">{{ .TimeBuild | ymd }}</span>
+                            </td>
+                            <td>
+                                <a href="{{ .Filename }}" class="pkg-name-link">{{ .Name }}-{{ .Version }}-{{ .Release }}</a>
+                                <span class="arch-badge" style="margin-left: 0.5rem;">{{ .Arch }}</span>
+                            </td>
+                            <td style="text-align: right;">
+                                <a href="{{ .Filename }}" class="icon-btn" title="View details">&rarr;</a>
+                            </td>
+                        </tr>
+                        {{ end }}
+                    </tbody>
+                </table>
+            </div>
+        </main>
+    </div>
+
+    <div id="repoConfigModal" class="modal-backdrop" hidden>
+        <div class="modal-dialog" role="dialog" aria-labelledby="repoModalTitle" aria-modal="true">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <div class="modal-icon-shield" style="background: var(--primary-subtle); color: var(--primary);">
+                        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                            <polyline points="2 17 12 22 22 17"></polyline>
+                            <polyline points="2 12 12 17 22 12"></polyline>
+                        </svg>
+                    </div>
+                    <div>
+                        <h3 id="repoModalTitle" class="modal-title">Configure Client Repository</h3>
+                        <p class="modal-subtitle">{{ .Repo.Title }}</p>
+                    </div>
+                </div>
+                <button type="button" class="modal-close-btn" id="repoModalCloseBtn" aria-label="Close modal">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <div class="modal-section">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label class="modal-label">1. Repository Configuration File (.repo)</label>
+                        <button type="button" class="cmd-copy-btn" id="btnDownloadRepoFile" title="Download .repo file directly to your computer">
+                            <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            <span>Download .repo</span>
+                        </button>
+                    </div>
+                    <div class="repo-snippet-box">
+                        <pre><code id="repoSnippetCode" data-configured-baseurl="{{ .Repo.BaseURL }}">[{{ if .Repo.RepoID }}{{ .Repo.RepoID }}{{ else }}custom-repository{{ end }}]
+name={{ .Repo.Title }}
+baseurl={{ if .Repo.BaseURL }}{{ .Repo.BaseURL }}{{ else }}$URL{{ end }}
+enabled=1
+gpgcheck=0</code></pre>
+                        <button type="button" class="cmd-copy-btn repo-copy-float" id="btnCopyRepoSnippet" title="Copy configuration snippet">
+                            <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                            </svg>
+                            <span class="copy-text">Copy</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="modal-section">
+                    <label class="modal-label">2. Fast 1-Line Setup on Linux</label>
+                    <div class="cmd-box">
+                        <code id="repoFastSetupCmd" data-configured-baseurl="{{ .Repo.BaseURL }}">sudo tee /etc/yum.repos.d/{{ if .Repo.RepoID }}{{ .Repo.RepoID }}{{ else }}repo{{ end }}.repo &gt; /dev/null &lt;&lt; 'EOF'
+[{{ if .Repo.RepoID }}{{ .Repo.RepoID }}{{ else }}custom-repository{{ end }}]
+name={{ .Repo.Title }}
+baseurl={{ if .Repo.BaseURL }}{{ .Repo.BaseURL }}{{ else }}$URL{{ end }}
+enabled=1
+gpgcheck=0
+EOF</code>
+                        <button type="button" class="cmd-copy-btn" id="btnCopyFastSetup" title="Copy setup script">
+                            <span class="copy-text">Copy</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn-modal-done" id="repoModalDoneBtn">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="layout/search.js"></script>
+</body>
+</html>

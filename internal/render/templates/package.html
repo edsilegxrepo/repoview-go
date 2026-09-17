@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>RepoView: {{ .Pkg.Name }} - {{ .Repo.Title }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="layout/repostyle.css" type="text/css">
+  <meta name="robots" content="noindex,follow">
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="brand-row">
+                <a href="index.html" class="brand-title">
+                    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                        <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                    </svg>
+                    <span>{{ .Repo.Title }}</span>
+                </a>
+                <div class="header-actions">
+                    <button id="themeToggleBtn" class="icon-btn" title="Toggle theme">
+                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                        </svg>
+                    </button>
+                    <a href="latest-feed.xml" class="icon-btn" title="RSS Feed" target="_blank">
+                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                            <path d="M4 11a9 9 0 0 1 9 9"></path>
+                            <path d="M4 4a16 16 0 0 1 16 16"></path>
+                            <circle cx="5" cy="19" r="1"></circle>
+                        </svg>
+                    </a>
+                </div>
+            </div>
+            <div class="search-container">
+                <div class="search-input-wrapper">
+                    <svg class="search-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    <input type="text" id="pkgSearchInput" placeholder="Search packages..." autocomplete="off">
+                    <span class="kbd-hint">/</span>
+                </div>
+                <div id="searchResults"></div>
+            </div>
+        </div>
+
+        <nav class="sidebar-tree">
+            <div class="nav-section">
+                <div class="nav-section-title">Navigation</div>
+                <ul class="nav-list">
+                    <li>
+                        <a href="index.html" class="nav-item-link">
+                            <span class="nav-item-label">&laquo; Repository Home</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ .Group.Filename }}" class="nav-item-link">
+                            <span class="nav-item-label">&larr; Back to {{ .Group.Name }}</span>
+                        </a>
+                    </li>
+                </ul>
+            </div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">
+                    <span>Package Groups</span>
+                    <span class="count-badge">{{ len .Repo.Groups }}</span>
+                </div>
+                <div class="nav-tree">
+                    {{ range .Repo.GroupTree }}
+                    {{ if .IsLeaf }}
+                    <div class="nav-tree-leaf">
+                        <a href="{{ .Filename }}" class="nav-item-link {{ if $.Group }}{{ if eq $.Group.Filename .Filename }}active{{ end }}{{ end }}" title="{{ .Name }}">
+                            <span class="nav-item-label">{{ .Name }}</span>
+                            <span class="count-badge">{{ .TotalPackages }}</span>
+                        </a>
+                    </div>
+                    {{ else }}
+                    <details class="nav-tree-category" open>
+                        <summary class="nav-tree-summary" title="{{ .Name }} ({{ .TotalPackages }} packages)">
+                            <span class="nav-tree-title">
+                                <span class="nav-tree-icon">&#9656;</span>
+                                <span class="nav-tree-cat-name">{{ .Name }}</span>
+                            </span>
+                            <span class="count-badge">{{ .TotalPackages }}</span>
+                        </summary>
+                        <ul class="nav-tree-list">
+                            {{ range .Subgroups }}
+                            <li>
+                                <a href="{{ .Filename }}" class="nav-tree-item-link {{ if $.Group }}{{ if eq $.Group.Filename .Filename }}active{{ end }}{{ end }}" title="{{ .FullName }}">
+                                    <span class="nav-tree-branch">&#9500;&#9472;</span>
+                                    <span class="nav-tree-sub-name">{{ .Name }}</span>
+                                    <span class="count-badge">{{ .Count }}</span>
+                                </a>
+                            </li>
+                            {{ end }}
+                        </ul>
+                    </details>
+                    {{ end }}
+                    {{ end }}
+                </div>
+            </div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">By Letter</div>
+                <div class="letter-matrix">
+                    {{ range .Repo.Letters }}
+                    <a href="letter_{{ . | lower }}.group.html" class="letter-matrix-link">{{ . }}</a>
+                    {{ end }}
+                </div>
+            </div>
+        </nav>
+
+        <footer class="sidebar-footer">
+            <span>RepoView-Go</span>
+            <a href="https://github.com/mshedsilegx/repoview-ng" target="_blank" rel="noopener">v{{ .Repo.MyVersion }}</a>
+        </footer>
+    </aside>
+
+    <div class="main-wrapper">
+        <header class="top-bar">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="index.html">Home</a></li>
+                    <li class="breadcrumb-sep">/</li>
+                    <li class="breadcrumb-item"><a href="{{ .Group.Filename }}">{{ .Group.Name }}</a></li>
+                    <li class="breadcrumb-sep">/</li>
+                    <li class="breadcrumb-item active" aria-current="page">{{ .Pkg.Name }}</li>
+                </ol>
+            </nav>
+            <div class="top-bar-actions">
+                {{ if gt (len .Repo.Siblings) 1 }}
+                <div class="sibling-switcher">
+                    <span class="switcher-label">Channel/Arch:</span>
+                    <div class="sibling-chips">
+                        {{ range .Repo.Siblings }}
+                        <a href="{{ .RelURL }}" class="sibling-chip {{ if .IsActive }}active{{ end }}" title="Switch to {{ .Name }} repository">
+                            {{ .Name }}
+                        </a>
+                        {{ end }}
+                    </div>
+                </div>
+                {{ end }}
+                <div class="stat-label"><a href="{{ .Group.Filename }}">&laquo; {{ .Group.Name }}</a></div>
+            </div>
+        </header>
+
+        <main class="content-area">
+            <div class="pkg-hero">
+                <div class="pkg-hero-top">
+                    <h1 class="pkg-hero-title">
+                        <span>{{ .Pkg.Name }}</span>
+                        <span class="arch-badge">{{ .Pkg.Version }}-{{ .Pkg.Release }}</span>
+                        <span class="arch-badge">{{ .Pkg.Arch }}</span>
+                    </h1>
+                </div>
+                <p class="pkg-hero-summary">{{ .Pkg.Summary }}</p>
+                <div class="quick-install-bar">
+                    <div class="install-tool-tabs">
+                        <button type="button" class="install-tab active" data-tool="dnf" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">dnf</button>
+                        <button type="button" class="install-tab" data-tool="yum" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">yum</button>
+                        <button type="button" class="install-tab" data-tool="wget" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">wget</button>
+                        <button type="button" class="install-tab" data-tool="curl" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">curl</button>
+                    </div>
+                    <div class="install-cmd-wrap">
+                        <code id="installCmdDisplay">sudo dnf install {{ .Pkg.Name }}</code>
+                        <button type="button" class="cmd-copy-btn" id="btnCopyInstallCmd" data-copy="sudo dnf install {{ .Pkg.Name }}" title="Copy install command">
+                            <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                            </svg>
+                            <span class="copy-text">Copy</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="metadata-grid">
+                {{ if .Pkg.URL }}
+                <div class="metadata-card">
+                    <div class="metadata-label">Website</div>
+                    <div class="metadata-value">
+                        <a href="{{ .Pkg.URL }}" target="_blank" rel="noopener noreferrer">{{ .Pkg.URL }} &#x2197;</a>
+                    </div>
+                </div>
+                {{ end }}
+
+                {{ if .Pkg.License }}
+                <div class="metadata-card">
+                    <div class="metadata-label">License</div>
+                    <div class="metadata-value">
+                        <span class="arch-badge" style="background: var(--bg-subtle); color: var(--text-main); border-color: var(--border);">{{ .Pkg.License }}</span>
+                    </div>
+                </div>
+                {{ end }}
+
+                {{ if .Pkg.Vendor }}
+                <div class="metadata-card">
+                    <div class="metadata-label">Vendor</div>
+                    <div class="metadata-value">{{ .Pkg.Vendor }}</div>
+                </div>
+                {{ end }}
+
+                <div class="metadata-card">
+                    <div class="metadata-label">Primary Group</div>
+                    <div class="metadata-value">
+                        <a href="{{ .Group.Filename }}">{{ .Group.Name }}</a>
+                    </div>
+                </div>
+
+                {{ if .Pkg.InstalledSize }}
+                <div class="metadata-card">
+                    <div class="metadata-label">Installed Size & Footprint</div>
+                    <div class="metadata-value">
+                        <span>{{ .Pkg.InstalledSize | humanSize }}</span>
+                        <span style="color: var(--text-subtle); font-size: 0.8rem; margin-left: 0.25rem;">({{ .Pkg.InstalledSize }} bytes)</span>
+                        {{ with (compressionSaved .Pkg.SizePackage .Pkg.InstalledSize) }}
+                        <span class="compression-pill" title="RPM package download is {{ . }} smaller than uncompressed install">
+                            <svg viewBox="0 0 24 24" width="11" height="11" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="6 9 12 15 18 9"></polyline>
+                            </svg>
+                            <span>{{ . }} saved</span>
+                        </span>
+                        {{ end }}
+                    </div>
+                </div>
+                {{ end }}
+
+                {{ if .Pkg.SourceRPM }}
+                <div class="metadata-card">
+                    <div class="metadata-label">Source RPM</div>
+                    <div class="metadata-value" style="font-family: var(--font-mono); font-size: 0.82rem;">{{ .Pkg.SourceRPM }}</div>
+                </div>
+                {{ end }}
+            </div>
+
+            {{ if or .Pkg.BuildHost (and .Pkg.Details .Pkg.Details.Signature) }}
+            <div class="metadata-grid metadata-grid-dual">
+                {{ if .Pkg.BuildHost }}
+                <div class="metadata-card">
+                    <div class="metadata-label">Build Host</div>
+                    <div class="metadata-value" style="font-family: var(--font-mono); font-size: 0.82rem;">{{ .Pkg.BuildHost }}</div>
+                </div>
+                {{ end }}
+
+                {{ if and .Pkg.Details .Pkg.Details.Signature }}
+                <div class="metadata-card">
+                    <div class="metadata-card-header">
+                        <div class="metadata-label">Digital Signature</div>
+                        <button type="button" class="btn-verify" id="btnVerifySignature" aria-haspopup="dialog" aria-controls="verifySignatureModal" title="Verify RPM signature on your system">
+                            <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                                <polyline points="9 12 11 14 15 10"/>
+                            </svg>
+                            <span>Verify</span>
+                        </button>
+                    </div>
+                    <div class="metadata-value" style="font-family: var(--font-mono); font-size: 0.82rem;">{{ .Pkg.Details.Signature }}</div>
+                </div>
+                {{ end }}
+            </div>
+            {{ end }}
+
+            {{ if .Pkg.Description }}
+            <div class="description-card">
+                <div class="metadata-label" style="margin-bottom: 0.6rem;">Package Description</div>
+                <div class="desc-content">
+                    {{ range (paragraphs .Pkg.Description) }}
+                    <p>{{ . }}</p>
+                    {{ end }}
+                </div>
+            </div>
+            {{ end }}
+
+            {{ if and .Pkg.Dependencies .Pkg.Dependencies.HasAny }}
+            <details class="dependencies-container">
+                <summary class="section-header" style="cursor: pointer;">
+                    <h2 class="section-title">
+                        <span>Package Dependencies</span>
+                        {{ if .Pkg.Dependencies.Requires }}
+                        <span class="count-badge">{{ len .Pkg.Dependencies.Requires }} requires</span>
+                        {{ end }}
+                        {{ if .Pkg.Dependencies.Provides }}
+                        <span class="count-badge" style="background: var(--bg-subtle); color: var(--text-subtle);">{{ len .Pkg.Dependencies.Provides }} provides</span>
+                        {{ end }}
+                    </h2>
+                    <span class="stat-label">[Click to toggle]</span>
+                </summary>
+
+                <div class="dep-wrapper" style="margin-top: 1rem;">
+                    <div class="dep-nav-bar">
+                        <div class="dep-tabs">
+                            {{ if .Pkg.Dependencies.Requires }}
+                            <button type="button" class="dep-tab-btn active" data-tab="requires">
+                                Requires ({{ len .Pkg.Dependencies.Requires }})
+                            </button>
+                            {{ end }}
+                            {{ if .Pkg.Dependencies.Provides }}
+                            <button type="button" class="dep-tab-btn {{ if not .Pkg.Dependencies.Requires }}active{{ end }}" data-tab="provides">
+                                Provides ({{ len .Pkg.Dependencies.Provides }})
+                            </button>
+                            {{ end }}
+                            {{ if .Pkg.Dependencies.Conflicts }}
+                            <button type="button" class="dep-tab-btn" data-tab="conflicts">
+                                Conflicts ({{ len .Pkg.Dependencies.Conflicts }})
+                            </button>
+                            {{ end }}
+                            {{ if .Pkg.Dependencies.Obsoletes }}
+                            <button type="button" class="dep-tab-btn" data-tab="obsoletes">
+                                Obsoletes ({{ len .Pkg.Dependencies.Obsoletes }})
+                            </button>
+                            {{ end }}
+                        </div>
+                        <input type="text" class="filter-input dep-filter-input" placeholder="Filter dependencies in list..." autocomplete="off">
+                    </div>
+
+                    {{ if .Pkg.Dependencies.Requires }}
+                    <div class="dep-tab-panel active" id="depPanel-requires">
+                        <div class="dep-grid">
+                            {{ range .Pkg.Dependencies.Requires }}
+                            <div class="dep-item">
+                                <div class="dep-name-group">
+                                    <span class="dep-name">{{ .Name }}</span>
+                                    {{ if .Pre }}
+                                    <span class="dep-pre-badge" title="Pre-install requirement">pre</span>
+                                    {{ end }}
+                                </div>
+                                {{ with .FormattedRelation }}
+                                <span class="dep-relation">{{ . }}</span>
+                                {{ end }}
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                    {{ end }}
+
+                    {{ if .Pkg.Dependencies.Provides }}
+                    <div class="dep-tab-panel {{ if not .Pkg.Dependencies.Requires }}active{{ end }}" id="depPanel-provides">
+                        <div class="dep-grid">
+                            {{ range .Pkg.Dependencies.Provides }}
+                            <div class="dep-item">
+                                <span class="dep-name">{{ .Name }}</span>
+                                {{ with .FormattedRelation }}
+                                <span class="dep-relation">{{ . }}</span>
+                                {{ end }}
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                    {{ end }}
+
+                    {{ if .Pkg.Dependencies.Conflicts }}
+                    <div class="dep-tab-panel" id="depPanel-conflicts">
+                        <div class="dep-grid">
+                            {{ range .Pkg.Dependencies.Conflicts }}
+                            <div class="dep-item dep-item-conflict">
+                                <span class="dep-name">{{ .Name }}</span>
+                                {{ with .FormattedRelation }}
+                                <span class="dep-relation">{{ . }}</span>
+                                {{ end }}
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                    {{ end }}
+
+                    {{ if .Pkg.Dependencies.Obsoletes }}
+                    <div class="dep-tab-panel" id="depPanel-obsoletes">
+                        <div class="dep-grid">
+                            {{ range .Pkg.Dependencies.Obsoletes }}
+                            <div class="dep-item dep-item-obsolete">
+                                <span class="dep-name">{{ .Name }}</span>
+                                {{ with .FormattedRelation }}
+                                <span class="dep-relation">{{ . }}</span>
+                                {{ end }}
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                    {{ end }}
+                </div>
+            </details>
+            {{ end }}
+
+            {{ if and .Pkg.Details .Pkg.Details.Scriptlets }}
+            {{ if .Pkg.Details.Scriptlets.HasAny }}
+            <details class="scriptlets-container">
+                <summary class="section-header" style="cursor: pointer;">
+                    <h2 class="section-title">
+                        <span>Package Scriptlets</span>
+                    </h2>
+                    <span class="stat-label">[Click to toggle]</span>
+                </summary>
+                <div class="scriptlets-body" style="margin-top: 1rem;">
+                    {{ if .Pkg.Details.Scriptlets.PreIn }}
+                    <div class="scriptlet-box">
+                        <div class="scriptlet-header">preinstall scriptlet {{ if .Pkg.Details.Scriptlets.PreInProg }}(using {{ .Pkg.Details.Scriptlets.PreInProg }}){{ end }}:</div>
+                        <div class="scriptlet-code"><pre>{{ .Pkg.Details.Scriptlets.PreIn }}</pre></div>
+                    </div>
+                    {{ end }}
+
+                    {{ if .Pkg.Details.Scriptlets.PostIn }}
+                    <div class="scriptlet-box">
+                        <div class="scriptlet-header">postinstall scriptlet {{ if .Pkg.Details.Scriptlets.PostInProg }}(using {{ .Pkg.Details.Scriptlets.PostInProg }}){{ end }}:</div>
+                        <div class="scriptlet-code"><pre>{{ .Pkg.Details.Scriptlets.PostIn }}</pre></div>
+                    </div>
+                    {{ end }}
+
+                    {{ if .Pkg.Details.Scriptlets.PreUn }}
+                    <div class="scriptlet-box">
+                        <div class="scriptlet-header">preuninstall scriptlet {{ if .Pkg.Details.Scriptlets.PreUnProg }}(using {{ .Pkg.Details.Scriptlets.PreUnProg }}){{ end }}:</div>
+                        <div class="scriptlet-code"><pre>{{ .Pkg.Details.Scriptlets.PreUn }}</pre></div>
+                    </div>
+                    {{ end }}
+
+                    {{ if .Pkg.Details.Scriptlets.PostUn }}
+                    <div class="scriptlet-box">
+                        <div class="scriptlet-header">postuninstall scriptlet {{ if .Pkg.Details.Scriptlets.PostUnProg }}(using {{ .Pkg.Details.Scriptlets.PostUnProg }}){{ end }}:</div>
+                        <div class="scriptlet-code"><pre>{{ .Pkg.Details.Scriptlets.PostUn }}</pre></div>
+                    </div>
+                    {{ end }}
+                </div>
+            </details>
+            {{ end }}
+            {{ end }}
+
+            {{ if and .Pkg.Details .Pkg.Details.Files }}
+            {{ if gt (len .Pkg.Details.Files) 0 }}
+            <details class="files-container">
+                <summary class="section-header" style="cursor: pointer;">
+                    <h2 class="section-title">
+                        <span>Package Files</span>
+                        <span class="count-badge">{{ len .Pkg.Details.Files }} files</span>
+                    </h2>
+                    <span class="stat-label">[Click to toggle]</span>
+                </summary>
+                <div class="filter-bar" style="margin-top: 1rem;">
+                    <input type="text" id="fileFilterInput" class="filter-input" placeholder="Filter files in this package... (instant search)" autocomplete="off">
+                    <span id="fileFilteredCount" class="filter-count">Showing {{ len .Pkg.Details.Files }} of {{ len .Pkg.Details.Files }} files</span>
+                </div>
+                <div class="table-container">
+                    <table class="pkg-table file-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 130px;">Permissions</th>
+                                <th style="width: 160px;">Owner:Group</th>
+                                <th style="width: 100px; text-align: right;">Size</th>
+                                <th>File Path</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {{ range .Pkg.Details.Files }}
+                            <tr>
+                                <td><span class="mode-badge">{{ .Mode }}</span></td>
+                                <td class="owner-cell">{{ .User }}:{{ .Group }}</td>
+                                <td style="text-align: right; font-family: var(--font-mono); font-size: 0.8rem;">{{ .Size }}</td>
+                                <td><span class="file-path">{{ .Name }}</span></td>
+                            </tr>
+                            {{ end }}
+                        </tbody>
+                    </table>
+                </div>
+            </details>
+            {{ end }}
+            {{ end }}
+
+            <div class="section-header">
+                <h2 class="section-title">Available RPM Packages</h2>
+                <span class="stat-label">{{ len .Pkg.AllVersions }} package(s)</span>
+            </div>
+
+            <div class="version-list">
+                {{ range .Pkg.AllVersions }}
+                <div class="version-card">
+                    <div class="version-header">
+                        <a href="../{{ .LocationHref }}" class="version-rpm-link" title="Download RPM package">
+                            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            <span>{{ .Name }}-{{ .Version }}-{{ .Release }}.{{ .Arch }}.rpm</span>
+                        </a>
+                        <div class="version-meta-pills">
+                            <span class="arch-badge">{{ .Arch }}</span>
+                            <span class="size-pill">{{ .SizePackage | humanSize }}</span>
+                        </div>
+                    </div>
+
+                    {{ if .Changelog }}
+                    <details class="changelog-details">
+                        <summary>
+                            <span>Changelog:</span>
+                            <span class="changelog-author">{{ .Changelog.Author }}</span>
+                            <span class="changelog-date">({{ .Changelog.Date | ymd }})</span>
+                        </summary>
+                        <div class="changelog-body">
+                            <pre>{{ .Changelog.Changelog }}</pre>
+                        </div>
+                    </details>
+                    {{ else }}
+                    <div class="changelog-details" style="color: var(--text-subtle); font-size: 0.85rem; font-style: italic;">
+                        (no changelog entry)
+                    </div>
+                    {{ end }}
+                </div>
+                {{ end }}
+            </div>
+        </main>
+    </div>
+
+    {{ if and .Pkg.Details .Pkg.Details.Signature }}
+    <div id="verifySignatureModal" class="modal-backdrop" hidden>
+        <div class="modal-dialog" role="dialog" aria-labelledby="verifyModalTitle" aria-modal="true">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <div class="modal-icon-shield">
+                        <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                            <polyline points="9 12 11 14 15 10"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <h3 id="verifyModalTitle" class="modal-title">Verify Digital Signature</h3>
+                        <p class="modal-subtitle">{{ .Pkg.RPMFilename }}</p>
+                    </div>
+                </div>
+                <button type="button" class="modal-close-btn" id="modalCloseBtn" aria-label="Close modal">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <div class="modal-section">
+                    <label class="modal-label">1. Run Verification Command on Linux</label>
+                    <div class="cmd-box">
+                        <code id="verifyCmdCode">rpm -vK {{ .Pkg.RPMFilename }}</code>
+                        <button type="button" class="cmd-copy-btn" id="copyVerifyCmdBtn" data-copy="rpm -vK {{ .Pkg.RPMFilename }}" title="Copy command to clipboard">
+                            <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                            </svg>
+                            <span class="copy-text">Copy</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="modal-section">
+                    <label class="modal-label">2. Signature Details</label>
+                    <div class="key-props-grid">
+                        <div class="key-prop-item">
+                            <span class="key-prop-name">Key ID:</span>
+                            <div class="key-prop-val-wrap">
+                                <code class="key-prop-val">{{ if .Pkg.Details.KeyID }}{{ .Pkg.Details.KeyID }}{{ else }}—{{ end }}</code>
+                                {{ if .Pkg.Details.KeyID }}
+                                <button type="button" class="key-copy-btn" data-copy="{{ .Pkg.Details.KeyID }}" title="Copy Key ID">
+                                    <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                                    </svg>
+                                    <span class="copy-text">Copy</span>
+                                </button>
+                                {{ end }}
+                            </div>
+                        </div>
+                        <div class="key-prop-item">
+                            <span class="key-prop-name">Algorithm:</span>
+                            <span class="key-prop-val">{{ if .Pkg.Details.SigType }}{{ .Pkg.Details.SigType }}{{ else }}RSA{{ end }}</span>
+                        </div>
+                        <div class="key-prop-item">
+                            <span class="key-prop-name">Signed Date:</span>
+                            <span class="key-prop-val">{{ if .Pkg.Details.SigDate }}{{ .Pkg.Details.SigDate }}{{ else }}—{{ end }}</span>
+                        </div>
+                        {{ if .Pkg.Details.KeyID }}
+                        <div class="key-prop-item">
+                            <span class="key-prop-name">Keyserver:</span>
+                            <a href="https://keys.openpgp.org/search?q={{ .Pkg.Details.KeyID }}" target="_blank" rel="noopener noreferrer" class="keyserver-link">
+                                Lookup on OpenPGP &#x2197;
+                            </a>
+                        </div>
+                        {{ end }}
+                    </div>
+                </div>
+
+                <div class="modal-section">
+                    <label class="modal-label">3. Expected Output</label>
+                    <div class="expected-output-box">
+                        <pre><code>{{ .Pkg.RPMFilename }}:
+    Header V4 {{ if .Pkg.Details.SigType }}{{ .Pkg.Details.SigType }}{{ else }}RSA{{ end }} Signature, key ID {{ if .Pkg.Details.KeyID }}{{ .Pkg.Details.KeyID }}{{ end }}: OK
+    Header SHA256 digest: OK
+    Header SHA1 digest: OK
+    Payload SHA256 digest: OK
+    V4 {{ if .Pkg.Details.SigType }}{{ .Pkg.Details.SigType }}{{ else }}RSA{{ end }} Signature, key ID {{ if .Pkg.Details.KeyID }}{{ .Pkg.Details.KeyID }}{{ end }}: OK
+    MD5 digest: OK</code></pre>
+                    </div>
+                    <div class="verify-tip">
+                        <strong>Note:</strong> If <code>rpm -vK</code> reports <code>NOKEY</code>, the signature is cryptographically valid, but the public key has not yet been imported into your system's RPM database. To import:
+                        <div class="tip-cmd"><code>rpm --import &lt;RPM-GPG-KEY-URL-OR-PATH&gt;</code></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn-modal-done" id="modalDoneBtn">Close</button>
+            </div>
+        </div>
+    </div>
+    {{ end }}
+
+    <script src="layout/search.js"></script>
+</body>
+</html>
