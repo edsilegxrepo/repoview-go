@@ -5,6 +5,36 @@ All notable changes to the `repoview-go` project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.0] - 2026-09-18
+
+### Multi-Repository Catalog Portal, Taxonomy Inference & High-Performance Concurrency
+
+A major feature release introducing a unified **Multi-Repository Catalog & Browsing Portal** (`repoview portal`), automated distribution and channel taxonomy inference, self-describing repository contracts, persistent bounded worker pools, and production Nginx web server deployment specifications.
+
+#### Multi-Repository Portal & Discovery Engine (`repoview portal`)
+- **Topology-Agnostic Crawler**: Added high-speed recursive scanning traversing deep hierarchies (`<distro>/<channel>/<arch>`), flat repository layouts, and symlinked directory trees with configurable `--max-depth`.
+- **Branch Pruning**: Automatically skips massive raw payload directories (`pool/`, `SRPMS/`, `debug/`, `.git`) preventing crawler slowdowns on enterprise mirrors.
+- **POSIX Inode & Device Cycle Protection**: Tracks kernel `(dev, ino)` tuples to eliminate symlink cycles and deduplicate multiple symlinks to identical storage paths across dispersed filesystems.
+- **Debian Multi-Component Suite Aggregation**: Automatically merges multi-component Debian suites (`main`, `contrib`, `non-free`) into a unified repository card displaying all supported architectures and aggregate package counts.
+- **Self-Describing Metadata Contracts (`repoview.json`)**: Every single-repo generation pass writes an atomic, format-agnostic descriptor enabling sub-millisecond catalog discovery without rescanning SQLite databases or Debian indexes.
+- **Parent Portal Backlinks**: Single repository index pages automatically discover upstream portals (`portal.yaml` or HTML signature) and display a functional `← All Repositories` breadcrumb link.
+- **Flexible Configuration (`portal.yaml`)**: Supports declarative YAML configuration with automated upward directory climbing and a `--dump-config` bootstrapper.
+
+#### Taxonomy Inference & Distribution Branding
+- **Automated Distro & Channel Inference**: Automatically extracts and classifies distribution families (`el8`, `el9`, `el10`, `fedora`, `ubu22`, `ubu24`, `deb11`, `deb12`, `alpine`, `arch`, `suse`, `custom`) and channel taxonomies (`base`, `custom`, `extras`, `updates`, `security`, `testing`, `stable`).
+- **Multi-Architecture Detection**: Detects supported hardware architectures from paths and package metadata with concrete architecture prioritization.
+- **Official Distro SVG Icons**: Integrates embedded, crisp SVG distribution branding icons into catalog repository cards.
+
+#### Unified Portal UI & RSS Aggregation
+- **Responsive Glassmorphic UI**: Searchable and filterable catalog with live multi-attribute filtering (distro, channel, architecture), client package manager setup snippets (`.repo` and `.sources`), and deep-linkable URL hash state.
+- **Parallel RSS 2.0 Feed Aggregation**: Concurrent fan-in/fan-out reader aggregating top releases across all child repositories into a unified `/portal-feed.xml`.
+
+#### Concurrency & Performance Overhaul
+- **Persistent Bounded Worker Pools**: Converted parallel operations across `internal/app`, `internal/portal`, and `cmd/repoview` to fixed worker pools (`runtime.NumCPU() * 2`) draining closed buffered job channels.
+- **Thread-Local Lock Batching**: Reduced mutex contention from $\mathcal{O}(N)$ to $\mathcal{O}(W)$ by accumulating rendered filenames in thread-local storage and committing once per worker at shutdown.
+- **Parallel Multi-Repo Rendering**: Added `--render-missing` parallel rendering worker pool for un-rendered repositories.
+
+
 ## [v0.2.0] - 2026-09-17
 
 ### Debian Repository Support & Architectural Generalization

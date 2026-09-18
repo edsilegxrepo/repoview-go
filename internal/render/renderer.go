@@ -58,6 +58,7 @@ type RepoContext struct {
 	RepoID    string                 // Normalized repository identifier for .repo configuration
 	BaseURL   string                 // Explicit or derived repository HTTP/HTTPS base URL
 	Format    models.RepoFormat      // Underlying repository format ("rpm" or "deb")
+	PortalURL string                 // Optional or auto-detected relative/absolute link to parent catalog portal
 }
 
 // Renderer handles the generation of HTML and XML files using templates.
@@ -90,6 +91,11 @@ func (r *Renderer) SetRepoMeta(repoID, baseURL string) {
 // SetFormat sets the repository package format in the global repo context.
 func (r *Renderer) SetFormat(format models.RepoFormat) {
 	r.RepoCtx.Format = format
+}
+
+// SetPortalURL sets the parent catalog portal URL.
+func (r *Renderer) SetPortalURL(portalURL string) {
+	r.RepoCtx.PortalURL = portalURL
 }
 
 // NewRenderer initializes a new Renderer instance.

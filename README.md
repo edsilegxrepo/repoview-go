@@ -1,7 +1,7 @@
 # RepoView-Go
 
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue.svg)](https://golang.org)
-[![Coverage](https://img.shields.io/badge/Coverage-85.9%25-brightgreen.svg)](TESTING.md)
+[![Coverage](https://img.shields.io/badge/Coverage-84.9%25-brightgreen.svg)](TESTING.md)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Air--Gap Compliant](https://img.shields.io/badge/Air--Gap-100%25%20Compliant-success.svg)](ARCHITECTURE.md)
 
@@ -27,7 +27,8 @@
    - [Incremental Build & Cache Utilization](#incremental-build--cache-utilization)
    - [Enterprise Customization](#enterprise-customization)
    - [Automated Production Deployment (Systemd Timer)](#automated-production-deployment-systemd-timer)
-   - [Hardened Nginx Reverse Proxy Configuration](#hardened-nginx-reverse-proxy-configuration)
+   - [Multi-Repository Enterprise Portal (`repoview portal`)](#multi-repository-enterprise-portal-repoview-portal)
+   - [Production Nginx Web Server Specifications](#production-nginx-web-server-specifications)
    - [Containerized Deployment (Unprivileged Docker)](#containerized-deployment-unprivileged-docker)
 6. [System Architecture & Testing Documentation](#6-system-architecture--testing-documentation)
 
@@ -124,12 +125,13 @@ The RepoView-Go codebase has been engineered to meet rigorous enterprise softwar
   Synchronized access to shared data structures is guaranteed via `sync.RWMutex`, `sync.Mutex`, and `sync/atomic` counters.
 - **Memory Optimization (On-Demand Loading)**: For repositories with 50,000+ packages, package file lists are loaded into memory on-demand only during package page rendering and immediately freed via `defer` pointer nulling, keeping resident RAM below 200 MB.
 - **Batch Database Processing**: SQLite changelogs and dependencies are fetched using dynamic SQL parameter blocks in chunks of 500 packages, eliminating per-package round-trips.
-- **Comprehensive Test Coverage**: Tested to **85.9% statement coverage** across the entire codebase, with every individual package independently exceeding 80%:
-  - `cmd/repoview`: **92.6%**
-  - `internal/app`: **86.0%**
+- **Comprehensive Test Coverage**: Tested to **84.9% statement coverage** across the entire codebase, with every individual package independently exceeding 80%:
+  - `cmd/repoview`: **88.8%**
+  - `internal/app`: **85.4%**
   - `internal/logic`: **80.4%**
   - `internal/models`: **94.0%**
-  - `internal/render`: **81.3%**
+  - `internal/portal`: **82.3%**
+  - `internal/render`: **81.4%**
   - `internal/repo`: **82.8%**
   - `internal/repo/deb`: **89.7%**
   - `internal/state`: **87.1%**
@@ -156,9 +158,34 @@ Usage: repoview [options] <repodir>
 | `--format` | `string` | `auto` | Repository format: `auto` (auto-detects format), `rpm` (YUM/DNF), or `deb` (APT/dpkg). |
 | `--template-dir` | `string` | *(Embedded)* | Path to an external directory containing custom `.html` templates and `layout/` assets. |
 | `--comps` | `string` | *(repodata)* | Path to an alternative `comps.xml` package group definition file (RPM). |
+| `--portal-url` | `string` | `auto` | URL or relative path to parent multi-repo catalog portal (`auto`, `none`, or custom path). |
 | `--ignore-package` | `string list` | *(None)* | Glob pattern to exclude packages by name or NVRA (e.g. `*debuginfo*`). Can be repeated. |
 | `--exclude-arch` | `string list` | *(None)* | Hardware architecture to exclude (e.g. `src`, `i686`). Can be repeated. |
 | `--force` | `bool` | `false` | Force complete regeneration of all HTML pages, bypassing incremental state cache. |
+| `--quiet` | `bool` | `false` | Suppress non-essential informational console output. |
+| `--version` | `bool` | `false` | Print application version and build metadata, then exit. |
+
+### Multi-Repository Portal Options (`repoview portal`)
+
+The `portal` subcommand crawls repository hierarchies and compiles a unified multi-repository catalog portal:
+
+```text
+Usage: repoview portal [options] [repodir]
+```
+
+| Flag | Type | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `--output-dir` | `string` | *(repodir)* | Target directory where root `index.html` and `portal-feed.xml` are written. |
+| `--title` | `string` | `Enterprise Package Repositories` | Portal catalog title displayed in header banner. |
+| `--description` | `string` | *(None)* | Optional description or subtitle text rendered beneath the portal header. |
+| `--baseurl` | `string` | *(Auto)* | Base URL for RSS feed aggregation and package manager setup snippets. |
+| `--config` | `string` | *(portal.yaml)* | Path to optional YAML configuration file for overrides, branding, and pinned repos. |
+| `--dump-config` | `string` | *(None)* | Dump auto-discovered repository tree to a starter `portal.yaml` file and exit. |
+| `--max-depth` | `int` | `5` | Maximum directory recursion depth during repository discovery. |
+| `--require-rendered` | `bool` | `false` | Only catalog repositories that already have generated `repoview/` pages. |
+| `--render-missing` | `bool` | `false` | Automatically generates `repoview/` views for unrendered raw repositories in parallel. |
+| `--workers` | `int` | `4` | Concurrency worker pool size for `--render-missing` (1–16, default: `NumCPU * 2`). |
+| `--force` | `bool` | `false` | Force overwrite existing `index.html` even if not previously created by RepoView. |
 | `--quiet` | `bool` | `false` | Suppress non-essential informational console output. |
 | `--version` | `bool` | `false` | Print application version and build metadata, then exit. |
 
@@ -331,44 +358,190 @@ systemctl enable --now repoview.timer
 
 ---
 
-### Hardened Nginx Reverse Proxy Configuration
+### Multi-Repository Enterprise Portal (`repoview portal`)
 
-Deploying the static site behind Nginx with TLS 1.3, strict security headers, gzip/brotli compression, and client authentication:
+Compile a unified, responsive catalog portal across a mixed hierarchy of RPM and Debian repositories:
+
+```bash
+repoview portal \
+  --title "Enterprise Linux & Debian Package Portal" \
+  --description "Official mirrors for EL9, EL10, Ubuntu 24.04, and Debian 12" \
+  --render-missing \
+  --workers 4 \
+  /var/www/html/repos
+```
+
+**Console Output:**
+```text
+Repoview dev - Portal Generator
+Generated repository portal in /var/www/html/repos (3 repositories, 2104 packages)
+```
+
+The generated portal provides:
+- **Instant Client-Side Filtering**: Interactive text search (`/` shortcut), format pills (`RPM`, `DEB`), distro pills (`el9`, `ubu24`), and architecture filters (`x86_64`, `amd64`).
+- **Two-Way Navigation**: Each child repository view automatically includes a **`← All Repositories`** breadcrumb link back to the portal home page.
+- **Copy-Ready Client Snippets**: One-click `.repo` and Deb822 `.sources` configurations for developers.
+- **Aggregated RSS Feed**: `portal-feed.xml` merges release updates across all repositories in descending chronological order.
+
+---
+
+### Production Nginx Web Server Specifications
+
+RepoView-Go generates 100% static assets designed to be served by high-performance web servers using Linux kernel-level zero-copy `sendfile(2)`.
+
+#### 1. Architectural Layout & DocumentRoot Mapping
+
+A single Nginx `server {}` block seamlessly serves:
+1. The **Unified Portal Root** (`/index.html`, `/portal-feed.xml`).
+2. The **Child Repository Web Views** (`/<distro>/<channel>/repoview/`).
+3. The **Raw Package Repositories** accessed by package managers (`dnf`, `yum`, `apt`).
+
+```text
+/var/www/html/repos/
+├── index.html                      <- Top-Level Portal
+├── portal-feed.xml                 <- Aggregated Portal Feed
+├── el9/base/x86_64/
+│   ├── repodata/                   <- Raw RPM Metadata (DNF/YUM)
+│   ├── Packages/                   <- RPM Binaries (.rpm)
+│   └── repoview/                   <- RepoView Child Web Portal
+│       ├── index.html              <- Repo Index (with "← All Repositories" link)
+│       ├── search.json             <- Package Search Index
+│       └── repoview.json           <- Self-Describing Metadata Descriptor
+└── ubu24/custom/
+    ├── Packages.gz                 <- Raw APT Binary Index
+    ├── Release                     <- APT Release Metadata
+    └── repoview/                   <- RepoView Child Web Portal
+```
+
+#### 2. Performance & Kernel Tuning Directives
+
+- **`sendfile on;`**: Enables zero-copy file transmission directly from OS page cache into socket buffers, bypassing user space memory entirely.
+- **`tcp_nopush on;`**: Activates `TCP_CORK` (Linux), coalescing HTTP headers and file payloads into full-frame TCP packets to eliminate packet fragmentation.
+- **`tcp_nodelay on;`**: Disables Nagle's algorithm for interactive web socket traffic, reducing latency for small JSON/HTML requests.
+
+#### 3. Multi-Tier Caching & Revalidation Matrix
+
+| Content Type | File Patterns | Recommended Cache-Control | Rationale |
+| :--- | :--- | :--- | :--- |
+| **Catalog State & HTML** | `*.html` | `public, no-cache, must-revalidate` | Browser checks `ETag` on navigation; updates appear immediately without browser restart. |
+| **Search Indices & Feeds** | `*.json`, `*.xml` | `public, no-cache, must-revalidate` | Guarantees instant search index and RSS feed updates across clients. |
+| **Static UI Assets** | `repostyle.css`, SVG, fonts | `public, max-age=86400, stale-while-revalidate=3600` | Eliminates redundant CSS/icon downloads during interactive browsing. |
+| **Package Binaries** | `*.rpm`, `*.deb`, `*.tar.gz`, `*.xz` | `public, max-age=2592000, immutable` | Cryptographically signed release binaries are immutable by design. |
+
+#### 4. MIME Types & Character Encoding
+
+Ensure your `/etc/nginx/mime.types` includes appropriate types for Debian and RPM binaries so browsers prompt for download rather than attempting raw text rendering:
 
 ```nginx
+types {
+    application/x-redhat-package-manager    rpm;
+    application/vnd.debian.binary-package   deb;
+    application/rss+xml                     xml;
+    application/json                        json;
+}
+```
+
+#### 5. Complete Production Configuration (`/etc/nginx/conf.d/repoview.conf`)
+
+```nginx
+# ==============================================================================
+# RepoView Enterprise Repository & Portal Nginx Configuration
+# ==============================================================================
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name repo.example.com;
+
+    # Redirect all plain HTTP traffic to HTTPS
+    return 301 https://$host$request_uri;
+}
+
 server {
     listen 443 ssl http2;
-    server_name yum.example.com;
+    listen [::]:443 ssl http2;
+    server_name repo.example.com;
 
-    ssl_certificate     /etc/pki/tls/certs/yum.example.com.crt;
-    ssl_certificate_key /etc/pki/tls/private/yum.example.com.key;
-    ssl_protocols       TLSv1.2 TLSv1.3;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
+    # Root repository storage directory
+    root /var/www/html/repos;
+    index index.html;
+    charset utf-8;
 
-    # Enterprise Hardening Headers
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    # --------------------------------------------------------------------------
+    # TLS & Cipher Suite Hardening (A+ Rating)
+    # --------------------------------------------------------------------------
+    ssl_certificate         /etc/pki/tls/certs/repo.example.com.crt;
+    ssl_certificate_key     /etc/pki/tls/private/repo.example.com.key;
+    ssl_protocols           TLSv1.2 TLSv1.3;
+    ssl_ciphers             ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_timeout     1d;
+    ssl_session_cache       shared:SSL:10m;
+    ssl_session_tickets     off;
+
+    # --------------------------------------------------------------------------
+    # Linux Kernel High-Throughput I/O Optimizations
+    # --------------------------------------------------------------------------
+    sendfile            on;
+    tcp_nopush          on;
+    tcp_nodelay         on;
+    keepalive_timeout   65;
+    types_hash_max_size 4096;
+
+    # --------------------------------------------------------------------------
+    # Security Headers & Air-Gap Content Security Policy
+    # --------------------------------------------------------------------------
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none';" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none';" always;
 
-    root /var/www/html/repo;
-
-    # Static compression
+    # --------------------------------------------------------------------------
+    # Gzip Compression
+    # --------------------------------------------------------------------------
     gzip on;
-    gzip_types text/plain text/css application/json application/xml text/javascript;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css application/json application/xml text/javascript application/rss+xml;
 
-    # Authenticate RPM binary downloads (Optional)
-    location ~* \.rpm$ {
-        auth_basic "Protected Enterprise Repository";
-        auth_basic_user_file /etc/nginx/.htpasswd;
+    # --------------------------------------------------------------------------
+    # Caching Policies
+    # --------------------------------------------------------------------------
+
+    # 1. HTML Pages (Portal & Repo Views) - Always revalidate
+    location ~* \.html$ {
+        add_header Cache-Control "public, no-cache, must-revalidate";
         try_files $uri =404;
     }
 
-    # Public static web portal
-    location /repoview/ {
-        alias /var/www/html/repo/repoview/;
-        index index.html;
+    # 2. Search Index, Metadata Descriptors & RSS Feeds - Always revalidate
+    location ~* \.(json|xml)$ {
+        add_header Cache-Control "public, no-cache, must-revalidate";
+        try_files $uri =404;
+    }
+
+    # 3. Static UI Assets (CSS, SVG, Icons) - 24-hour cache
+    location ~* \.(css|svg|png|jpg|ico|js)$ {
+        add_header Cache-Control "public, max-age=86400, stale-while-revalidate=3600";
+        try_files $uri =404;
+    }
+
+    # 4. Immutable Package Binaries (RPM / DEB) - 30-day immutable cache
+    location ~* \.(rpm|deb|tar\.gz|tar\.xz)$ {
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        try_files $uri =404;
+    }
+
+    # --------------------------------------------------------------------------
+    # Package Manager Raw Access (APT & DNF/YUM Repositories)
+    # --------------------------------------------------------------------------
+    # Allow package managers to browse directories if desired (optional)
+    location / {
+        autoindex on;
+        autoindex_exact_size off;
+        autoindex_localtime on;
         try_files $uri $uri/ =404;
     }
 }

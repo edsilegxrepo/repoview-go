@@ -25,6 +25,8 @@ Comprehensive guide to the architecture, design principles, test execution, cove
    - [Domain Models & XML (`internal/models`)](#domain-models--xml-internalmodels)
    - [Template Rendering & Assets (`internal/render`)](#template-rendering--assets-internalrender)
    - [Repository Parsers, Decompression & SQLite (`internal/repo`)](#repository-parsers-decompression--sqlite-internalrepo)
+   - [Debian Ingestion & Introspection (`internal/repo/deb`)](#debian-ingestion--introspection-internalrepodeb)
+   - [Multi-Repository Portal Engine (`internal/portal`)](#multi-repository-portal-engine-internalportal)
    - [Cache State Management & Concurrency (`internal/state`)](#cache-state-management--concurrency-internalstate)
    - [Formatting & Sanitization Utilities (`internal/util`)](#formatting--sanitization-utilities-internalutil)
    - [Live End-to-End Integration Suite (`tests/integration`)](#live-end-to-end-integration-suite-testsintegration)
@@ -33,6 +35,7 @@ Comprehensive guide to the architecture, design principles, test execution, cove
    - [How to Measure and Refresh Statistics](#how-to-measure-and-refresh-statistics)
 7. [Realistic Data Simulation](#7-realistic-data-simulation)
    - [Live Repository Verification](#live-repository-verification)
+   - [Live Multi-Repository Portal Verification](#live-multi-repository-portal-verification)
    - [Live HTTP Server & Endpoint Listeners](#live-http-server--endpoint-listeners)
    - [CLI Subprocess Binary Execution](#cli-subprocess-binary-execution)
 8. [How to Run the Tests](#8-how-to-run-the-tests)
@@ -51,13 +54,14 @@ RepoView-Go employs a multi-tiered testing strategy structured to detect deep ar
 ```mermaid
 flowchart TB
     subgraph TestExecution["Test Runner (go test)"]
-        UT["Unit Tests (Default)\n• Sub-second execution (&lt;0.2s)\n• Zero external dependencies\n• Synthetic in-memory fixtures"]
-        IT["Integration Tests (-tags=integration)\n• Real Repositories (RPM &amp; Debian)\n• Unmocked Ingestion &amp; Decompression\n• Live HTTP Server &amp; Listeners\n• Compiled Binary Subprocess"]
+        UT["Unit Tests (Default)\n• Sub-second execution (&lt;0.3s)\n• Zero external dependencies\n• Synthetic in-memory fixtures"]
+        IT["Integration Tests (-tags=integration)\n• Real Repositories (RPM &amp; Debian)\n• Multi-Repo Catalog Portal\n• Unmocked Ingestion &amp; Decompression\n• Live HTTP Server &amp; Listeners\n• Compiled Binary Subprocess"]
     end
 
     subgraph UnitLayer["Unit Test Isolation Layer"]
         CLI_T["cmd/repoview/main_test.go"]
         APP_T["internal/app/*_test.go"]
+        PORTAL_T["internal/portal/*_test.go"]
         LOGIC_T["internal/logic/*_test.go"]
         MODELS_T["internal/models/*_test.go"]
         RENDER_T["internal/render/*_test.go"]
@@ -70,8 +74,9 @@ flowchart TB
     subgraph IntegrationLayer["E2E Integration Layer"]
         RPM_E2E["tests/integration/e2e_test.go\n(Live RPM Repo: 2,036 pkgs)"]
         DEB_E2E["tests/integration/deb_e2e_test.go\n(Live Debian Repo: pool/dists)"]
+        PORTAL_E2E["tests/integration/portal_e2e_test.go\n(Live Multi-Repo Portal: 3 repos)"]
         EPHEMERAL_HTTP["net/http Ephemeral Server\nhttp://127.0.0.1:{random_port}"]
-        HTTP_CLIENT["HTTP Client Verification\n• index.html\n• search.json\n• pkg.html\n• latest-feed.xml"]
+        HTTP_CLIENT["HTTP Client Verification\n• portal index.html\n• single repo index.html\n• search.json / repoview.json\n• portal-feed.xml"]
         CLI_BIN["Compiled repoview Binary\nSubprocess exec.Command"]
     end
 
@@ -86,6 +91,7 @@ flowchart TB
     IntegrationLayer --> TDIR
     RPM_E2E --> EPHEMERAL_HTTP --> HTTP_CLIENT
     DEB_E2E --> EPHEMERAL_HTTP
+    PORTAL_E2E --> EPHEMERAL_HTTP
     IntegrationLayer --> CLI_BIN
 ```
 
@@ -205,12 +211,13 @@ repoview-go/
 ├── cmd/
 │   └── repoview/
 │       ├── main.go
-│       └── main_test.go                   # CLI argument parsing, flags, safety exits
+│       └── main_test.go                   # CLI argument parsing, flags, portal subcommands, safety exits
 ├── internal/
 │   ├── app/
 │   │   ├── generator.go
 │   │   ├── generator_test.go              # Output directory safety validation
-│   │   └── generator_unit_test.go         # Full pipeline unit test (mock repo), errors
+│   │   ├── generator_unit_test.go         # Full pipeline unit test (mock repo), errors
+│   │   └── descriptor_unit_test.go        # Parent portal climbing, URL resolution, repoview.json descriptor generation
 │   ├── logic/
 │   │   ├── filter.go
 │   │   ├── filter_test.go                 # Package inclusion/exclusion & arch filters
@@ -223,12 +230,25 @@ repoview-go/
 │   │   ├── adapter_deb_test.go            # Deb822 mapping & dependency validation
 │   │   ├── comps.go
 │   │   ├── comps_test.go                  # Comps XML unmarshaling and localization
+│   │   ├── descriptor.go                  # RepoDescriptor self-describing metadata struct
+│   │   ├── descriptor_test.go             # RepoDescriptor JSON serialization & schema compliance
 │   │   ├── package.go
 │   │   ├── package_test.go                # Dependencies, scriptlets, NVRA, filenames, EVR
 │   │   ├── repomd.go
 │   │   ├── repomd_test.go                 # Repomd dual-format revision parsing
 │   │   ├── search.go
 │   │   └── search_test.go                 # Search index JSON serialization
+│   ├── portal/
+│   │   ├── config.go                      # portal.yaml parser, parent tree discovery, --dump-config
+│   │   ├── config_test.go                 # Config loading, override mechanics, and YAML dump tests
+│   │   ├── renderer.go                    # Static HTML portal rendering & aggregated portal-feed.xml
+│   │   ├── renderer_test.go               # Template rendering, RSS 2.0 aggregation, and safety overwrite guard
+│   │   ├── scanner.go                     # Topology-agnostic crawler, prune filters, Debian suite aggregation
+│   │   ├── scanner_posix.go               # POSIX (dev, ino) device and inode cycle guard
+│   │   ├── scanner_test.go                # Directory topologies, symlink loops, max depth, and suite aggregation
+│   │   ├── taxonomy.go                    # Distro & channel path inference, multi-arch detection, SVG icons
+│   │   ├── taxonomy_test.go               # Architecture recognition, slug tokenization, and distro matching
+│   │   └── types.go                       # Catalog data structures & client setup snippets
 │   ├── render/
 │   │   ├── renderer.go
 │   │   └── renderer_test.go               # HTML templates, RSS, search index, custom assets
@@ -264,7 +284,8 @@ repoview-go/
 └── tests/
     └── integration/
         ├── e2e_test.go                    # Live RPM E2E suite, HTTP server, CLI subprocess
-        └── deb_e2e_test.go                # Live Debian E2E suite, HTTP server, CLI subprocess
+        ├── deb_e2e_test.go                # Live Debian E2E suite, HTTP server, CLI subprocess
+        └── portal_e2e_test.go             # Live Multi-Repo Portal E2E suite, topology crawls, real repository tests
 ```
 
 ---
@@ -282,6 +303,19 @@ repoview-go/
 | CLI / Filesystem | `TestRun_NotADirectory` | Passes a regular file path instead of a directory. | **PASS**: Exit code 1, stderr reports target is not a directory. |
 | CLI / Safety | `TestRun_SafetyViolation` | Attempts to set output directory equal to the repo directory. | **PASS**: Exit code 1, stderr warns against catastrophic deletion. |
 | CLI / Flags | `TestStringList` | Verifies `stringList` flag collector handles comma-separated and repeated values. | **PASS**: String slice populated correctly; `String()` produces comma-separated list. |
+| CLI / Flags | `TestRun_FormatFlag` | Verifies `--format rpm|deb|auto` flag validation, overrides, and error exits. | **PASS**: Dispatches expected reader or exits 1 on unrecognized format. |
+| CLI / Flags | `TestRun_PortalURLFlag` | Verifies explicit `--portal-url` flag injection into single repository generator. | **PASS**: Renders '← All Repositories' backlink pointing directly to target URL. |
+| Portal CLI / Info | `TestRunPortal_Version` | Executes `runPortal(["--version"], stdout, stderr)`. | **PASS**: Exit code 0, stdout contains `"RepoView-Go Portal v"`. |
+| Portal CLI / Flags | `TestRunPortal_InvalidFlag` | Passes unrecognized flag `--unknown-option` to portal command. | **PASS**: Exit code 1, stderr reports unknown flag error. |
+| Portal CLI / Paths | `TestRunPortal_MissingDir` | Passes non-existent root directory path to portal command. | **PASS**: Exit code 1, stderr reports directory not found. |
+| Portal CLI / Paths | `TestRunPortal_NotADirectory` | Passes file path instead of directory to portal command. | **PASS**: Exit code 1, stderr reports target is not a directory. |
+| Portal CLI / Run | `TestRunPortal_PureDiscovery_EmptyDir` | Executes portal scan against an empty directory without error. | **PASS**: Discovers 0 repositories, renders empty catalog index gracefully. |
+| Portal CLI / Options | `TestRunPortal_CustomOptions` | Verifies `--title`, `--description`, `--base-url`, and `--max-depth` overrides. | **PASS**: Generated HTML and RSS XML contain custom metadata. |
+| Portal CLI / Config | `TestRunPortal_DumpConfig` | Exercises `repoview portal --dump-config /path`. | **PASS**: Outputs valid YAML configuration with discovered repos and default settings. |
+| Portal CLI / Config | `TestRunPortal_ConfigOverrides` | Tests YAML configuration values taking precedence over default options. | **PASS**: Overrides portal title, description, and custom channel names. |
+| Portal CLI / Safety | `TestRunPortal_SafetyOverwriteGuard` | Aborts when non-RepoView `index.html` exists in root directory. | **PASS**: Returns error protecting foreign files unless `--force` is toggled. |
+| Portal CLI / Filter | `TestRunPortal_RequireRendered` | Filters discovered repositories with `--require-rendered`. | **PASS**: Skips un-rendered raw repositories lacking `repoview.json` or `search.json`. |
+| Portal CLI / Parallel | `TestRunPortal_RenderMissing_Parallel` | Renders un-rendered repositories concurrently via worker pool. | **PASS**: Invokes Generator concurrently; generates all child repo pages and portal catalog. |
 
 ### Application Pipeline & Safety (`internal/app`)
 
@@ -291,6 +325,15 @@ repoview-go/
 | Full Pipeline | `TestGenerator_FullPipeline` | Builds a complete synthetic mock repository and runs the entire generator. | **PASS**: Generates `index.html`, `mockapp.html`, `search.json`, `latest-feed.xml`, and executes incremental second run cleanly. |
 | Repository Discovery | `TestDetectSiblingRepos` | Creates adjacent sibling repository directories and tests automatic navigation linking. | **PASS**: Accurately detects and returns sibling repo paths and names. |
 | Pipeline Errors | `TestGenerator_Errors` | Evaluates generator resilience when provided an invalid repo path. | **PASS**: Returns clean error without panicking or leaking resources. |
+| Parent Portal | `TestFindParentPortal_YAML` | Climbs parent directory tree looking for `portal.yaml` descriptor. | **PASS**: Returns relative path to discovered parent portal directory. |
+| Parent Portal | `TestFindParentPortal_YML` | Climbs parent directory tree looking for `portal.yml` descriptor. | **PASS**: Returns relative path to discovered parent portal directory. |
+| Parent Portal | `TestFindParentPortal_IndexHTMLSignature` | Climbs parent tree detecting portal signature in `index.html`. | **PASS**: Accurately identifies RepoView portal HTML signature without YAML. |
+| Parent Portal | `TestFindParentPortal_NotFound` | Handles leaf directories where no parent portal exists. | **PASS**: Returns empty string cleanly without error. |
+| URL Resolution | `TestResolvePortalURL` | Computes relative breadcrumb URL (`../../index.html`) from repo output to parent portal. | **PASS**: Produces correct relative traversal links across varying directory depths. |
+| Architecture Inference | `TestDetectPrimaryArch` | Analyzes package slice to determine primary hardware architecture. | **PASS**: Returns dominant concrete architecture (`x86_64`, `amd64`, etc.). |
+| Path Architecture | `TestDetectArchFromPath` | Extracts hardware architecture tokens directly from filesystem paths. | **PASS**: Recognizes standard architectures in path segments (`/el9/base/x86_64`). |
+| Distro & Channel | `TestInferDistroAndChannel` | Classifies OS distribution family and channel from path segments. | **PASS**: Correctly separates `<distro>` (`ubu24`, `el9`) and `<channel>` (`custom`, `base`). |
+| Descriptor Contract | `TestBuildDescriptor` | Generates self-describing `RepoDescriptor` (`repoview.json`). | **PASS**: Populates format, package count, distros, arch, and relative URLs. |
 
 ### Business Logic, Filtering & Grouping (`internal/logic`)
 
@@ -320,6 +363,7 @@ repoview-go/
 | Package Model | `TestPackage_EVR_And_Filenames` | Validates `EVR()`, `Filename()`, and `RPMFilename()` helpers. | **PASS**: Produces canonical NVRA strings and standardized `.html` filenames. |
 | Repomd Model | `TestRepomdUnmarshaling` | Parses `repomd.xml` containing revision as element and as attribute. | **PASS**: Unmarshals both styles successfully into the `Revision` field. |
 | Search Model | `TestSearchIndexSerialization` | Tests search document creation and JSON marshaling. | **PASS**: Produces valid JSON structure containing name, summary, and URL. |
+| Descriptor Model | `TestRepoDescriptor_JSONSerialization` | Tests `RepoDescriptor` JSON marshaling/unmarshaling and schema compliance. | **PASS**: Serializes format, package count, distros, arch, and URLs matching schema. |
 
 ### Template Rendering & Assets (`internal/render`)
 
@@ -368,6 +412,36 @@ repoview-go/
 | DEB Changelog | `TestParseChangelog` | Parses Debian changelog entries from `changelog.Debian.gz`. | **PASS**: Extracts author, timestamp, and changelog description. |
 | DEB Changelog | `TestParseChangelog_Empty` | Handles empty or invalid changelog streams. | **PASS**: Gracefully returns error or nil entry. |
 
+### Multi-Repository Portal Engine (`internal/portal`)
+
+| Logical Group | Test Name | Technical Purpose / Description | Success Criteria (PASS/FAIL) |
+| :--- | :--- | :--- | :--- |
+| Portal Config | `TestDefaultPortalConfig` | Validates default portal configuration values (title, description, max depth). | **PASS**: Defaults initialized (`max_depth: 8`, default titles, empty base URL). |
+| Portal Config | `TestLoadConfig_Valid` | Parses authentic `portal.yaml` file with custom repository mappings and overrides. | **PASS**: Unmarshals configuration cleanly, applies per-repo names and URLs. |
+| Portal Config | `TestLoadConfig_Errors` | Tests resilience when encountering malformed or corrupted YAML syntax. | **PASS**: Returns clean error without panicking. |
+| Portal Config | `TestDumpConfig` | Verifies `--dump-config` generation based on discovered repositories. | **PASS**: Emits formatted YAML containing default headers and discovered repo blocks. |
+| Portal Config | `TestApplyConfig` | Applies user configuration overrides onto discovered catalog models. | **PASS**: Distro and channel names overridden; custom URLs and icons injected. |
+| Portal Config | `TestFindPortalConfigIn` | Tests recursive upward directory climbing to discover parent `portal.yaml`. | **PASS**: Finds config in current dir or climbs parent trees until root. |
+| Portal Scanner | `TestScanner_TopologiesAndPruning` | Crawls mock directory trees across flat, deep, and raw repository layouts with branch pruning. | **PASS**: Discovers all valid repositories; prunes `pool/`, `SRPMS/`, `debug/`, and `.git`. |
+| Portal Scanner | `TestScanner_RequireRendered` | Validates `--require-rendered` option on scanner crawler. | **PASS**: Retains rendered repositories (`repoview.json` or `search.json`); ignores raw un-rendered repos. |
+| Portal Scanner | `TestScanner_SymlinkDeduplicationAndCycleGuard` | Injects circular directory symlinks and multi-symlinked repository targets. | **PASS**: POSIX `(dev, ino)` cycle guard prevents infinite loops and deduplicates duplicate repo paths. |
+| Portal Scanner | `TestScanner_MaxDepth` | Verifies directory crawling stops strictly at `--max-depth`. | **PASS**: Repositories beyond specified depth limit are not visited. |
+| Portal Scanner | `TestScanner_Errors` | Evaluates crawler resilience when pointed at non-existent directory. | **PASS**: Returns descriptive error without crashing. |
+| Portal Scanner | `TestAggregateDebianSuites_MultiArch` | Aggregates multi-component Debian suites (`main`, `contrib`, `non-free`) into a single repo card. | **PASS**: Discovered components merged into single logical repository with cumulative package counts. |
+| Portal Scanner | `TestScanner_SymlinkedDirectoryTree_DispersedStorage` | Crawls realistic multi-tenant repo tree where leaf repositories reside across symlinked filesystems. | **PASS**: Discovers all repos accurately while maintaining correct relative URLs. |
+| Portal Scanner | `TestScanner_SymlinkSkipDirSiblingPreservation` | Verifies skipping pruned subtrees does not prematurely abort sibling exploration. | **PASS**: Pruned directories skipped; sibling repositories discovered successfully. |
+| Portal Scanner | `TestAggregateDebianSuites_MainPriority` | Ensures component ordering prioritizes `main` or root component over secondary slices. | **PASS**: Canonical view path resolves to `main` component. |
+| Portal Scanner | `TestDiscoveredRepo_BuildConfigSnippet` | Verifies dynamic package manager setup snippet generation for RPM (`.repo`) and Debian (`.sources`). | **PASS**: Emits valid DNF/YUM and APT Deb822 client configuration blocks. |
+| Portal Taxonomy | `TestTaxonomy_IsKnownArch` | Validates architecture recognition against supported CPU architectures. | **PASS**: Returns true for `x86_64`, `amd64`, `aarch64`, `arm64`, `noarch`, `all`; false for unknown strings. |
+| Portal Taxonomy | `TestTaxonomy_DetectPrimaryArch` | Detects primary architecture from multi-architecture package distributions. | **PASS**: Resolves dominant concrete arch over `all`/`noarch`. |
+| Portal Taxonomy | `TestTaxonomy_DetectArchFromPath` | Extracts hardware architecture tokens from filesystem path segments. | **PASS**: Infers architecture from `/x86_64/` or `/binary-amd64/` paths. |
+| Portal Taxonomy | `TestTaxonomy_InferDistroAndChannel` | Classifies `<distro>/<channel>` hierarchy from directory tokens. | **PASS**: Correctly maps `el9/base` -> distro `el9`, channel `base`; `ubu24/custom` -> distro `ubu24`, channel `custom`. |
+| Portal Taxonomy | `TestTaxonomy_TokenizeSlug` | Tokenizes repository directory slugs into searchable taxonomy keywords. | **PASS**: Splits hyphens, underscores, and slashes into clean tokens. |
+| Portal Taxonomy | `TestTaxonomy_MatchDistroIcon` | Matches OS distribution identifiers to official embedded SVG branding icons. | **PASS**: Returns correct SVG icon markup for RHEL, Fedora, Ubuntu, Debian, Alpine, etc. |
+| Portal Renderer | `TestRenderer_RenderHTML` | Renders complete responsive glassmorphic `portal.html` catalog. | **PASS**: Produces valid HTML5 with responsive cards, search bar, and client install snippets. |
+| Portal Renderer | `TestRenderer_RenderFeed_Aggregated` | Aggregates child `latest-feed.xml` RSS feeds into unified `portal-feed.xml`. | **PASS**: Drains child feeds concurrently, sorts descending by date, and limits to top 50 entries. |
+| Portal Renderer | `TestRenderer_WritePortal_SafetyGuard` | Verifies safety guard preventing overwrite of non-RepoView `index.html`. | **PASS**: Aborts with error if foreign `index.html` exists unless `--force` is toggled. |
+
 ### Cache State Management & Concurrency (`internal/state`)
 
 | Logical Group | Test Name | Technical Purpose / Description | Success Criteria (PASS/FAIL) |
@@ -402,6 +476,8 @@ repoview-go/
 | E2E / Live DEB | `TestLive_Debian_EndToEndWorkflow/Live_Debian_RSSFeed` | Verifies RSS feed generation for Debian packages. | **PASS**: Returns 200 OK; valid RSS 2.0 XML with package items. |
 | E2E / Live DEB | `TestLive_Debian_EndToEndWorkflow/Live_Debian_IncrementalRun` | Validates rapid incremental generation and state caching on Debian repo. | **PASS**: Completes in <20ms; preserves cache state. |
 | E2E / Live DEB | `TestLive_Debian_SubprocessCLI` | Executes compiled `repoview` binary with `--format deb` and auto-detection on Debian repo. | **PASS**: Subprocess succeeds with code 0; produces valid index pages. |
+| E2E / Live Portal | `TestLive_Portal_TopologiesAndLiveServer` | Crawls mixed RPM and Debian mock topologies, generates portal, starts live HTTP server, verifies endpoints. | **PASS**: Validates `/index.html`, `/portal-feed.xml`, search deep-linking, and client setup snippets over HTTP. |
+| E2E / Live Portal | `TestLive_Portal_RealRepository_TestDirectory` | Executes portal crawler against live `/u01/wwwroot/test` containing 3 real RPM and Debian repos. | **PASS**: Discovers all 3 repos (2,104 pkgs), verifies `ubu24/custom` and `el9/base`, checks relative breadcrumbs. |
 
 ---
 
@@ -413,19 +489,20 @@ RepoView-Go enforces an architectural quality standard where **every package mus
 
 | Package | Purpose | Statements Covered | Percentage | Status |
 | :--- | :--- | :---: | :---: | :---: |
-| `cmd/repoview` | CLI Entrypoint, flags, options, exit codes | 162 / 175 | **92.6%** | ✅ PASS (>80%) |
-| `internal/app` | Core generator, pipeline workflow, safety checks | 431 / 501 | **86.0%** | ✅ PASS (>80%) |
+| `cmd/repoview` | CLI Entrypoint, flags, portal subcommands, exit codes | 355 / 400 | **88.8%** | ✅ PASS (>80%) |
+| `internal/app` | Core generator, pipeline workflow, parent discovery, safety | 593 / 694 | **85.4%** | ✅ PASS (>80%) |
 | `internal/logic` | EVR sorting, filtering, comps & RPM grouping | 356 / 443 | **80.4%** | ✅ PASS (>80%) |
-| `internal/models` | Domain models, XML unmarshaling, search index | 140 / 149 | **94.0%** | ✅ PASS (>80%) |
-| `internal/render` | HTML/RSS template rendering, asset delivery | 135 / 166 | **81.3%** | ✅ PASS (>80%) |
+| `internal/models` | Domain models, XML unmarshaling, search & descriptors | 140 / 149 | **94.0%** | ✅ PASS (>80%) |
+| `internal/portal` | Multi-repo crawler, taxonomy, config, portal renderer | 822 / 999 | **82.3%** | ✅ PASS (>80%) |
+| `internal/render` | HTML/RSS template rendering, asset delivery | 136 / 167 | **81.4%** | ✅ PASS (>80%) |
 | `internal/repo` | Repomd, comps, RPM headers, SQLite access | 399 / 482 | **82.8%** | ✅ PASS (>80%) |
 | `internal/repo/deb` | Debian discovery, RFC 822 parser, ar/tar inspection | 418 / 466 | **89.7%** | ✅ PASS (>80%) |
 | `internal/state` | Persistent state cache, dirty tracking, pruning | 81 / 93 | **87.1%** | ✅ PASS (>80%) |
 | `internal/util` | Human formatting, date conversions, sanitization | 53 / 56 | **94.6%** | ✅ PASS (>80%) |
-| **Total Codebase** | **Complete Project Statement Coverage** | **2175 / 2531** | **85.9%** | **✅ PASS (>80%)** |
+| **Total Codebase** | **Complete Project Statement Coverage** | **3353 / 3949** | **84.9%** | **✅ PASS (>80%)** |
 
 > [!NOTE]
-> All unit tests execute in under **0.2 seconds** aggregate time, ensuring developer productivity remains unhindered.
+> All unit tests execute in under **0.3 seconds** aggregate time, ensuring developer productivity remains unhindered.
 
 ### How to Measure and Refresh Statistics
 
@@ -457,6 +534,16 @@ In accordance with strict production requirements, dependencies in the integrati
 - **Real SQLite Databases**: Directly queries `repodata/*-primary.sqlite` and `repodata/*-other.sqlite`.
 - **Real Decompression**: Executes actual streaming decompression (`gzip`, `zstd`, `xz`) on live metadata archives.
 - **Header Parsing**: Inspects authentic RPM headers on disk to parse scriptlets, requires, provides, and changelogs.
+
+### Live Multi-Repository Portal Verification
+
+- **Multi-Format Enterprise Dataset**: Executed against `/u01/wwwroot/test` containing **3 distinct production repositories (2,104 total packages)**:
+  - `ubu24/custom`: Ubuntu 24.04 Debian repository containing authentic `.deb` packages (`amd64`, 47 packages).
+  - `el9/base/x86_64`: Enterprise Linux 9 Base repository containing **2,033 RPM packages** (`x86_64`).
+  - `el9/extras/x86_64`: Enterprise Linux 9 Extras repository containing **21 RPM packages** (`x86_64`).
+- **Topology Crawl & Suite Aggregation**: Discovers nested leaf directories, sniffs self-describing `repoview.json` descriptors, aggregates Debian multi-component subtrees, and maps OS distribution branding SVG icons.
+- **Parent Portal Backlinks**: Verifies that every generated single repository index page displays a functional `← All Repositories` breadcrumb link navigating back to the root portal (`../../../index.html` or `../../../../index.html`).
+- **Aggregated RSS Feed**: Validates `/portal-feed.xml` aggregating top 50 chronological releases across all child repositories concurrently.
 
 ### Live HTTP Server & Endpoint Listeners
 

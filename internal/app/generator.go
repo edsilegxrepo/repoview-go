@@ -30,6 +30,7 @@ package app
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -39,6 +40,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/edsilegxrepo/repoview/internal/logic"
 	"github.com/edsilegxrepo/repoview/internal/models"
@@ -90,6 +92,7 @@ type Config struct {
 	Quiet       bool              // If true, suppresses standard informational output
 	IgnoreList  []string          // Glob patterns of package names/NVRAs to ignore
 	ExcludeArch []string          // Hardware architectures to exclude from generation
+	PortalURL   string            // Explicit or auto-detected URL to parent catalog portal ("auto", "none", or path/URL)
 	Version     string            // Repoview tool version string
 }
 
@@ -173,6 +176,11 @@ func (g *Generator) Run() error {
 	}
 	renderer.SetRepoMeta(repoID, effectiveBaseURL)
 
+	portalURL := g.resolvePortalURL()
+	if portalURL != "" {
+		renderer.SetPortalURL(portalURL)
+	}
+
 	// Helper data structures
 	pkgVersions := organizePackages(allPkgs)
 	pkgPrimaryGroup := mapPrimaryGroups(allGroups)
@@ -200,6 +208,14 @@ func (g *Generator) Run() error {
 		return err
 	}
 	generatedFiles = append(generatedFiles, indexFiles...)
+
+	// 7b. Render repoview.json descriptor
+	descFiles, err := g.renderDescriptor(renderer, stateStore, portalURL, allPkgs)
+	if err != nil {
+		log.Printf("Failed to render repoview.json: %v", err)
+	} else {
+		generatedFiles = append(generatedFiles, descFiles...)
+	}
 
 	// 8. Cleanup (only if no package generation errors to prevent deleting valid pages)
 	if errorCount > 0 {
@@ -425,81 +441,46 @@ func (g *Generator) renderPackages(db repo.RepoReader, renderer *render.Renderer
 		uniqueNames = append(uniqueNames, name)
 	}
 
-	sem := make(chan struct{}, runtime.NumCPU()*2)
-	var wg sync.WaitGroup
+	numWorkers := runtime.NumCPU() * 2
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	if numWorkers > len(uniqueNames) {
+		numWorkers = len(uniqueNames)
+	}
 
+	jobs := make(chan string, len(uniqueNames))
 	for _, name := range uniqueNames {
+		jobs <- name
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
 		wg.Add(1)
-		sem <- struct{}{}
-		go func(pkgName string) {
+		go func() {
 			defer wg.Done()
-			defer func() { <-sem }()
+			var localGenerated []string
+			for pkgName := range jobs {
+				versions := pkgVersions[pkgName]
+				primaryGroup := pkgPrimaryGroup[pkgName]
 
-			versions := pkgVersions[pkgName]
-			latest := versions[0]
-
-			latest.AllVersions = versions
-
-			// Populate package dependencies from reader (using cached prepared statements or index)
-			if db != nil && latest.Dependencies == nil {
-				deps, err := db.GetPackageDependencies(latest.PkgKey)
-				if err == nil {
-					latest.Dependencies = deps
-				}
-			}
-
-			// On-demand file list loading: only load files when rendering this specific package page,
-			// and immediately release file list from heap memory upon render completion to keep resident RAM minimal.
-			if latest.LocationHref != "" && db != nil {
-				if latest.Details == nil || len(latest.Details.Files) == 0 {
-					files, err := db.ReadPackageFiles(g.config.RepoDir, latest)
-					if err == nil && len(files) > 0 {
-						if latest.Details == nil {
-							latest.Details = &models.PackageDetails{}
-						}
-						latest.Details.Files = files
-						defer func() {
-							if latest.Details != nil {
-								latest.Details.Files = nil
-							}
-						}()
-					}
-				}
-			}
-
-			primaryGroup, ok := pkgPrimaryGroup[pkgName]
-			if !ok {
-				firstLetter := util.FirstLetter(pkgName)
-				primaryGroup = &logic.GroupData{
-					Name:     "Letter " + firstLetter,
-					Filename: fmt.Sprintf("letter_%s.group.html", strings.ToLower(firstLetter)),
-				}
-			}
-
-			filename := latest.Filename()
-
-			content, err := renderer.RenderPackage(latest, primaryGroup)
-			if err != nil {
-				log.Printf("Error rendering package %s: %v", pkgName, err)
-				atomic.AddInt64(&errorCount, 1)
-				return
-			}
-
-			hasChanged := stateStore.HasChanged(filename, content)
-			if g.config.Force || hasChanged {
-				if !g.config.Quiet {
-					fmt.Printf("Writing package %s\n", filename)
-				}
-				if err := renderer.WriteToFile(filename, content); err != nil {
-					log.Printf("Error writing %s: %v", filename, err)
+				filename, err := g.renderSinglePackage(db, renderer, stateStore, versions, primaryGroup, pkgName)
+				if err != nil {
+					log.Printf("Error rendering package %s: %v", pkgName, err)
 					atomic.AddInt64(&errorCount, 1)
+					continue
 				}
+
+				localGenerated = append(localGenerated, filename)
 			}
 
-			mu.Lock()
-			generatedFiles = append(generatedFiles, filename)
-			mu.Unlock()
-		}(name)
+			if len(localGenerated) > 0 {
+				mu.Lock()
+				generatedFiles = append(generatedFiles, localGenerated...)
+				mu.Unlock()
+			}
+		}()
 	}
 	wg.Wait()
 
@@ -508,6 +489,69 @@ func (g *Generator) renderPackages(db repo.RepoReader, renderer *render.Renderer
 	}
 
 	return generatedFiles, errorCount, nil
+}
+
+// renderSinglePackage renders an individual package page and ensures heap cleanup of file manifests.
+func (g *Generator) renderSinglePackage(db repo.RepoReader, renderer *render.Renderer, stateStore *state.StateStore, versions []*models.Package, primaryGroup *logic.GroupData, pkgName string) (string, error) {
+	if len(versions) == 0 {
+		return "", fmt.Errorf("no versions available for package %s", pkgName)
+	}
+
+	latest := versions[0]
+	latest.AllVersions = versions
+
+	// Populate package dependencies from reader
+	if db != nil && latest.Dependencies == nil {
+		deps, err := db.GetPackageDependencies(latest.PkgKey)
+		if err == nil {
+			latest.Dependencies = deps
+		}
+	}
+
+	// On-demand file list loading: clean up heap memory upon render completion
+	if latest.LocationHref != "" && db != nil {
+		if latest.Details == nil || len(latest.Details.Files) == 0 {
+			files, err := db.ReadPackageFiles(g.config.RepoDir, latest)
+			if err == nil && len(files) > 0 {
+				if latest.Details == nil {
+					latest.Details = &models.PackageDetails{}
+				}
+				latest.Details.Files = files
+				defer func() {
+					if latest.Details != nil {
+						latest.Details.Files = nil
+					}
+				}()
+			}
+		}
+	}
+
+	if primaryGroup == nil {
+		firstLetter := util.FirstLetter(pkgName)
+		primaryGroup = &logic.GroupData{
+			Name:     "Letter " + firstLetter,
+			Filename: fmt.Sprintf("letter_%s.group.html", strings.ToLower(firstLetter)),
+		}
+	}
+
+	filename := latest.Filename()
+
+	content, err := renderer.RenderPackage(latest, primaryGroup)
+	if err != nil {
+		return "", err
+	}
+
+	hasChanged := stateStore.HasChanged(filename, content)
+	if g.config.Force || hasChanged {
+		if !g.config.Quiet {
+			fmt.Printf("Writing package %s\n", filename)
+		}
+		if err := renderer.WriteToFile(filename, content); err != nil {
+			return "", err
+		}
+	}
+
+	return filename, nil
 }
 
 // renderIndices generates the index.html, search.json, and RSS feed.
@@ -799,4 +843,339 @@ func validateOutputDirSafety(repoDir, outputDir string) error {
 	}
 
 	return nil
+}
+
+// renderDescriptor generates the repoview.json metadata descriptor.
+func (g *Generator) renderDescriptor(renderer *render.Renderer, stateStore *state.StateStore, portalURL string, allPkgs []*models.Package) ([]string, error) {
+	descBytes, err := g.buildDescriptor(portalURL, allPkgs)
+	if err != nil {
+		return nil, err
+	}
+	hasChanged := stateStore.HasChanged("repoview.json", descBytes)
+	if g.config.Force || hasChanged {
+		g.say("Writing repoview.json\n")
+		if err := renderer.WriteToFile("repoview.json", descBytes); err != nil {
+			return nil, fmt.Errorf("failed to write repoview.json: %w", err)
+		}
+	}
+	return []string{"repoview.json"}, nil
+}
+
+// buildDescriptor constructs the models.RepoDescriptor struct and marshals it to JSON.
+func (g *Generator) buildDescriptor(portalURL string, allPkgs []*models.Package) ([]byte, error) {
+	primaryArch := detectPrimaryArch(allPkgs)
+	if primaryArch == "all" || primaryArch == "unknown" || primaryArch == "" {
+		if pathArch := detectArchFromPath(g.config.RepoDir); pathArch != "" {
+			primaryArch = pathArch
+		}
+	}
+	distro, channel := inferDistroAndChannel(g.config.RepoDir)
+	title := g.config.Title
+	if title == "" || title == "Repoview" {
+		if distro != "" && channel != "" {
+			title = fmt.Sprintf("%s %s", distro, channel)
+		} else if distro != "" {
+			title = distro
+		} else {
+			title = "Repository"
+		}
+	}
+
+	desc := &models.RepoDescriptor{
+		Title:           title,
+		Format:          string(g.config.Format),
+		Arch:            primaryArch,
+		Distro:          distro,
+		Channel:         channel,
+		PackageCount:    len(allPkgs),
+		LastBuild:       time.Now().UTC().Truncate(time.Second),
+		BaseURL:         g.config.BaseURL,
+		PortalURL:       portalURL,
+		RepoviewVersion: g.config.Version,
+	}
+
+	return json.MarshalIndent(desc, "", "  ")
+}
+
+// resolvePortalURL determines the parent portal URL either from explicit config or auto-discovery.
+func (g *Generator) resolvePortalURL() string {
+	raw := strings.TrimSpace(g.config.PortalURL)
+	lower := strings.ToLower(raw)
+	if lower == "none" || lower == "off" || lower == "false" {
+		return ""
+	}
+	if raw != "" && lower != "auto" {
+		return raw
+	}
+	return findParentPortal(g.config.OutputDir, g.config.RepoDir)
+}
+
+// findParentPortal climbs parent directories looking for portal.yaml or an index.html with RepoView-Portal signature.
+func findParentPortal(outputDir, repoDir string) string {
+	absOut, err := filepath.Abs(outputDir)
+	if err != nil {
+		absOut = outputDir
+	}
+
+	// 1. Try climbing upwards from outputDir
+	if portalDir := climbForPortal(absOut); portalDir != "" {
+		rel, err := filepath.Rel(absOut, portalDir)
+		if err == nil {
+			if rel == "." {
+				return "index.html"
+			}
+			return filepath.ToSlash(filepath.Join(rel, "index.html"))
+		}
+	}
+
+	// 2. Try climbing upwards from repoDir
+	if repoDir != "" {
+		absRepo, err := filepath.Abs(repoDir)
+		if err == nil {
+			if portalDir := climbForPortal(absRepo); portalDir != "" {
+				rel, err := filepath.Rel(absOut, portalDir)
+				if err == nil {
+					if rel == "." {
+						return "index.html"
+					}
+					return filepath.ToSlash(filepath.Join(rel, "index.html"))
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// climbForPortal checks up to 10 parent directories for portal markers.
+func climbForPortal(startDir string) string {
+	curr := startDir
+	for i := 0; i < 10; i++ {
+		parent := filepath.Dir(curr)
+		if parent == curr || parent == "." || parent == "" {
+			break
+		}
+		curr = parent
+		if isPortalDir(curr) {
+			return curr
+		}
+	}
+	return ""
+}
+
+// isPortalDir checks if a directory contains portal.yaml, portal.yml, or a RepoView-Portal index.html.
+func isPortalDir(dir string) bool {
+	if fi, err := os.Stat(filepath.Join(dir, "portal.yaml")); err == nil && !fi.IsDir() {
+		return true
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "portal.yml")); err == nil && !fi.IsDir() {
+		return true
+	}
+	indexPath := filepath.Join(dir, "index.html")
+	if fi, err := os.Stat(indexPath); err == nil && !fi.IsDir() {
+		// #nosec G304 -- inspecting parent directory index.html for RepoView-Portal signature
+		f, err := os.Open(filepath.Clean(indexPath))
+		if err == nil {
+			buf := make([]byte, 2048)
+			n, _ := f.Read(buf)
+			_ = f.Close()
+			if strings.Contains(string(buf[:n]), "RepoView-Portal") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// detectPrimaryArch determines the primary binary architecture from package records.
+func detectPrimaryArch(allPkgs []*models.Package) string {
+	archCounts := make(map[string]int)
+	for _, p := range allPkgs {
+		arch := strings.ToLower(strings.TrimSpace(p.Arch))
+		if arch != "" {
+			archCounts[arch]++
+		}
+	}
+	if len(archCounts) == 0 {
+		return "all"
+	}
+
+	var bestArch string
+	var maxCount int
+	for arch, count := range archCounts {
+		if arch == "noarch" || arch == "all" {
+			continue
+		}
+		if count > maxCount {
+			maxCount = count
+			bestArch = arch
+		}
+	}
+	if bestArch != "" {
+		return bestArch
+	}
+	if archCounts["noarch"] > 0 {
+		return "noarch"
+	}
+	if archCounts["all"] > 0 {
+		return "all"
+	}
+	return "unknown"
+}
+
+var knownArchitectures = map[string]bool{
+	"x86_64":  true,
+	"amd64":   true,
+	"aarch64": true,
+	"arm64":   true,
+	"armhf":   true,
+	"armv7hl": true,
+	"i686":    true,
+	"i386":    true,
+	"s390x":   true,
+	"ppc64le": true,
+	"riscv64": true,
+	"noarch":  true,
+	"all":     true,
+}
+
+func isArchToken(token string) bool {
+	token = strings.TrimPrefix(token, "binary-")
+	return knownArchitectures[token]
+}
+
+// detectArchFromPath extracts a recognized architecture keyword from directory paths.
+func detectArchFromPath(repoDir string) string {
+	abs, err := filepath.Abs(repoDir)
+	if err != nil {
+		abs = repoDir
+	}
+	parts := strings.Split(filepath.ToSlash(abs), "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := strings.TrimSpace(parts[i])
+		if part == "" {
+			continue
+		}
+		if strings.HasPrefix(part, "binary-") {
+			candidate := strings.TrimPrefix(part, "binary-")
+			if knownArchitectures[candidate] {
+				return candidate
+			}
+		}
+		if knownArchitectures[part] {
+			return part
+		}
+		if dotIdx := strings.LastIndex(part, "."); dotIdx != -1 {
+			candidate := part[dotIdx+1:]
+			if knownArchitectures[candidate] {
+				return candidate
+			}
+		}
+		if dashIdx := strings.LastIndex(part, "-"); dashIdx != -1 {
+			candidate := part[dashIdx+1:]
+			if knownArchitectures[candidate] {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+// inferDistroAndChannel deduces distribution and channel identifiers from directory layout.
+func inferDistroAndChannel(repoDir string) (string, string) {
+	abs, err := filepath.Abs(repoDir)
+	if err != nil {
+		abs = repoDir
+	}
+	slashPath := filepath.ToSlash(abs)
+	parts := strings.Split(slashPath, "/")
+	var nonClean []string
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			nonClean = append(nonClean, p)
+		}
+	}
+	parts = nonClean
+	if len(parts) == 0 {
+		return "generic", "base"
+	}
+
+	// 1. Debian layout check: .../dists/<suite>/<component>/...
+	for i, part := range parts {
+		if part == "dists" {
+			distro := ""
+			if i > 0 {
+				distro = parts[i-1]
+			}
+			suite := ""
+			if i+1 < len(parts) {
+				suite = parts[i+1]
+			}
+			component := "main"
+			if i+2 < len(parts) && !strings.HasPrefix(parts[i+2], "binary-") {
+				component = parts[i+2]
+			}
+			if distro == "" {
+				if suite != "" {
+					distro = suite
+				} else {
+					distro = "debian"
+				}
+			}
+			return distro, component
+		}
+	}
+
+	// 2. Hierarchical RPM tree check: .../<distro>/<channel>/<arch>
+	lastPart := parts[len(parts)-1]
+	if isArchToken(lastPart) && len(parts) >= 3 {
+		channel := parts[len(parts)-2]
+		distro := parts[len(parts)-3]
+		return distro, channel
+	}
+
+	// 3. Hierarchical two-level tree check: .../<distro>/<channel> (e.g. ubu24/custom, deb12/custom)
+	if len(parts) >= 2 {
+		parent := parts[len(parts)-2]
+		if isLikelyDistro(parent) {
+			return parent, parts[len(parts)-1]
+		}
+	}
+
+	// 4. Slug check: e.g. el10-base.x86_64, el-9-x86_64, ubuntu-24.04-x86_64
+	base := filepath.Base(abs)
+	if dotIdx := strings.LastIndex(base, "."); dotIdx != -1 {
+		suffix := base[dotIdx+1:]
+		if knownArchitectures[suffix] {
+			base = base[:dotIdx]
+		}
+	} else if dashIdx := strings.LastIndex(base, "-"); dashIdx != -1 {
+		suffix := base[dashIdx+1:]
+		if knownArchitectures[suffix] {
+			base = base[:dashIdx]
+		}
+	}
+
+	commonChannels := []string{"base", "baseos", "extras", "updates", "appstream", "powertools", "crb", "main", "universe", "multiverse", "restricted"}
+	for _, ch := range commonChannels {
+		if strings.HasSuffix(base, "-"+ch) {
+			distro := strings.TrimSuffix(base, "-"+ch)
+			return distro, ch
+		}
+		if strings.HasSuffix(base, "."+ch) {
+			distro := strings.TrimSuffix(base, "."+ch)
+			return distro, ch
+		}
+	}
+
+	return base, "base"
+}
+
+// isLikelyDistro checks if a directory name looks like a Linux distribution identifier.
+func isLikelyDistro(name string) bool {
+	d := strings.ToLower(name)
+	return strings.HasPrefix(d, "el") || strings.HasPrefix(d, "ubu") || strings.HasPrefix(d, "deb") ||
+		strings.Contains(d, "rhel") || strings.Contains(d, "centos") || strings.Contains(d, "fedora") ||
+		strings.Contains(d, "rocky") || strings.Contains(d, "alma") || strings.Contains(d, "suse") ||
+		strings.Contains(d, "arch") || strings.Contains(d, "alpine")
 }

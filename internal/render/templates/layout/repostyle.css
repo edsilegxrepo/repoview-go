@@ -661,6 +661,19 @@ a:hover {
 	color: var(--primary);
 }
 
+.breadcrumb-item a.portal-back-link {
+	display: inline-flex;
+	align-items: center;
+	color: var(--primary);
+	font-weight: 600;
+	transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.breadcrumb-item a.portal-back-link:hover {
+	color: var(--primary-hover);
+	text-decoration: underline;
+}
+
 .breadcrumb-item.active {
 	color: var(--text-main);
 	font-weight: 600;

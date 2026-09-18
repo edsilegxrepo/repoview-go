@@ -93,6 +93,23 @@ func TestTemplateRendering(t *testing.T) {
 		t.Errorf("RenderPackage returned empty content")
 	}
 
+	// 3b. Test PortalURL rendering
+	r.SetPortalURL("../../../index.html")
+	portalIndex, err := r.RenderIndex(groups, []*models.Package{pkg1}, "http://example.com/repo")
+	if err != nil || !strings.Contains(string(portalIndex), "portal-back-link") || !strings.Contains(string(portalIndex), "../../../index.html") {
+		t.Errorf("expected portal-back-link in index HTML with portal URL")
+	}
+
+	portalGroup, err := r.RenderGroup(group)
+	if err != nil || !strings.Contains(string(portalGroup), "portal-back-link") || !strings.Contains(string(portalGroup), "../../../index.html") {
+		t.Errorf("expected portal-back-link in group HTML with portal URL")
+	}
+
+	portalPkg, err := r.RenderPackage(pkg1, group)
+	if err != nil || !strings.Contains(string(portalPkg), "portal-back-link") || !strings.Contains(string(portalPkg), "../../../index.html") {
+		t.Errorf("expected portal-back-link in package HTML with portal URL")
+	}
+
 	// 4. Test WriteAssets
 	if err := r.WriteAssets(); err != nil {
 		t.Fatalf("WriteAssets failed: %v", err)

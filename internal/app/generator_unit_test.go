@@ -2,10 +2,12 @@ package app
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/edsilegxrepo/repoview/internal/models"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -164,6 +166,7 @@ func TestGenerator_FullPipeline(t *testing.T) {
 		"latest-feed.xml",
 		"mockapp.html",
 		"mockgroup.group.html",
+		"repoview.json",
 		filepath.Join("layout", "repostyle.css"),
 		filepath.Join("layout", "search.js"),
 	}
@@ -173,6 +176,22 @@ func TestGenerator_FullPipeline(t *testing.T) {
 		if _, err := os.Stat(target); os.IsNotExist(err) {
 			t.Errorf("expected generated file missing: %s", target)
 		}
+	}
+
+	// Verify repoview.json contents
+	descData, err := os.ReadFile(filepath.Join(outDir, "repoview.json"))
+	if err != nil {
+		t.Fatalf("failed to read repoview.json: %v", err)
+	}
+	var desc models.RepoDescriptor
+	if err := json.Unmarshal(descData, &desc); err != nil {
+		t.Fatalf("failed to parse repoview.json: %v", err)
+	}
+	if desc.PackageCount != 1 {
+		t.Errorf("desc.PackageCount = %d; want 1", desc.PackageCount)
+	}
+	if desc.Arch != "x86_64" {
+		t.Errorf("desc.Arch = %q; want x86_64", desc.Arch)
 	}
 
 	// 2. Incremental second run without Force
