@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/klauspost/compress v1.20.0
 	github.com/knqyf263/go-rpm-version v0.0.0-20260811110310-1815e1f1b790
-	github.com/ulikunitz/xz v0.5.16
+	github.com/ulikunitz/xz v0.5.17
 )
 
 require (
