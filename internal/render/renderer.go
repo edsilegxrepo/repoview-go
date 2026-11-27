@@ -57,8 +57,9 @@ type RepoContext struct {
 	Siblings  []*logic.SiblingRepo   // Neighboring repository channels or architectures
 	RepoID    string                 // Normalized repository identifier for .repo configuration
 	BaseURL   string                 // Explicit or derived repository HTTP/HTTPS base URL
-	Format    models.RepoFormat      // Underlying repository format ("rpm" or "deb")
-	PortalURL string                 // Optional or auto-detected relative/absolute link to parent catalog portal
+	Format         models.RepoFormat      // Underlying repository format ("rpm" or "deb")
+	PortalURL      string                 // Optional or auto-detected relative/absolute link to parent catalog portal
+	PackageBaseURL string                 // Optional base URL or relative path for raw package downloads
 }
 
 // Renderer handles the generation of HTML and XML files using templates.
@@ -86,6 +87,11 @@ func (r *Renderer) SetSiblings(siblings []*logic.SiblingRepo) {
 func (r *Renderer) SetRepoMeta(repoID, baseURL string) {
 	r.RepoCtx.RepoID = repoID
 	r.RepoCtx.BaseURL = baseURL
+}
+
+// SetPackageBaseURL sets the base URL or relative path prefix for package file downloads.
+func (r *Renderer) SetPackageBaseURL(pkgBaseURL string) {
+	r.RepoCtx.PackageBaseURL = strings.TrimRight(pkgBaseURL, "/")
 }
 
 // SetFormat sets the repository package format in the global repo context.

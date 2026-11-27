@@ -101,6 +101,15 @@ func TestRenderer_RenderHTML(t *testing.T) {
 	if !strings.Contains(content, "id=\"theme-toggle\"") {
 		t.Errorf("missing theme toggle in HTML")
 	}
+	if !strings.Contains(content, `data-theme="dark"`) {
+		t.Errorf("expected portal HTML root to declare data-theme=\"dark\" default")
+	}
+	if !strings.Contains(content, `localStorage.getItem('repoview-theme') || 'dark'`) {
+		t.Errorf("expected portal HTML to default to 'dark' theme in script")
+	}
+	if strings.Contains(content, `prefers-color-scheme: light`) {
+		t.Errorf("portal HTML should not override dark theme default with prefers-color-scheme: light")
+	}
 }
 
 func TestRenderer_RenderFeed_Aggregated(t *testing.T) {

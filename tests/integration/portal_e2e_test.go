@@ -158,8 +158,8 @@ func TestLive_Portal_TopologiesAndLiveServer(t *testing.T) {
 		t.Fatalf("failed to build repoview binary: %v\nOutput: %s", err, string(out))
 	}
 
-	// Run portal command with --render-missing and --workers 4
-	cmd := exec.Command(binPath, "portal", "--title", "Enterprise Portal Matrix", "--render-missing", "--workers", "4", homePath)
+	// Run portal command with --in-place, --render-missing and --workers 4
+	cmd := exec.Command(binPath, "portal", "--in-place", "--title", "Enterprise Portal Matrix", "--render-missing", "--workers", "4", homePath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("repoview portal failed: %v\nOutput: %s", err, string(output))
@@ -294,6 +294,7 @@ func TestLive_Portal_RealRepository_TestDirectory(t *testing.T) {
 	portalTitle := "Enterprise Production Mirror Portal"
 	portalDesc := "Unified package catalog for Enterprise Linux 9 and Ubuntu 24.04 repositories"
 	cmd := exec.Command(binPath, "portal",
+		"--in-place",
 		"--title", portalTitle,
 		"--description", portalDesc,
 		"--force",
@@ -431,3 +432,191 @@ func TestLive_Portal_RealRepository_TestDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestPortal_RenderAll_E2E(t *testing.T) {
+	tempRoot := t.TempDir()
+	homePath := filepath.Join(tempRoot, "mirror")
+	_ = os.MkdirAll(homePath, 0o755)
+
+	// Create 2 RPM repos
+	repo1 := filepath.Join(homePath, "el9", "base", "x86_64")
+	setupMockRPMData(t, repo1, "kernel")
+
+	repo2 := filepath.Join(homePath, "el9", "extras", "x86_64")
+	setupMockRPMData(t, repo2, "ansible")
+
+	// Pre-render repo1 with an old title
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "repoview")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/edsilegxrepo/repoview/cmd/repoview")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build repoview binary: %v\nOutput: %s", err, string(out))
+	}
+
+	preRenderCmd := exec.Command(binPath, "--title", "Old Core Title", repo1)
+	if out, err := preRenderCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed pre-render: %v\nOutput: %s", err, string(out))
+	}
+
+	// Create portal.yaml with title overrides
+	portalYAML := `
+title: "E2E Render All Catalog"
+overrides:
+  "el9/base/x86_64":
+    title: "Enterprise Linux 9 Core"
+  "el9/extras/x86_64":
+    title: "Enterprise Linux 9 Addons"
+`
+	if err := os.WriteFile(filepath.Join(homePath, "portal.yaml"), []byte(portalYAML), 0o644); err != nil {
+		t.Fatalf("failed to write portal.yaml: %v", err)
+	}
+
+	// Run portal --in-place --render-all --force --workers 2
+	portalCmd := exec.Command(binPath, "portal", "--in-place", "--render-all", "--force", "--workers", "2", homePath)
+	if out, err := portalCmd.CombinedOutput(); err != nil {
+		t.Fatalf("portal --render-all failed: %v\nOutput: %s", err, string(out))
+	}
+
+	// Verify both repos contain new titles
+	for repoPath, wantTitle := range map[string]string{
+		repo1: "Enterprise Linux 9 Core",
+		repo2: "Enterprise Linux 9 Addons",
+	} {
+		jsonBytes, err := os.ReadFile(filepath.Join(repoPath, "repoview", "repoview.json"))
+		if err != nil {
+			t.Fatalf("failed to read descriptor for %s: %v", repoPath, err)
+		}
+		if !strings.Contains(string(jsonBytes), wantTitle) {
+			t.Errorf("expected %s descriptor to contain %q, got %s", repoPath, wantTitle, string(jsonBytes))
+		}
+
+		htmlBytes, err := os.ReadFile(filepath.Join(repoPath, "repoview", "index.html"))
+		if err != nil {
+			t.Fatalf("failed to read index.html for %s: %v", repoPath, err)
+		}
+		if !strings.Contains(string(htmlBytes), wantTitle) {
+			t.Errorf("expected %s index.html to contain %q", repoPath, wantTitle)
+		}
+	}
+
+	// Verify top-level portal index
+	portalHTML, err := os.ReadFile(filepath.Join(homePath, "index.html"))
+	if err != nil {
+		t.Fatalf("failed to read portal index: %v", err)
+	}
+	content := string(portalHTML)
+	if !strings.Contains(content, "E2E Render All Catalog") {
+		t.Errorf("portal missing title")
+	}
+	if !strings.Contains(content, "Enterprise Linux 9 Core") || !strings.Contains(content, "Enterprise Linux 9 Addons") {
+		t.Errorf("portal missing repo titles")
+	}
+}
+
+func TestPortal_Detached_ReadOnlySource_E2E(t *testing.T) {
+	// 1. Build repoview binary
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "repoview")
+	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/edsilegxrepo/repoview/cmd/repoview")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build repoview binary: %v\nOutput: %s", err, string(out))
+	}
+
+	// 2. Prepare mock RPM repos
+	reposDir := filepath.Join(t.TempDir(), "source_repos")
+	repo1 := filepath.Join(reposDir, "el9", "base", "x86_64")
+	setupMockRPMData(t, repo1, "app-one")
+	repo2 := filepath.Join(reposDir, "el9", "extras", "x86_64")
+	setupMockRPMData(t, repo2, "app-two")
+
+	// 3. Make the entire source_repos tree strictly READ-ONLY
+	_ = filepath.Walk(reposDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil {
+			if info.IsDir() {
+				_ = os.Chmod(path, 0o555)
+			} else {
+				_ = os.Chmod(path, 0o444)
+			}
+		}
+		return nil
+	})
+	// Restore write permissions on test cleanup so os.RemoveAll inside t.TempDir succeeds
+	t.Cleanup(func() {
+		_ = filepath.Walk(reposDir, func(path string, info os.FileInfo, err error) error {
+			if err == nil {
+				if info.IsDir() {
+					_ = os.Chmod(path, 0o755)
+				} else {
+					_ = os.Chmod(path, 0o644)
+				}
+			}
+			return nil
+		})
+	})
+
+	// 4. Detached Portal Home
+	portalHome := filepath.Join(t.TempDir(), "portal_home")
+
+	// 5. Run repoview portal in detached mode against read-only repositories
+	portalCmd := exec.Command(binPath, "portal",
+		"--portal-home", portalHome,
+		"--portal-url", "https://portal.corp.local",
+		"--repo-url", "https://mirrors.corp.local/packages",
+		"--render-all",
+		"--workers", "2",
+		reposDir,
+	)
+	out, err := portalCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("portal in detached mode failed against read-only repo: %v\nOutput: %s", err, string(out))
+	}
+
+	// 6. Verify top-level portal artifacts
+	portalHTMLPath := filepath.Join(portalHome, "index.html")
+	if _, err := os.Stat(portalHTMLPath); err != nil {
+		t.Fatalf("expected portal index.html in %s: %v", portalHome, err)
+	}
+	portalFeedPath := filepath.Join(portalHome, "portal-feed.xml")
+	if _, err := os.Stat(portalFeedPath); err != nil {
+		t.Fatalf("expected portal-feed.xml in %s: %v", portalHome, err)
+	}
+
+	// 7. Verify child repositories rendered into detached shadow tree
+	for _, sub := range []string{"el9/base/x86_64", "el9/extras/x86_64"} {
+		childHTML := filepath.Join(portalHome, filepath.FromSlash(sub), "index.html")
+		if _, err := os.Stat(childHTML); err != nil {
+			t.Fatalf("expected child index in %s: %v", childHTML, err)
+		}
+		childJSON := filepath.Join(portalHome, filepath.FromSlash(sub), "repoview.json")
+		if _, err := os.Stat(childJSON); err != nil {
+			t.Fatalf("expected child descriptor in %s: %v", childJSON, err)
+		}
+
+		htmlBytes, err := os.ReadFile(childHTML)
+		if err != nil {
+			t.Fatalf("failed to read child index: %v", err)
+		}
+		content := string(htmlBytes)
+		wantBaseURL := fmt.Sprintf("baseurl=https://mirrors.corp.local/packages/%s", sub)
+		if !strings.Contains(content, wantBaseURL) {
+			t.Errorf("child repo %s missing configured baseurl %q in index.html", sub, wantBaseURL)
+		}
+	}
+
+	// 8. Re-run with --render-missing: Scanner must recognize child repos in portalHome as already rendered
+	reRunCmd := exec.Command(binPath, "portal",
+		"--portal-home", portalHome,
+		"--portal-url", "https://portal.corp.local",
+		"--repo-url", "https://mirrors.corp.local/packages",
+		"--render-missing",
+		reposDir,
+	)
+	reOut, reErr := reRunCmd.CombinedOutput()
+	if reErr != nil {
+		t.Fatalf("portal re-run failed: %v\nOutput: %s", reErr, string(reOut))
+	}
+	if strings.Contains(string(reOut), "Discovered 2 unrendered") {
+		t.Errorf("portal re-run should not attempt to re-render already rendered repos: %s", string(reOut))
+	}
+}
+

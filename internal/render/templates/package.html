@@ -17,13 +17,13 @@
     <aside class="sidebar">
         <div class="sidebar-header">
             <div class="brand-row">
-                <a href="index.html" class="brand-title">
+                <a href="index.html" class="brand-title" title="{{ .Repo.Title }}">
                     <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
                         <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
                         <line x1="12" y1="22.08" x2="12" y2="12"></line>
                     </svg>
-                    <span>{{ .Repo.Title }}</span>
+                    <span>RepoView</span>
                 </a>
                 <div class="header-actions">
                     <button id="themeToggleBtn" class="icon-btn" title="Switch to light theme">
@@ -142,7 +142,7 @@
                     <li class="breadcrumb-item"><a href="{{ .Repo.PortalURL }}" class="portal-back-link"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: -2px; margin-right: 4px;"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>All Repositories</a></li>
                     <li class="breadcrumb-sep">/</li>
                     {{ end }}
-                    <li class="breadcrumb-item"><a href="index.html">Home</a></li>
+                    <li class="breadcrumb-item"><a href="index.html">{{ .Repo.Title }}</a></li>
                     <li class="breadcrumb-sep">/</li>
                     <li class="breadcrumb-item"><a href="{{ .Group.Filename }}">{{ .Group.Name }}</a></li>
                     <li class="breadcrumb-sep">/</li>
@@ -179,15 +179,15 @@
                 <div class="quick-install-bar">
                     <div class="install-tool-tabs">
                         {{ if eq .Pkg.Format "deb" }}
-                        <button type="button" class="install-tab active" data-tool="apt" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">apt</button>
-                        <button type="button" class="install-tab" data-tool="dpkg" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">dpkg</button>
-                        <button type="button" class="install-tab" data-tool="wget" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">wget</button>
-                        <button type="button" class="install-tab" data-tool="curl" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">curl</button>
+                        <button type="button" class="install-tab active" data-tool="apt" data-pkg="{{ .Pkg.Name }}" data-href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .Pkg.LocationHref }}">apt</button>
+                        <button type="button" class="install-tab" data-tool="dpkg" data-pkg="{{ .Pkg.Name }}" data-href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .Pkg.LocationHref }}">dpkg</button>
+                        <button type="button" class="install-tab" data-tool="wget" data-pkg="{{ .Pkg.Name }}" data-href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .Pkg.LocationHref }}">wget</button>
+                        <button type="button" class="install-tab" data-tool="curl" data-pkg="{{ .Pkg.Name }}" data-href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .Pkg.LocationHref }}">curl</button>
                         {{ else }}
-                        <button type="button" class="install-tab active" data-tool="dnf" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">dnf</button>
-                        <button type="button" class="install-tab" data-tool="yum" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">yum</button>
-                        <button type="button" class="install-tab" data-tool="wget" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">wget</button>
-                        <button type="button" class="install-tab" data-tool="curl" data-pkg="{{ .Pkg.Name }}" data-href="../{{ .Pkg.LocationHref }}">curl</button>
+                        <button type="button" class="install-tab active" data-tool="dnf" data-pkg="{{ .Pkg.Name }}" data-href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .Pkg.LocationHref }}">dnf</button>
+                        <button type="button" class="install-tab" data-tool="yum" data-pkg="{{ .Pkg.Name }}" data-href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .Pkg.LocationHref }}">yum</button>
+                        <button type="button" class="install-tab" data-tool="wget" data-pkg="{{ .Pkg.Name }}" data-href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .Pkg.LocationHref }}">wget</button>
+                        <button type="button" class="install-tab" data-tool="curl" data-pkg="{{ .Pkg.Name }}" data-href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .Pkg.LocationHref }}">curl</button>
                         {{ end }}
                     </div>
                     <div class="install-cmd-wrap">
@@ -572,7 +572,7 @@
                 {{ range .Pkg.AllVersions }}
                 <div class="version-card">
                     <div class="version-header">
-                        <a href="../{{ .LocationHref }}" class="version-rpm-link" title="Download {{ if eq .Format "deb" }}DEB{{ else }}RPM{{ end }} package">
+                        <a href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else }}../{{ end }}{{ .LocationHref }}" class="version-rpm-link" title="Download {{ if eq .Format "deb" }}DEB{{ else }}RPM{{ end }} package">
                             <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                                 <polyline points="7 10 12 15 17 10"></polyline>

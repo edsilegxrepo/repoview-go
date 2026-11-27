@@ -14,6 +14,10 @@ type PortalConfig struct {
 	Title         string                        `yaml:"title"`
 	Description   string                        `yaml:"description"`
 	BaseURL       string                        `yaml:"base_url,omitempty"`
+	PortalURL     string                        `yaml:"portal_url,omitempty"`
+	RepoURL       string                        `yaml:"repo_url,omitempty"`
+	PortalHome    string                        `yaml:"portal_home,omitempty"`
+	InPlace       bool                          `yaml:"in_place,omitempty"`
 	AutoDiscovery AutoDiscoveryConfig           `yaml:"auto_discovery"`
 	Overrides     map[string]RepoOverrideConfig `yaml:"overrides,omitempty"`
 	Pinned        []string                      `yaml:"pinned,omitempty"`
@@ -70,6 +74,13 @@ func LoadConfig(path string) (*PortalConfig, error) {
 
 	if cfg.AutoDiscovery.MaxDepth <= 0 {
 		cfg.AutoDiscovery.MaxDepth = 5
+	}
+
+	if cfg.PortalURL == "" && cfg.BaseURL != "" {
+		cfg.PortalURL = cfg.BaseURL
+	}
+	if cfg.BaseURL == "" && cfg.PortalURL != "" {
+		cfg.BaseURL = cfg.PortalURL
 	}
 
 	return cfg, nil

@@ -232,6 +232,8 @@ func (r *Renderer) RenderFeed(catalog *Catalog, rootDir string) ([]byte, error) 
 // readChildFeedItems extracts up to 5 latest items from a child repo's latest-feed.xml.
 func (r *Renderer) readChildFeedItems(repo *DiscoveredRepo, rootDir, portalBaseURL string) []rssItem {
 	candidates := []string{
+		filepath.Join(rootDir, repo.RelPath, "latest-feed.xml"),
+		filepath.Join(rootDir, repo.RelPath, "repoview", "latest-feed.xml"),
 		filepath.Join(repo.Path, "repoview", "latest-feed.xml"),
 		filepath.Join(repo.Path, "latest-feed.xml"),
 	}
@@ -336,6 +338,10 @@ func (r *Renderer) WritePortal(outputDir, rootDir string, catalog *Catalog, forc
 			if repo.IsExternal || strings.HasPrefix(repo.TargetURL, "http://") || strings.HasPrefix(repo.TargetURL, "https://") {
 				continue
 			}
+			// If already present directly inside absOut (detached output mode), no need to re-base against absRoot
+			if _, err := os.Stat(filepath.Join(absOut, filepath.FromSlash(repo.TargetURL))); err == nil {
+				continue
+			}
 			absTarget := filepath.Join(absRoot, repo.TargetURL)
 			if rel, err := filepath.Rel(absOut, absTarget); err == nil {
 				repo.TargetURL = filepath.ToSlash(rel)
@@ -354,7 +360,7 @@ func (r *Renderer) WritePortal(outputDir, rootDir string, catalog *Catalog, forc
 	}
 
 	// Render Feed
-	feedBytes, err := r.RenderFeed(catalog, rootDir)
+	feedBytes, err := r.RenderFeed(catalog, cleanOut)
 	if err != nil {
 		return err
 	}

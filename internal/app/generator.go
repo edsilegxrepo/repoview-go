@@ -92,8 +92,9 @@ type Config struct {
 	Quiet       bool              // If true, suppresses standard informational output
 	IgnoreList  []string          // Glob patterns of package names/NVRAs to ignore
 	ExcludeArch []string          // Hardware architectures to exclude from generation
-	PortalURL   string            // Explicit or auto-detected URL to parent catalog portal ("auto", "none", or path/URL)
-	Version     string            // Repoview tool version string
+	PortalURL      string            // Explicit or auto-detected URL to parent catalog portal ("auto", "none", or path/URL)
+	PackageBaseURL string            // Base URL or relative path prefix for package file downloads
+	Version        string            // Repoview tool version string
 }
 
 // Generator orchestrates the repository view generation process.
@@ -179,6 +180,9 @@ func (g *Generator) Run() error {
 	portalURL := g.resolvePortalURL()
 	if portalURL != "" {
 		renderer.SetPortalURL(portalURL)
+	}
+	if g.config.PackageBaseURL != "" {
+		renderer.SetPackageBaseURL(g.config.PackageBaseURL)
 	}
 
 	// Helper data structures

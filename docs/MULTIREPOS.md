@@ -215,40 +215,53 @@ Enterprise mirrors frequently use symlinks (e.g. `el-current -> el9`, `latest ->
 ### Pillar 4: CLI Ergonomics & Subcommand Design
 
 > [!TIP]
-> **Subcommand vs Flag**: Single-repo flags (`--comps`, `--baseurl`, `--ignore-package`, `--exclude-arch`) are irrelevant to a catalog builder. Catalog flags (`--max-depth`, `--exclude`, `--title`, `--output-dir`, `--require-rendered`, `--render-missing`, `--workers`, `--force`) are irrelevant to a single-repo build. A dedicated subcommand maintains 100% backward compatibility and clean `--help` outputs.
+> **Subcommand vs Flag**: Single-repo flags (`--comps`, `--baseurl`, `--ignore-package`, `--exclude-arch`) are irrelevant to a catalog builder. Catalog flags (`--max-depth`, `--exclude`, `--title`, `--portal-home`, `--in-place`, `--portal-url`, `--repo-url`, `--require-rendered`, `--render-missing`, `--render-all`, `--workers`, `--force`) are specific to multi-repo catalog building. A dedicated subcommand maintains 100% backward compatibility and clean `--help` outputs.
 
 #### Command Specification:
 ```bash
 # 1. Standard single-repo generation (existing behavior, 100% backward compatible)
 repoview [options] <repodir>
 
-# 2. Pure auto-discovery portal generation (Zero config)
-repoview portal /var/www/repos
+# 2. Recommended: Detached portal generation (Zero pollution in source repos)
+#    Writes all HTML, feeds, and state stores to --portal-home outside source mirror tree
+repoview portal --portal-home /var/www/portal /var/www/repos
 
-# 3. Portal with custom title and output directory
-repoview portal --title "Production Mirrors" --output-dir /var/www/html /var/www/repos
+# 3. Detached portal with decoupled public URLs:
+#    --portal-url: Public URL for portal UI browsing and portal RSS feed
+#    --repo-url: Public URL where raw package archives (.rpm/.deb) and metadata are served
+repoview portal \
+  --portal-home /var/www/portal \
+  --portal-url https://portal.example.com \
+  --repo-url https://mirrors.example.com/repos \
+  --render-all \
+  --workers 8 \
+  /srv/repos
 
-# 4. Only show repositories that have already been rendered by repoview
-repoview portal --require-rendered /var/www/repos
+# 4. In-Tree Legacy Mode: Generate repoview/ files inside source repository mirrors
+repoview portal --in-place /var/www/repos
 
-# 5. Parallel Batch Rendering: Automatically render all unbuilt/raw repositories
+# 5. Parallel Batch Rendering: Automatically render unbuilt/raw repositories
 #    Default concurrency: numprocs x 2 (clamped min: 1, max: 16), adjustable via --workers
-repoview portal --render-missing --workers 8 /var/www/repos
+repoview portal --portal-home /var/www/portal --render-missing --workers 8 /var/www/repos
 
-# 6. Overwrite safety override (force replacement of pre-existing non-RepoView index.html)
-repoview portal --force /var/www/repos
+# 6. Force render all discovered repositories (raw and previously rendered)
+repoview portal --portal-home /var/www/portal --render-all --force --workers 8 /var/www/repos
 
-# 7. Bootstrap a starter configuration file from auto-discovery
+# 7. Overwrite safety override (force replacement of pre-existing non-RepoView index.html)
+repoview portal --portal-home /var/www/portal --force /var/www/repos
+
+# 8. Bootstrap a starter configuration file from auto-discovery
 repoview portal --dump-config portal.yaml /var/www/repos
 
-# 8. Using an explicit configuration file
+# 9. Using an explicit configuration file
 repoview portal --config portal.yaml /var/www/repos
 ```
 
-#### Parallel Processing for `--render-missing`
-When `--render-missing` is toggled:
-- The crawler first scans and catalogs the entire tree, collecting all unbuilt/raw repositories.
-- Unbuilt repositories are processed in parallel using a bounded worker pool (`chan struct{}`).
+#### Parallel Processing for `--render-missing` and `--render-all`
+When `--render-missing` or `--render-all` is toggled:
+- The crawler first scans and catalogs the entire tree, collecting target repositories (unrendered repos for `--render-missing`, or all discovered repos for `--render-all`).
+- Target repositories are processed in parallel using a bounded worker pool (`chan *portal.DiscoveredRepo`).
+- **Title Propagation**: Repository display titles from `portal.yaml` overrides or directory taxonomy are injected into child repository generators during rendering.
 - **Worker Pool Sizing**: Defaults to `runtime.NumCPU() * 2`, clamped between `min: 1` and `max: 16`.
 - Operators can tune concurrency via `--workers <N>` (enforcing `1 <= N <= 16`).
 - Once parallel rendering completes, the catalog re-scans the newly generated `repoview.json` descriptors and renders the unified portal atomically.
@@ -673,7 +686,10 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("repoview portal", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	fs.StringVar(&outputDir, "output-dir", "", "Portal output directory (default: <home-dir>)")
+	fs.StringVar(&portalHome, "portal-home", "", "Detached portal output directory (outside repo)")
+	fs.BoolVar(&inPlace, "in-place", false, "Generate repoview files inside source repository mirrors (legacy)")
+	fs.StringVar(&portalURL, "portal-url", "", "Portal public base URL for UI browsing and portal RSS feed")
+	fs.StringVar(&repoURL, "repo-url", "", "Repository package download and client configuration base URL")
 	fs.StringVar(&title, "title", "Repository Catalog", "Portal page title")
 	fs.StringVar(&configPath, "config", "", "Path to optional portal.yaml configuration")
 	fs.StringVar(&dumpConfigPath, "dump-config", "", "Dump auto-discovered catalog to starter YAML and exit")
@@ -741,7 +757,7 @@ flowchart LR
 
 ### Phase 4: CLI Subcommand Integration
 * Update `cmd/repoview/main.go` to support `repoview portal [options] <home-path>`.
-* Support flags: `--title`, `--output-dir`, `--max-depth`, `--require-rendered`, `--render-missing`, `--workers` (min 1, max 16), `--force`, `--dump-config`, `--config`.
+* Support flags: `--title`, `--portal-home`, `--in-place`, `--portal-url`, `--repo-url`, `--max-depth`, `--require-rendered`, `--render-missing`, `--render-all`, `--workers` (min 1, max 16), `--force`, `--dump-config`, `--config`.
 * Implement parallel batch execution for `--render-missing` with bounded goroutine pool.
 
 ### Phase 5: Two-Way Navigation & Validation

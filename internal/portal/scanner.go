@@ -29,6 +29,7 @@ import (
 // ScanConfig defines traversal and filtering options for repository auto-discovery.
 type ScanConfig struct {
 	RootDir         string   // Root directory to crawl (HOME PATH)
+	PortalHome      string   // Optional detached portal home directory (containing rendered views)
 	MaxDepth        int      // Maximum directory recursion depth (default: 5)
 	RequireRendered bool     // If true, filters out unbuilt/raw repositories
 	ExcludePatterns []string // Directory names or glob patterns to skip
@@ -218,6 +219,110 @@ func (s *Scanner) crawl(dirPath, virtualRel string, depth int, absRoot string, d
 
 // inspectDirectory checks whether a directory node matches repository criteria.
 func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRepo, bool) {
+	// 0. Detached Portal Home check: inspect detached portal home for rendered view/metadata
+	if s.config.PortalHome != "" {
+		detachedSub := relPath
+		if detachedSub == "." || detachedSub == "" {
+			detachedSub = "repoview"
+		}
+		detachedRepoDir := filepath.Join(s.config.PortalHome, detachedSub)
+
+		// Check detached repoview.json
+		descCandidates := []string{
+			filepath.Join(detachedRepoDir, "repoview.json"),
+			filepath.Join(detachedRepoDir, "repoview", "repoview.json"),
+		}
+		for _, descFile := range descCandidates {
+			if fi, err := os.Stat(descFile); err == nil && !fi.IsDir() {
+				if desc, err := loadDescriptor(descFile); err == nil {
+					targetURL := filepath.ToSlash(filepath.Join(relPath, "index.html"))
+					if strings.Contains(descFile, filepath.Join("repoview", "repoview.json")) || relPath == "." || relPath == "" {
+						targetURL = filepath.ToSlash(filepath.Join(relPath, "repoview", "index.html"))
+						if relPath == "." || relPath == "" {
+							targetURL = "repoview/index.html"
+						}
+					}
+					repo := &DiscoveredRepo{
+						Path:         path,
+						RelPath:      filepath.ToSlash(relPath),
+						TargetURL:    targetURL,
+						Format:       models.RepoFormat(desc.Format),
+						Arch:         desc.Arch,
+						Distro:       desc.Distro,
+						Channel:      desc.Channel,
+						Title:        desc.Title,
+						PackageCount: desc.PackageCount,
+						LastBuild:    desc.LastBuild,
+						IsRendered:   true,
+						Descriptor:   desc,
+					}
+					s.enrichDebianSuite(repo, path)
+					return repo, true
+				}
+			}
+		}
+
+		// Check detached index.html without repoview.json
+		indexCandidates := []string{
+			filepath.Join(detachedRepoDir, "index.html"),
+			filepath.Join(detachedRepoDir, "repoview", "index.html"),
+		}
+		for _, idxFile := range indexCandidates {
+			if fi, err := os.Stat(idxFile); err == nil && !fi.IsDir() {
+				if isRepoViewRendered(idxFile) {
+					format := sniffFormat(path)
+					arch := detectArchFromPath(path)
+					if arch == "unknown" || arch == "" {
+						if a := detectArchFromDebianMeta(path); a != "" && a != "unknown" {
+							arch = a
+						} else if a := detectArchFromPackageFiles(path); a != "" && a != "unknown" {
+							arch = a
+						}
+					}
+					distro, channel := inferDistroAndChannel(path)
+					targetURL := filepath.ToSlash(filepath.Join(relPath, "index.html"))
+					if strings.Contains(idxFile, filepath.Join("repoview", "index.html")) || relPath == "." || relPath == "" {
+						targetURL = filepath.ToSlash(filepath.Join(relPath, "repoview", "index.html"))
+						if relPath == "." || relPath == "" {
+							targetURL = "repoview/index.html"
+						}
+					}
+					title := extractHTMLTitle(idxFile)
+					title = strings.TrimPrefix(title, "RepoView: ")
+					title = strings.TrimSpace(title)
+					if title == "" || strings.EqualFold(title, "Repoview") {
+						title = fmt.Sprintf("%s %s", distro, channel)
+					}
+					pkgCount := countPackagesFromSearchJSON(filepath.Join(filepath.Dir(idxFile), "search.json"))
+					repo := &DiscoveredRepo{
+						Path:         path,
+						RelPath:      filepath.ToSlash(relPath),
+						TargetURL:    targetURL,
+						Format:       format,
+						Arch:         arch,
+						Distro:       distro,
+						Channel:      channel,
+						Title:        title,
+						PackageCount: pkgCount,
+						LastBuild:    fi.ModTime().UTC(),
+						IsRendered:   true,
+					}
+					s.enrichDebianSuite(repo, path)
+					return repo, true
+				}
+			}
+		}
+	}
+
+	defaultRawTargetURL := filepath.ToSlash(filepath.Join(relPath, "repoview", "index.html"))
+	if s.config.PortalHome != "" {
+		if relPath == "." || relPath == "" {
+			defaultRawTargetURL = "repoview/index.html"
+		} else {
+			defaultRawTargetURL = filepath.ToSlash(filepath.Join(relPath, "index.html"))
+		}
+	}
+
 	// 1. Pillar 1: Check for self-describing repoview.json
 	descFile := filepath.Join(path, "repoview", "repoview.json")
 	inSubDir := true
@@ -325,7 +430,7 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 			}
 		}
 		distro, channel := inferDistroAndChannel(path)
-		targetURL := filepath.ToSlash(filepath.Join(relPath, "repoview", "index.html"))
+		targetURL := defaultRawTargetURL
 
 		repo := &DiscoveredRepo{
 			Path:       path,
@@ -346,7 +451,7 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 	if strings.HasPrefix(base, "binary-") {
 		arch := strings.TrimPrefix(base, "binary-")
 		distro, channel := inferDistroAndChannel(path)
-		targetURL := filepath.ToSlash(filepath.Join(relPath, "repoview", "index.html"))
+		targetURL := defaultRawTargetURL
 
 		repo := &DiscoveredRepo{
 			Path:       path,
@@ -374,7 +479,7 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 			}
 		}
 		distro, channel := inferDistroAndChannel(path)
-		targetURL := filepath.ToSlash(filepath.Join(relPath, "repoview", "index.html"))
+		targetURL := defaultRawTargetURL
 
 		repo := &DiscoveredRepo{
 			Path:       path,

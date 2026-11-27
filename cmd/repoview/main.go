@@ -250,15 +250,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 // runPortal handles multi-repository discovery, catalog aggregation, and portal site generation.
 func runPortal(args []string, stdout, stderr io.Writer) int {
 	var (
-		outputDir       string
+		portalHome      string
+		inPlace         bool
+		portalURL       string
+		repoURL         string
 		title           string
 		description     string
-		baseURL         string
 		configPath      string
 		dumpConfigPath  string
 		maxDepth        int
 		requireRendered bool
 		renderMissing   bool
+		renderAll       bool
 		workers         int
 		force           bool
 		quiet           bool
@@ -275,16 +278,19 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("repoview portal", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	fs.StringVar(&outputDir, "output-dir", "", "Portal output directory (default: repodir)")
+	fs.StringVar(&portalHome, "portal-home", "", "Detached portal output directory (outside repo)")
+	fs.BoolVar(&inPlace, "in-place", false, "Generate repoview files inside source repository mirrors (legacy)")
+	fs.StringVar(&portalURL, "portal-url", "", "Portal public base URL for UI browsing and portal RSS feed")
+	fs.StringVar(&repoURL, "repo-url", "", "Repository package download and client configuration base URL")
 	fs.StringVar(&title, "title", "", "Portal page title")
 	fs.StringVar(&description, "description", "", "Portal page description")
-	fs.StringVar(&baseURL, "baseurl", "", "Portal base URL for RSS feed and link generation")
 	fs.StringVar(&configPath, "config", "", "Path to optional portal.yaml configuration")
 	fs.StringVar(&dumpConfigPath, "dump-config", "", "Dump auto-discovered catalog to starter YAML and exit")
 	fs.IntVar(&maxDepth, "max-depth", 5, "Maximum directory scan depth")
 	fs.BoolVar(&requireRendered, "require-rendered", false, "Only include repositories with generated repoview pages")
 	fs.BoolVar(&renderMissing, "render-missing", false, "Automatically generate repoview pages for raw repositories in parallel")
-	fs.IntVar(&workers, "workers", defaultWorkers, "Parallel worker concurrency for --render-missing (clamped 1-16)")
+	fs.BoolVar(&renderAll, "render-all", false, "Force generate repoview pages for all discovered repositories in parallel")
+	fs.IntVar(&workers, "workers", defaultWorkers, "Parallel worker concurrency for batch rendering (clamped 1-16)")
 	fs.BoolVar(&force, "force", false, "Force overwrite existing index.html even if not created by RepoView")
 	fs.BoolVar(&quiet, "quiet", false, "Quiet mode")
 	fs.BoolVar(&showVer, "version", false, "Display version")
@@ -306,16 +312,19 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(stderr, "  --%-20s\t%s%s\n", long, desc, defStr)
 		}
 
-		printOption("output-dir <dir>", "Portal output directory", "repodir")
+		printOption("portal-home <dir>", "Detached portal output directory (outside repo)", "")
+		printOption("in-place", "Generate repoview files inside source repository mirrors (legacy)", false)
+		printOption("portal-url <url>", "Portal public base URL for UI browsing and portal RSS feed", "")
+		printOption("repo-url <url>", "Repository package download and client configuration base URL", "")
 		printOption("title <text>", "Portal page title", "Enterprise Package Repositories")
 		printOption("description <text>", "Portal page description", "")
-		printOption("baseurl <url>", "Portal base URL for RSS feed", "")
 		printOption("config <file>", "Path to optional portal.yaml configuration", "")
 		printOption("dump-config <file>", "Dump auto-discovered catalog to starter YAML and exit", "")
 		printOption("max-depth <n>", "Maximum directory scan depth", 5)
 		printOption("require-rendered", "Only include repositories with generated repoview pages", false)
 		printOption("render-missing", "Automatically generate repoview pages for raw repositories in parallel", false)
-		printOption("workers <n>", "Parallel worker concurrency for --render-missing (1-16)", defaultWorkers)
+		printOption("render-all", "Force generate repoview pages for all discovered repositories in parallel", false)
+		printOption("workers <n>", "Parallel worker concurrency for batch rendering (1-16)", defaultWorkers)
 		printOption("force", "Force overwrite existing index.html even if not created by RepoView", false)
 		printOption("quiet", "Quiet mode", false)
 		printOption("version", "Display version information", false)
@@ -345,20 +354,6 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	if err != nil || !fi.IsDir() {
 		_, _ = fmt.Fprintf(stderr, "Error: repository directory does not exist or is not a directory: %s\n", targetDir)
 		return app.ExitRepoMetadataError
-	}
-
-	finalOutputDir := absTargetDir
-	if outputDir != "" {
-		if filepath.IsAbs(outputDir) {
-			finalOutputDir = filepath.Clean(outputDir)
-		} else {
-			absOut, err := filepath.Abs(outputDir)
-			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "Error: failed to resolve output directory: %v\n", err)
-				return app.ExitUsageError
-			}
-			finalOutputDir = absOut
-		}
 	}
 
 	// Load or initialize portal configuration
@@ -396,14 +391,74 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	if cliFlags["description"] {
 		portalCfg.Description = description
 	}
-	if cliFlags["baseurl"] {
-		portalCfg.BaseURL = baseURL
+	if cliFlags["portal-home"] {
+		portalCfg.PortalHome = portalHome
+	}
+	if cliFlags["in-place"] {
+		portalCfg.InPlace = inPlace
+	}
+	if cliFlags["portal-url"] {
+		portalCfg.PortalURL = portalURL
+	}
+	if cliFlags["repo-url"] {
+		portalCfg.RepoURL = repoURL
 	}
 	if cliFlags["max-depth"] {
 		portalCfg.AutoDiscovery.MaxDepth = maxDepth
 	}
 	if cliFlags["require-rendered"] {
 		portalCfg.AutoDiscovery.RequireRendered = requireRendered
+	}
+
+	// Resolve effective settings
+	effectivePortalHome := portalHome
+	if effectivePortalHome == "" {
+		effectivePortalHome = portalCfg.PortalHome
+	}
+
+	effectiveInPlace := inPlace || portalCfg.InPlace
+
+	effectivePortalURL := portalURL
+	if effectivePortalURL == "" {
+		effectivePortalURL = portalCfg.PortalURL
+	}
+	if effectivePortalURL == "" {
+		effectivePortalURL = portalCfg.BaseURL
+	}
+
+	effectiveRepoURL := repoURL
+	if effectiveRepoURL == "" {
+		effectiveRepoURL = portalCfg.RepoURL
+	}
+
+	// Validate mandatory requirement: detached portal-home vs explicit in-place
+	if dumpConfigPath == "" {
+		if !effectiveInPlace && effectivePortalHome == "" {
+			_, _ = fmt.Fprintln(stderr, "Error: repoview portal requires either --portal-home <path> (detached output mode) or --in-place (in-tree generation).")
+			_, _ = fmt.Fprintln(stderr, "Detached mode is recommended to avoid modifying source repository mirrors.")
+			return app.ExitUsageError
+		}
+		if effectiveInPlace && effectivePortalHome != "" {
+			_, _ = fmt.Fprintln(stderr, "Error: cannot specify both --portal-home and --in-place.")
+			return app.ExitUsageError
+		}
+	}
+
+	// Determine final output directory for portal
+	var finalOutputDir string
+	if effectivePortalHome != "" {
+		if filepath.IsAbs(effectivePortalHome) {
+			finalOutputDir = filepath.Clean(effectivePortalHome)
+		} else {
+			absHome, err := filepath.Abs(effectivePortalHome)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "Error: failed to resolve portal home directory: %v\n", err)
+				return app.ExitUsageError
+			}
+			finalOutputDir = absHome
+		}
+	} else {
+		finalOutputDir = absTargetDir
 	}
 
 	// Clamp workers between 1 and 16
@@ -415,12 +470,13 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 
 	// Scan repository tree
 	initialRequireRendered := portalCfg.AutoDiscovery.RequireRendered
-	if renderMissing {
+	if renderMissing || renderAll {
 		initialRequireRendered = false
 	}
 
 	scanCfg := portal.ScanConfig{
 		RootDir:         absTargetDir,
+		PortalHome:      effectivePortalHome,
 		MaxDepth:        portalCfg.AutoDiscovery.MaxDepth,
 		RequireRendered: initialRequireRendered,
 		ExcludePatterns: portalCfg.AutoDiscovery.Exclude,
@@ -432,27 +488,34 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		return app.ExitRepoMetadataError
 	}
 
-	// Parallel Batch Rendering for unrendered repositories
-	if renderMissing {
-		var unrendered []*portal.DiscoveredRepo
+	// Parallel Batch Rendering for unrendered or all repositories
+	if renderAll || renderMissing {
+		var targets []*portal.DiscoveredRepo
 		for _, r := range repos {
-			if !r.IsRendered && !r.IsExternal {
-				unrendered = append(unrendered, r)
+			if r.IsExternal {
+				continue
+			}
+			if renderAll || !r.IsRendered {
+				targets = append(targets, r)
 			}
 		}
 
-		if len(unrendered) > 0 {
+		if len(targets) > 0 {
+			actionDesc := "unrendered"
+			if renderAll {
+				actionDesc = "discovered"
+			}
 			if !quiet {
-				_, _ = fmt.Fprintf(stdout, "Discovered %d unrendered repositories. Rendering in parallel with %d workers...\n", len(unrendered), workers)
+				_, _ = fmt.Fprintf(stdout, "Discovered %d %s repositories. Rendering in parallel with %d workers...\n", len(targets), actionDesc, workers)
 			}
 
 			numWorkers := workers
-			if numWorkers > len(unrendered) {
-				numWorkers = len(unrendered)
+			if numWorkers > len(targets) {
+				numWorkers = len(targets)
 			}
 
-			jobs := make(chan *portal.DiscoveredRepo, len(unrendered))
-			for _, repo := range unrendered {
+			jobs := make(chan *portal.DiscoveredRepo, len(targets))
+			for _, repo := range targets {
 				jobs <- repo
 			}
 			close(jobs)
@@ -466,20 +529,78 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 				go func() {
 					defer wg.Done()
 					for r := range jobs {
-						repoOut := filepath.Join(r.Path, "repoview")
+						var repoOut string
+						if effectivePortalHome != "" {
+							if r.RelPath == "." || r.RelPath == "" {
+								repoOut = filepath.Join(finalOutputDir, "repoview")
+							} else {
+								repoOut = filepath.Join(finalOutputDir, r.RelPath)
+							}
+						} else {
+							repoOut = filepath.Join(r.Path, "repoview")
+						}
+
 						portalLink := "auto"
-						if rel, err := filepath.Rel(repoOut, filepath.Join(finalOutputDir, "index.html")); err == nil {
+						if effectivePortalURL != "" {
+							portalLink = effectivePortalURL
+						} else if rel, err := filepath.Rel(repoOut, filepath.Join(finalOutputDir, "index.html")); err == nil {
 							portalLink = filepath.ToSlash(rel)
 						}
 
+						// Compute pkgBaseURL for download links & client configs (.repo/.sources)
+						var pkgBaseURL string
+						if effectiveRepoURL != "" {
+							baseClean := strings.TrimRight(effectiveRepoURL, "/")
+							if r.Format == models.FormatDEB {
+								archRoot := strings.Trim(r.DebArchiveRoot(), "/")
+								if archRoot == "" || archRoot == "." {
+									pkgBaseURL = baseClean
+								} else {
+									pkgBaseURL = baseClean + "/" + archRoot
+								}
+							} else {
+								rel := strings.Trim(filepath.ToSlash(r.RelPath), "/")
+								if rel == "" || rel == "." {
+									pkgBaseURL = baseClean
+								} else {
+									pkgBaseURL = baseClean + "/" + rel
+								}
+							}
+						} else if effectivePortalHome != "" {
+							// Detached with local files: compute relative path from repoOut to raw package files
+							targetRawDir := r.Path
+							if r.Format == models.FormatDEB {
+								debRoot := r.DebArchiveRoot()
+								if debRoot == "" || debRoot == "." {
+									targetRawDir = absTargetDir
+								} else {
+									targetRawDir = filepath.Join(absTargetDir, debRoot)
+								}
+							}
+							if rel, err := filepath.Rel(repoOut, targetRawDir); err == nil {
+								pkgBaseURL = filepath.ToSlash(rel)
+							}
+						}
+
+						// Resolve child repository title from overrides or inferred title
+						repoTitle := r.Title
+						if ov, ok := portalCfg.Overrides[r.RelPath]; ok && ov.Title != "" {
+							repoTitle = ov.Title
+						} else if ov, ok := portalCfg.Overrides[r.Path]; ok && ov.Title != "" {
+							repoTitle = ov.Title
+						}
+
 						repoCfg := app.Config{
-							RepoDir:   r.Path,
-							OutputDir: repoOut,
-							Format:    r.Format,
-							Quiet:     true,
-							Force:     force,
-							PortalURL: portalLink,
-							Version:   version,
+							RepoDir:        r.Path,
+							OutputDir:      repoOut,
+							Format:         r.Format,
+							Title:          repoTitle,
+							Quiet:          true,
+							Force:          force,
+							PortalURL:      portalLink,
+							PackageBaseURL: pkgBaseURL,
+							BaseURL:        pkgBaseURL,
+							Version:        version,
 						}
 						gen := app.NewGenerator(repoCfg)
 						if genErr := gen.Run(); genErr != nil {
@@ -509,8 +630,13 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Build catalog and apply configuration overrides / pinned repos / external repos
-	catalog := portal.BuildCatalog(portalCfg.Title, portalCfg.Description, portalCfg.BaseURL, repos)
+	catalog := portal.BuildCatalog(portalCfg.Title, portalCfg.Description, effectivePortalURL, repos)
 	portal.ApplyConfig(catalog, portalCfg)
+	if effectiveRepoURL != "" {
+		for _, r := range catalog.Repos {
+			r.ConfigSnippet = r.BuildConfigSnippet(effectiveRepoURL)
+		}
+	}
 
 	// Dump starter configuration if requested
 	if dumpConfigPath != "" {

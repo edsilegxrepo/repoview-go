@@ -187,6 +187,7 @@ a:hover {
 	align-items: center;
 	gap: 0.5rem;
 	text-decoration: none;
+	white-space: nowrap;
 }
 
 .brand-title:hover {
@@ -692,6 +693,71 @@ a:hover {
 	max-width: 1440px;
 	width: 100%;
 	margin: 0 auto;
+}
+
+/* Repository Hero (index.html) */
+.repo-hero {
+	background-color: var(--bg-card);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	padding: 1.25rem 1.5rem;
+	margin-bottom: 1.25rem;
+	box-shadow: var(--shadow-sm);
+	backdrop-filter: var(--glass-blur);
+}
+
+.repo-hero-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1rem;
+	flex-wrap: wrap;
+}
+
+.repo-hero-title {
+	font-size: 1.75rem;
+	font-weight: 700;
+	color: var(--text-main);
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+	margin: 0;
+	line-height: 1.25;
+	flex-wrap: wrap;
+}
+
+.format-badge {
+	font-size: 0.75rem;
+	font-weight: 600;
+	padding: 0.2rem 0.55rem;
+	border-radius: 4px;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	font-family: var(--font-mono);
+}
+
+.format-badge-rpm {
+	background-color: rgba(227, 98, 9, 0.15);
+	color: #f0883e;
+	border: 1px solid rgba(227, 98, 9, 0.3);
+}
+
+.format-badge-deb {
+	background-color: rgba(163, 113, 247, 0.15);
+	color: #d2a8ff;
+	border: 1px solid rgba(163, 113, 247, 0.3);
+}
+
+[data-theme="light"] .format-badge-rpm {
+	background-color: #fff1e5;
+	color: #bc4c00;
+	border-color: #ffd8bf;
+}
+
+[data-theme="light"] .format-badge-deb {
+	background-color: #fbefff;
+	color: #8250df;
+	border-color: #e4c6ff;
 }
 
 /* Stats / Overview Banner */

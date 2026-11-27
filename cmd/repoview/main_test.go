@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -195,7 +196,7 @@ func createMockRPMRepo(t *testing.T, targetDir string) {
 
 	insertPkg := `
 	INSERT INTO packages (pkgKey, name, epoch, version, release, arch, summary, description, url, time_build, rpm_license, rpm_sourcerpm, size_package, location_href, rpm_vendor, rpm_group, rpm_buildhost, size_installed)
-	VALUES (1, 'mockapp', '0', '1.0', '1.el9', 'x86_64', 'Mock app summary', 'Mock description', 'http://example.com', 1600000000, 'MIT', 'mockapp-1.0-1.src.rpm', 1048576, '', 'Mock Inc', 'Applications/Internet', 'builder.local', 2097152);
+	VALUES (1, 'mockapp', '0', '1.0', '1.el9', 'x86_64', 'Mock app summary', 'Mock description', 'http://example.com', 1600000000, 'MIT', 'mockapp-1.0-1.src.rpm', 1048576, 'Packages/m/mockapp-1.0-1.el9.x86_64.rpm', 'Mock Inc', 'Applications/Internet', 'builder.local', 2097152);
 	`
 	if _, err := pdb.Exec(insertPkg); err != nil {
 		t.Fatalf("failed to insert package: %v", err)
@@ -297,7 +298,7 @@ func TestRunPortal_PureDiscovery_EmptyDir(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	tempDir := t.TempDir()
 
-	code := run([]string{"portal", tempDir}, &stdout, &stderr)
+	code := run([]string{"portal", "--in-place", tempDir}, &stdout, &stderr)
 	if code != app.ExitSuccess {
 		t.Fatalf("expected ExitSuccess (0), got %d, stderr: %s", code, stderr.String())
 	}
@@ -330,8 +331,8 @@ func TestRunPortal_CustomOptions(t *testing.T) {
 		"portal",
 		"--title", "Custom Cloud Portal",
 		"--description", "Multi-distribution mirror matrix",
-		"--baseurl", "https://mirrors.corp.internal",
-		"--output-dir", outDir,
+		"--portal-url", "https://mirrors.corp.internal",
+		"--portal-home", outDir,
 		"--workers", "4",
 		tempDir,
 	}, &stdout, &stderr)
@@ -402,7 +403,7 @@ auto_discovery:
 	}
 
 	// 1. Run using portal.yaml (without CLI title flag)
-	code := run([]string{"portal", "--config", configPath, tempDir}, &stdout, &stderr)
+	code := run([]string{"portal", "--in-place", "--config", configPath, tempDir}, &stdout, &stderr)
 	if code != app.ExitSuccess {
 		t.Fatalf("expected ExitSuccess, got %d, stderr: %s", code, stderr.String())
 	}
@@ -414,7 +415,7 @@ auto_discovery:
 	// 2. Run with CLI flag overriding the YAML title
 	stdout.Reset()
 	stderr.Reset()
-	codeCLI := run([]string{"portal", "--config", configPath, "--title", "CLI Supreme Title", tempDir}, &stdout, &stderr)
+	codeCLI := run([]string{"portal", "--in-place", "--config", configPath, "--title", "CLI Supreme Title", tempDir}, &stdout, &stderr)
 	if codeCLI != app.ExitSuccess {
 		t.Fatalf("expected ExitSuccess with flag override, got %d, stderr: %s", codeCLI, stderr.String())
 	}
@@ -442,7 +443,7 @@ func TestRunPortal_SafetyOverwriteGuard(t *testing.T) {
 	}
 
 	// 1. Without --force: must fail with ExitUsageError and report Safety Violation
-	code := run([]string{"portal", tempDir}, &stdout, &stderr)
+	code := run([]string{"portal", "--in-place", tempDir}, &stdout, &stderr)
 	if code != app.ExitUsageError {
 		t.Errorf("expected ExitUsageError (2) for safety violation, got %d", code)
 	}
@@ -459,7 +460,7 @@ func TestRunPortal_SafetyOverwriteGuard(t *testing.T) {
 	// 2. With --force: should overwrite successfully
 	stderr.Reset()
 	stdout.Reset()
-	codeForce := run([]string{"portal", "--force", tempDir}, &stdout, &stderr)
+	codeForce := run([]string{"portal", "--in-place", "--force", tempDir}, &stdout, &stderr)
 	if codeForce != app.ExitSuccess {
 		t.Fatalf("expected ExitSuccess with --force, got %d, stderr: %s", codeForce, stderr.String())
 	}
@@ -495,7 +496,7 @@ func TestRunPortal_RequireRendered(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(rawRepo, "repodata"), 0o755)
 
 	// Run with --require-rendered
-	code := run([]string{"portal", "--require-rendered", tempDir}, &stdout, &stderr)
+	code := run([]string{"portal", "--in-place", "--require-rendered", tempDir}, &stdout, &stderr)
 	if code != app.ExitSuccess {
 		t.Fatalf("expected ExitSuccess, got %d, stderr: %s", code, stderr.String())
 	}
@@ -523,7 +524,7 @@ func TestRunPortal_RenderMissing_Parallel(t *testing.T) {
 	createMockRPMRepo(t, repo2)
 
 	// Run portal with --render-missing and --workers 4
-	code := run([]string{"portal", "--render-missing", "--workers", "4", tempDir}, &stdout, &stderr)
+	code := run([]string{"portal", "--in-place", "--render-missing", "--workers", "4", tempDir}, &stdout, &stderr)
 	if code != app.ExitSuccess {
 		t.Fatalf("expected ExitSuccess, got %d, stderr: %s", code, stderr.String())
 	}
@@ -560,3 +561,242 @@ func TestRunPortal_RenderMissing_Parallel(t *testing.T) {
 		t.Errorf("portal index should contain discovered repo info")
 	}
 }
+
+func TestRunPortal_RenderAll_And_TitlePropagation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	tempDir := t.TempDir()
+
+	// 1. Create a raw repo (el9/base/x86_64)
+	repo1 := filepath.Join(tempDir, "el9", "base", "x86_64")
+	createMockRPMRepo(t, repo1)
+
+	// 2. Create another repo (fedora/updates/x86_64) that is initially pre-rendered with an old title
+	repo2 := filepath.Join(tempDir, "fedora", "updates", "x86_64")
+	createMockRPMRepo(t, repo2)
+
+	// Initial render of repo2
+	code := run([]string{"--title", "Old Fedora Title", repo2}, &stdout, &stderr)
+	if code != app.ExitSuccess {
+		t.Fatalf("failed initial render of repo2: %s", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	// 3. Write a portal.yaml with custom titles
+	cfgContent := `
+title: "Enterprise Custom Portal"
+overrides:
+  "el9/base/x86_64":
+    title: "Enterprise Linux 9 BaseOS"
+  "fedora/updates/x86_64":
+    title: "Fedora Modern Updates"
+`
+	cfgPath := filepath.Join(tempDir, "portal.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o644); err != nil {
+		t.Fatalf("failed to write portal.yaml: %v", err)
+	}
+
+	// 4. Run portal with --render-all, --force, --workers 2
+	code = run([]string{"portal", "--in-place", "--render-all", "--force", "--workers", "2", tempDir}, &stdout, &stderr)
+	if code != app.ExitSuccess {
+		t.Fatalf("expected ExitSuccess, got %d, stderr: %s", code, stderr.String())
+	}
+
+	// 5. Verify both repos have their overridden titles in repoview.json and index.html
+	checkRepoTitle := func(repoPath, wantTitle string) {
+		jsonPath := filepath.Join(repoPath, "repoview", "repoview.json")
+		jsonData, err := os.ReadFile(jsonPath)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", jsonPath, err)
+		}
+		if !strings.Contains(string(jsonData), wantTitle) {
+			t.Errorf("expected %s descriptor to contain title %q, got: %s", repoPath, wantTitle, string(jsonData))
+		}
+
+		htmlPath := filepath.Join(repoPath, "repoview", "index.html")
+		htmlData, err := os.ReadFile(htmlPath)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", htmlPath, err)
+		}
+		if !strings.Contains(string(htmlData), wantTitle) {
+			t.Errorf("expected %s HTML to contain title %q", repoPath, wantTitle)
+		}
+	}
+
+	checkRepoTitle(repo1, "Enterprise Linux 9 BaseOS")
+	checkRepoTitle(repo2, "Fedora Modern Updates")
+
+	// 6. Verify portal index.html has both titles and catalog title
+	portalHTML, err := os.ReadFile(filepath.Join(tempDir, "index.html"))
+	if err != nil {
+		t.Fatalf("failed to read portal index.html: %v", err)
+	}
+	content := string(portalHTML)
+	if !strings.Contains(content, "Enterprise Custom Portal") {
+		t.Errorf("portal index missing catalog title")
+	}
+	if !strings.Contains(content, "Enterprise Linux 9 BaseOS") {
+		t.Errorf("portal index missing repo1 title")
+	}
+	if !strings.Contains(content, "Fedora Modern Updates") {
+		t.Errorf("portal index missing repo2 title")
+	}
+}
+
+func TestRunPortal_RequiresPortalHomeOrInPlace(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	tempDir := t.TempDir()
+
+	// 1. Omission of both --portal-home and --in-place must fail with ExitUsageError (2)
+	code := run([]string{"portal", tempDir}, &stdout, &stderr)
+	if code != app.ExitUsageError {
+		t.Errorf("expected ExitUsageError (2) when omitting both flags, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "--portal-home") || !strings.Contains(stderr.String(), "--in-place") {
+		t.Errorf("expected error message mentioning --portal-home and --in-place, got: %s", stderr.String())
+	}
+
+	// 2. Supplying both --portal-home and --in-place must fail with ExitUsageError (2)
+	stdout.Reset()
+	stderr.Reset()
+	outDir := filepath.Join(t.TempDir(), "portal_out")
+	codeBoth := run([]string{"portal", "--portal-home", outDir, "--in-place", tempDir}, &stdout, &stderr)
+	if codeBoth != app.ExitUsageError {
+		t.Errorf("expected ExitUsageError (2) when specifying both flags, got %d", codeBoth)
+	}
+	if !strings.Contains(stderr.String(), "cannot specify both") {
+		t.Errorf("expected mutual exclusion error message, got: %s", stderr.String())
+	}
+}
+
+func TestRunPortal_DetachedMode_CleanRepo(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	tempDir := t.TempDir()
+	reposRoot := filepath.Join(tempDir, "repos")
+	portalHome := filepath.Join(tempDir, "portal_home")
+
+	repo1 := filepath.Join(reposRoot, "el9", "base", "x86_64")
+	createMockRPMRepo(t, repo1)
+
+	// Record list of files in reposRoot before generation
+	var filesBefore []string
+	_ = filepath.Walk(reposRoot, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			rel, _ := filepath.Rel(reposRoot, path)
+			filesBefore = append(filesBefore, rel)
+		}
+		return nil
+	})
+	sort.Strings(filesBefore)
+
+	// Run detached portal generation
+	code := run([]string{"portal", "--portal-home", portalHome, "--render-all", reposRoot}, &stdout, &stderr)
+	if code != app.ExitSuccess {
+		t.Fatalf("expected ExitSuccess (0), got %d, stderr: %s", code, stderr.String())
+	}
+
+	// Verify portal top-level artifacts
+	if _, err := os.Stat(filepath.Join(portalHome, "index.html")); err != nil {
+		t.Fatalf("expected portal index.html to exist in portalHome: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(portalHome, "portal-feed.xml")); err != nil {
+		t.Fatalf("expected portal-feed.xml to exist in portalHome: %v", err)
+	}
+
+	// Verify child repository generated inside portalHome shadow tree
+	childIndex := filepath.Join(portalHome, "el9", "base", "x86_64", "index.html")
+	if _, err := os.Stat(childIndex); err != nil {
+		t.Fatalf("expected child repo index.html to exist in shadow tree: %v", err)
+	}
+	childDesc := filepath.Join(portalHome, "el9", "base", "x86_64", "repoview.json")
+	if _, err := os.Stat(childDesc); err != nil {
+		t.Fatalf("expected child repo repoview.json in shadow tree: %v", err)
+	}
+	childPkg := filepath.Join(portalHome, "el9", "base", "x86_64", "mockapp.html")
+	if _, err := os.Stat(childPkg); err != nil {
+		t.Fatalf("expected child package page mockapp.html in shadow tree: %v", err)
+	}
+
+	// Verify raw reposRoot remained completely UNTOUCHED
+	var filesAfter []string
+	_ = filepath.Walk(reposRoot, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			rel, _ := filepath.Rel(reposRoot, path)
+			filesAfter = append(filesAfter, rel)
+		}
+		return nil
+	})
+	sort.Strings(filesAfter)
+
+	if len(filesBefore) != len(filesAfter) {
+		t.Fatalf("reposRoot file count changed: before=%d, after=%d", len(filesBefore), len(filesAfter))
+	}
+	for i := range filesBefore {
+		if filesBefore[i] != filesAfter[i] {
+			t.Errorf("reposRoot file mismatch at %d: before=%s, after=%s", i, filesBefore[i], filesAfter[i])
+		}
+	}
+}
+
+func TestRunPortal_RepoURL_And_PortalURL(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	tempDir := t.TempDir()
+	reposRoot := filepath.Join(tempDir, "repos")
+	portalHome := filepath.Join(tempDir, "portal_home")
+
+	repo1 := filepath.Join(reposRoot, "el9", "base", "x86_64")
+	createMockRPMRepo(t, repo1)
+
+	code := run([]string{
+		"portal",
+		"--portal-home", portalHome,
+		"--portal-url", "https://portal.example.com",
+		"--repo-url", "https://mirrors.example.com/repos",
+		"--render-all",
+		reposRoot,
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess {
+		t.Fatalf("expected ExitSuccess (0), got %d, stderr: %s", code, stderr.String())
+	}
+
+	// 1. Verify child repo package download links in mockapp.html
+	childPkgHTML, err := os.ReadFile(filepath.Join(portalHome, "el9", "base", "x86_64", "mockapp.html"))
+	if err != nil {
+		t.Fatalf("failed to read mockapp.html: %v", err)
+	}
+	pkgContent := string(childPkgHTML)
+	wantDownload := `href="https://mirrors.example.com/repos/el9/base/x86_64/Packages/m/mockapp-1.0-1.el9.x86_64.rpm"`
+	if !strings.Contains(pkgContent, wantDownload) {
+		t.Errorf("expected package download link %q in child package page, got:\n%s", wantDownload, pkgContent)
+	}
+	wantDataHref := `data-href="https://mirrors.example.com/repos/el9/base/x86_64/Packages/m/mockapp-1.0-1.el9.x86_64.rpm"`
+	if !strings.Contains(pkgContent, wantDataHref) {
+		t.Errorf("expected install tab data-href %q in child package page", wantDataHref)
+	}
+
+	// 2. Verify child repo .repo configuration in index.html
+	childIndexHTML, err := os.ReadFile(filepath.Join(portalHome, "el9", "base", "x86_64", "index.html"))
+	if err != nil {
+		t.Fatalf("failed to read child index.html: %v", err)
+	}
+	indexContent := string(childIndexHTML)
+	wantBaseURL := `baseurl=https://mirrors.example.com/repos/el9/base/x86_64`
+	if !strings.Contains(indexContent, wantBaseURL) {
+		t.Errorf("expected %q in child repository index.html", wantBaseURL)
+	}
+
+	// 3. Verify portal catalog card uses repo-url snippet and links to child repo in portal
+	portalIndexHTML, err := os.ReadFile(filepath.Join(portalHome, "index.html"))
+	if err != nil {
+		t.Fatalf("failed to read portal index.html: %v", err)
+	}
+	portalContent := string(portalIndexHTML)
+	if !strings.Contains(portalContent, wantBaseURL) {
+		t.Errorf("expected portal catalog card snippet to contain %q", wantBaseURL)
+	}
+	wantChildLink := `href="el9/base/x86_64/index.html"`
+	if !strings.Contains(portalContent, wantChildLink) {
+		t.Errorf("expected portal catalog to link to child repo with %q", wantChildLink)
+	}
+}
+

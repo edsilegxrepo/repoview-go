@@ -93,7 +93,32 @@ func TestTemplateRendering(t *testing.T) {
 		t.Errorf("RenderPackage returned empty content")
 	}
 
-	// 3b. Test PortalURL rendering
+	// 3a. Verify default dark theme across templates
+	for name, htmlBytes := range map[string][]byte{"index": indexHTML, "group": groupHTML, "package": pkgHTML} {
+		content := string(htmlBytes)
+		if !strings.Contains(content, `data-theme="dark"`) {
+			t.Errorf("expected %s HTML to declare data-theme=\"dark\" default", name)
+		}
+		if !strings.Contains(content, `localStorage.getItem("repoview-theme") || "dark"`) {
+			t.Errorf("expected %s HTML to default to \"dark\" theme in script", name)
+		}
+	}
+
+	// 3b. Verify repo-hero in index, sidebar brand, and breadcrumb repo titles
+	if !strings.Contains(string(indexHTML), `class="repo-hero"`) || !strings.Contains(string(indexHTML), `<h1 class="repo-hero-title">`) {
+		t.Errorf("expected repo-hero heading in index HTML")
+	}
+	if !strings.Contains(string(indexHTML), `<span>RepoView</span>`) {
+		t.Errorf("expected generic RepoView in sidebar brand")
+	}
+	if !strings.Contains(string(groupHTML), `<a href="index.html">Test Repo</a>`) {
+		t.Errorf("expected repo title breadcrumb in group HTML")
+	}
+	if !strings.Contains(string(pkgHTML), `<a href="index.html">Test Repo</a>`) {
+		t.Errorf("expected repo title breadcrumb in package HTML")
+	}
+
+	// 3c. Test PortalURL rendering
 	r.SetPortalURL("../../../index.html")
 	portalIndex, err := r.RenderIndex(groups, []*models.Package{pkg1}, "http://example.com/repo")
 	if err != nil || !strings.Contains(string(portalIndex), "portal-back-link") || !strings.Contains(string(portalIndex), "../../../index.html") {
@@ -347,3 +372,57 @@ func TestRenderer_DebianRendering(t *testing.T) {
 		t.Errorf("expected '.sources' in index HTML")
 	}
 }
+
+func TestRenderer_PackageBaseURL(t *testing.T) {
+	tempDir := t.TempDir()
+	r, err := NewRenderer(tempDir, "", "Test Repo", "1.0.0", []string{"N"})
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+
+	r.SetPackageBaseURL("https://mirrors.example.com/repos/el9/base/x86_64/")
+
+	pkg := &models.Package{
+		Name:         "nginx",
+		Version:      "1.20",
+		Release:      "1.el9",
+		Arch:         "x86_64",
+		LocationHref: "Packages/n/nginx-1.20-1.el9.x86_64.rpm",
+		Format:       models.FormatRPM,
+	}
+	pkg.AllVersions = []*models.Package{pkg}
+
+	group := &logic.GroupData{
+		ID:       "web",
+		Name:     "Web Servers",
+		Packages: []*models.Package{pkg},
+	}
+
+	pkgHTML, err := r.RenderPackage(pkg, group)
+	if err != nil {
+		t.Fatalf("RenderPackage failed: %v", err)
+	}
+	pkgStr := string(pkgHTML)
+
+	expectedDownload := `href="https://mirrors.example.com/repos/el9/base/x86_64/Packages/n/nginx-1.20-1.el9.x86_64.rpm"`
+	if !strings.Contains(pkgStr, expectedDownload) {
+		t.Errorf("expected package download link %q, got HTML:\n%s", expectedDownload, pkgStr)
+	}
+
+	expectedDataHref := `data-href="https://mirrors.example.com/repos/el9/base/x86_64/Packages/n/nginx-1.20-1.el9.x86_64.rpm"`
+	if !strings.Contains(pkgStr, expectedDataHref) {
+		t.Errorf("expected install tab data-href %q, got HTML:\n%s", expectedDataHref, pkgStr)
+	}
+
+	// RSS feed
+	rssBytes, err := r.RenderRSS([]*models.Package{pkg}, "https://portal.example.com")
+	if err != nil {
+		t.Fatalf("RenderRSS failed: %v", err)
+	}
+	rssStr := string(rssBytes)
+	expectedRSSLink := `<a href="https://mirrors.example.com/repos/el9/base/x86_64/Packages/n/nginx-1.20-1.el9.x86_64.rpm">`
+	if !strings.Contains(rssStr, expectedRSSLink) {
+		t.Errorf("expected RSS package download link %q, got:\n%s", expectedRSSLink, rssStr)
+	}
+}
+

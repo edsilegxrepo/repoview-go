@@ -175,16 +175,19 @@ Usage: repoview portal [options] [repodir]
 
 | Flag | Type | Default | Description |
 | :--- | :---: | :---: | :--- |
-| `--output-dir` | `string` | *(repodir)* | Target directory where root `index.html` and `portal-feed.xml` are written. |
+| `--portal-home` | `string` | *(None)* | **Required (or `--in-place`)**. Detached output directory where portal and child web pages are written outside the repo. |
+| `--in-place` | `bool` | `false` | **Required (or `--portal-home`)**. Opt-in to generate visual artifacts inside repository mirror trees (legacy). |
+| `--portal-url` | `string` | *(Auto)* | Public base URL where the portal website is hosted (for UI browsing and portal RSS feed). |
+| `--repo-url` | `string` | *(Auto)* | Public base URL where raw packages/metadata are hosted (for `.rpm`/`.deb` download links and `.repo`/`.sources` configs). |
 | `--title` | `string` | `Enterprise Package Repositories` | Portal catalog title displayed in header banner. |
 | `--description` | `string` | *(None)* | Optional description or subtitle text rendered beneath the portal header. |
-| `--baseurl` | `string` | *(Auto)* | Base URL for RSS feed aggregation and package manager setup snippets. |
 | `--config` | `string` | *(portal.yaml)* | Path to optional YAML configuration file for overrides, branding, and pinned repos. |
 | `--dump-config` | `string` | *(None)* | Dump auto-discovered repository tree to a starter `portal.yaml` file and exit. |
 | `--max-depth` | `int` | `5` | Maximum directory recursion depth during repository discovery. |
-| `--require-rendered` | `bool` | `false` | Only catalog repositories that already have generated `repoview/` pages. |
-| `--render-missing` | `bool` | `false` | Automatically generates `repoview/` views for unrendered raw repositories in parallel. |
-| `--workers` | `int` | `4` | Concurrency worker pool size for `--render-missing` (1–16, default: `NumCPU * 2`). |
+| `--require-rendered` | `bool` | `false` | Only catalog repositories that already have generated repoview pages. |
+| `--render-missing` | `bool` | `false` | Automatically generates repoview pages for unrendered raw repositories in parallel. |
+| `--render-all` | `bool` | `false` | Force generates repoview pages for all discovered repositories in parallel. |
+| `--workers` | `int` | `4` | Concurrency worker pool size for batch rendering (1–16, default: `NumCPU * 2`). |
 | `--force` | `bool` | `false` | Force overwrite existing `index.html` even if not previously created by RepoView. |
 | `--quiet` | `bool` | `false` | Suppress non-essential informational console output. |
 | `--version` | `bool` | `false` | Print application version and build metadata, then exit. |
@@ -360,28 +363,33 @@ systemctl enable --now repoview.timer
 
 ### Multi-Repository Enterprise Portal (`repoview portal`)
 
-Compile a unified, responsive catalog portal across a mixed hierarchy of RPM and Debian repositories:
+Compile a unified, responsive catalog portal across a mixed hierarchy of RPM and Debian repositories in detached mode, keeping raw mirror directories completely untouched:
 
 ```bash
 repoview portal \
-  --title "Enterprise Linux & Debian Package Portal" \
-  --description "Official mirrors for EL9, EL10, Ubuntu 24.04, and Debian 12" \
-  --render-missing \
+  --portal-home /var/www/html/portal \
+  --portal-url https://portal.example.com \
+  --repo-url https://mirrors.example.com/repos \
+  --render-all \
   --workers 4 \
-  /var/www/html/repos
+  /srv/repos
 ```
 
 **Console Output:**
 ```text
 Repoview dev - Portal Generator
-Generated repository portal in /var/www/html/repos (3 repositories, 2104 packages)
+Discovered 3 discovered repositories. Rendering in parallel with 4 workers...
+Generated repository portal in /var/www/html/portal (3 repositories, 2104 packages)
 ```
 
 The generated portal provides:
+- **Zero Pollution / Read-Only Mirror Friendly**: All visual artifacts, state stores (`repoview.state.json.gz`), and descriptors are generated into `--portal-home`. Raw mirror directories can be mounted strictly read-only (`0555`) or managed via `rsync --delete` without losing UI files.
+- **Decoupled URL Topologies**: `--portal-url` manages UI browsing and RSS links, while `--repo-url` powers package download links and client `.repo`/`.sources` setup snippets.
 - **Instant Client-Side Filtering**: Interactive text search (`/` shortcut), format pills (`RPM`, `DEB`), distro pills (`el9`, `ubu24`), and architecture filters (`x86_64`, `amd64`).
 - **Two-Way Navigation**: Each child repository view automatically includes a **`← All Repositories`** breadcrumb link back to the portal home page.
 - **Copy-Ready Client Snippets**: One-click `.repo` and Deb822 `.sources` configurations for developers.
 - **Aggregated RSS Feed**: `portal-feed.xml` merges release updates across all repositories in descending chronological order.
+- **In-Tree Legacy Mode**: If desired, `--in-place` generates visual artifacts inside the source repository directories under `repoview/` subdirectories.
 
 ---
 
@@ -391,26 +399,28 @@ RepoView-Go generates 100% static assets designed to be served by high-performan
 
 #### 1. Architectural Layout & DocumentRoot Mapping
 
-A single Nginx `server {}` block seamlessly serves:
-1. The **Unified Portal Root** (`/index.html`, `/portal-feed.xml`).
-2. The **Child Repository Web Views** (`/<distro>/<channel>/repoview/`).
-3. The **Raw Package Repositories** accessed by package managers (`dnf`, `yum`, `apt`).
+When using detached mode, Nginx can host the portal UI and package repositories separately:
 
 ```text
-/var/www/html/repos/
-├── index.html                      <- Top-Level Portal
-├── portal-feed.xml                 <- Aggregated Portal Feed
+/var/www/html/portal/                   <- Detached Portal Home (--portal-home)
+├── index.html                          <- Top-Level Portal Catalog
+├── portal-feed.xml                     <- Aggregated Portal Feed
 ├── el9/base/x86_64/
-│   ├── repodata/                   <- Raw RPM Metadata (DNF/YUM)
-│   ├── Packages/                   <- RPM Binaries (.rpm)
-│   └── repoview/                   <- RepoView Child Web Portal
-│       ├── index.html              <- Repo Index (with "← All Repositories" link)
-│       ├── search.json             <- Package Search Index
-│       └── repoview.json           <- Self-Describing Metadata Descriptor
+│   ├── index.html                      <- Child Repo Web View
+│   ├── search.json                     <- Package Search Index
+│   ├── repoview.json                   <- Self-Describing Metadata Descriptor
+│   └── repoview.state.json.gz          <- Incremental Cache
 └── ubu24/custom/
-    ├── Packages.gz                 <- Raw APT Binary Index
-    ├── Release                     <- APT Release Metadata
-    └── repoview/                   <- RepoView Child Web Portal
+    ├── index.html                      <- Child Repo Web View
+    └── search.json                     <- Package Search Index
+
+/srv/repos/                             <- Raw Source Mirrors (Untouched / Read-Only)
+├── el9/base/x86_64/
+│   ├── repodata/                       <- Raw RPM Metadata (DNF/YUM)
+│   └── Packages/                       <- RPM Binaries (.rpm)
+└── ubu24/custom/
+    ├── Packages.gz                     <- Raw APT Binary Index
+    └── Release                         <- APT Release Metadata
 ```
 
 #### 2. Performance & Kernel Tuning Directives
