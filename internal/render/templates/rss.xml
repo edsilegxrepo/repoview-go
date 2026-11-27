@@ -1,37 +1,37 @@
-<?xml version="1.0" ?>
+<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
 <channel>
-  <title>{{ .Repo.Title }}</title>
-  <link>{{ if .URL }}{{ .URL }}/repoview/latest-feed.xml{{ else }}latest-feed.xml{{ end }}</link>
-  <description>Latest packages for {{ .Repo.Title }}</description>
+  <title>{{ .Repo.Title | xmlEscape }}</title>
+  <link>{{ if .URL }}{{ .URL | safeURL | xmlEscape }}/repoview/latest-feed.xml{{ else }}latest-feed.xml{{ end }}</link>
+  <description>Latest packages for {{ .Repo.Title | xmlEscape }}</description>
   <lastBuildDate>{{ now | rssTime }}</lastBuildDate>
   <generator>RepoView-Go</generator>
   {{ range .Latest }}
   <item>
-    <guid>{{ if $.URL }}{{ $.URL }}/repoview/{{ end }}{{ .Filename }}+{{ if .Epoch }}{{ .Epoch }}{{ else }}0{{ end }}:{{ .VersionRelease }}.{{ .Arch }}</guid>
-    <link>{{ if $.URL }}{{ $.URL }}/repoview/{{ end }}{{ .Filename }}</link>
+    <guid>{{ if $.URL }}{{ $.URL | safeURL | xmlEscape }}/repoview/{{ end }}{{ .Filename | xmlEscape }}+{{ if .Epoch }}{{ .Epoch | xmlEscape }}{{ else }}0{{ end }}:{{ .VersionRelease | xmlEscape }}.{{ .Arch | xmlEscape }}</guid>
+    <link>{{ if $.URL }}{{ $.URL | safeURL | xmlEscape }}/repoview/{{ end }}{{ .Filename | xmlEscape }}</link>
     <pubDate>{{ .TimeBuild | rssTime }}</pubDate>
-    <title>Update: {{ .Name }}-{{ .VersionRelease }}</title>
+    <title>Update: {{ .Name | xmlEscape }}-{{ .VersionRelease | xmlEscape }}</title>
     <description><![CDATA[
       <p>
-        <strong>Package:</strong> {{ .Name }}<br/>
-        <strong>Summary:</strong> {{ .Summary }}
+        <strong>Package:</strong> {{ .Name | cdataHTML }}<br/>
+        <strong>Summary:</strong> {{ .Summary | cdataHTML }}
       </p>
       <p>
         <strong>Description:</strong><br/>
-        {{ .Description }}
+        {{ .Description | cdataHTML }}
       </p>
       <h3>Changes:</h3>
       <table border="0" cellpadding="0" cellspacing="5">
       {{ range .AllVersions }}
         <tr>
-          <td valign="top"><a href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL }}/{{ else if $.URL }}{{ $.URL }}/{{ else }}../{{ end }}{{ .LocationHref }}">{{ .Name }}-{{ .VersionRelease }}.{{ .Arch }}</a>
-            [<span style="white-space: nowrap">{{ .SizePackage | humanSize }}</span>]</td>
+          <td valign="top"><a href="{{ if $.Repo.PackageBaseURL }}{{ $.Repo.PackageBaseURL | safeURL | cdataHTML }}/{{ else if $.URL }}{{ $.URL | safeURL | cdataHTML }}/{{ else }}../{{ end }}{{ .LocationHref | safeURL | cdataHTML }}">{{ .Name | cdataHTML }}-{{ .VersionRelease | cdataHTML }}.{{ .Arch | cdataHTML }}</a>
+            [<span style="white-space: nowrap">{{ .SizePackage | humanSize | cdataHTML }}</span>]</td>
           {{ if .Changelog }}
           <td valign="top">
             <strong>Changelog</strong>
-            by <span>{{ .Changelog.Author }} ({{ .Changelog.Date | ymd }})</span>:
-            <pre style="margin: 0pt 0pt 5pt 5pt">{{ .Changelog.Changelog }}</pre>
+            by <span>{{ .Changelog.Author | cdataHTML }} ({{ .Changelog.Date | ymd }})</span>:
+            <pre style="margin: 0pt 0pt 5pt 5pt">{{ .Changelog.Changelog | cdataHTML }}</pre>
           </td>
           {{ else }}
           <td valign="top">

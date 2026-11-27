@@ -3,6 +3,7 @@ package util
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -33,8 +34,13 @@ func TestPermissions_ConstantsAndHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to stat created dir: %v", err)
 	}
-	if perm := dirInfo.Mode().Perm(); perm != DefaultDirPerm {
-		t.Errorf("EnsureDir created perm %04o; want %04o", perm, DefaultDirPerm)
+	if !dirInfo.IsDir() {
+		t.Errorf("expected %s to be a directory", subDir)
+	}
+	if runtime.GOOS != "windows" {
+		if perm := dirInfo.Mode().Perm(); perm != DefaultDirPerm {
+			t.Errorf("EnsureDir created perm %04o; want %04o", perm, DefaultDirPerm)
+		}
 	}
 
 	// 3. Test WriteWebFile
@@ -47,8 +53,15 @@ func TestPermissions_ConstantsAndHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to stat written file: %v", err)
 	}
-	if perm := fileInfo.Mode().Perm(); perm != DefaultFilePerm {
-		t.Errorf("WriteWebFile created perm %04o; want %04o", perm, DefaultFilePerm)
+	if runtime.GOOS != "windows" {
+		if perm := fileInfo.Mode().Perm(); perm != DefaultFilePerm {
+			t.Errorf("WriteWebFile created perm %04o; want %04o", perm, DefaultFilePerm)
+		}
+	} else {
+		readBack, err := os.ReadFile(filePath)
+		if err != nil || string(readBack) != string(testData) {
+			t.Errorf("WriteWebFile content mismatch on Windows: %q, err=%v", string(readBack), err)
+		}
 	}
 
 	// 4. Test EnsureDir error branch (e.g. attempting to create dir on top of file)

@@ -36,14 +36,86 @@ import (
 // CRITICAL: This sort order is used to determine which package version is the "latest"
 // and orders all versions/architectures on the package detail page.
 func SortPackagesByEVR(pkgs []*models.Package) {
-	sort.Slice(pkgs, func(i, j int) bool {
-		cmp := CompareVersions(pkgs[i], pkgs[j])
-		if cmp != 0 {
-			return cmp > 0
+	if len(pkgs) <= 1 {
+		return
+	}
+	if len(pkgs) == 2 {
+		cmp := CompareVersions(pkgs[0], pkgs[1])
+		if cmp < 0 || (cmp == 0 && pkgs[0].Arch > pkgs[1].Arch) {
+			pkgs[0], pkgs[1] = pkgs[1], pkgs[0]
 		}
-		// When EVR is identical, sort by Arch ascending (matching Python repoview's ORDER BY arch ASC)
-		return pkgs[i].Arch < pkgs[j].Arch
+		return
+	}
+
+	hasDeb := false
+	for _, p := range pkgs {
+		if p.Format == models.FormatDEB {
+			hasDeb = true
+			break
+		}
+	}
+
+	if hasDeb {
+		type debEntry struct {
+			pkg    *models.Package
+			evrStr string
+			debVer debversion.Version
+			parsed bool
+		}
+		entries := make([]debEntry, len(pkgs))
+		for i, p := range pkgs {
+			s := p.EVR()
+			v, err := debversion.Parse(s)
+			entries[i] = debEntry{pkg: p, evrStr: s, debVer: v, parsed: err == nil}
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			var cmp int
+			if entries[i].parsed && entries[j].parsed {
+				cmp = debversion.Compare(entries[i].debVer, entries[j].debVer)
+			} else {
+				cmp = strings.Compare(entries[i].evrStr, entries[j].evrStr)
+			}
+			if cmp != 0 {
+				return cmp > 0
+			}
+			return entries[i].pkg.Arch < entries[j].pkg.Arch
+		})
+		for i, e := range entries {
+			pkgs[i] = e.pkg
+		}
+		return
+	}
+
+	type rpmEntry struct {
+		pkg   *models.Package
+		epoch int
+		ver   rpmver.Version
+		rel   rpmver.Version
+	}
+	entries := make([]rpmEntry, len(pkgs))
+	for i, p := range pkgs {
+		entries[i] = rpmEntry{
+			pkg:   p,
+			epoch: parseEpoch(p.Epoch),
+			ver:   rpmver.NewVersion(p.Version),
+			rel:   rpmver.NewVersion(p.Release),
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].epoch != entries[j].epoch {
+			return entries[i].epoch > entries[j].epoch
+		}
+		if ret := entries[i].ver.Compare(entries[j].ver); ret != 0 {
+			return ret > 0
+		}
+		if ret := entries[i].rel.Compare(entries[j].rel); ret != 0 {
+			return ret > 0
+		}
+		return entries[i].pkg.Arch < entries[j].pkg.Arch
 	})
+	for i, e := range entries {
+		pkgs[i] = e.pkg
+	}
 }
 
 // CompareVersions evaluates version precedence according to the package format.

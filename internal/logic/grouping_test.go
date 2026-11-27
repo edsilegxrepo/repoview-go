@@ -396,3 +396,117 @@ func TestDebianGrouping_Inference(t *testing.T) {
 		t.Errorf("expected clamav in system environment/security")
 	}
 }
+
+func TestBuildGroupTree_LeafParentCollision(t *testing.T) {
+	groups := []*GroupData{
+		{
+			ID:       "tools",
+			Name:     "tools",
+			Filename: "tools.group.html",
+			Packages: []*models.Package{{Name: "make"}, {Name: "sed"}},
+		},
+		{
+			ID:       "tools_cli",
+			Name:     "tools/cli",
+			Filename: "tools_cli.group.html",
+			Packages: []*models.Package{{Name: "jq"}, {Name: "rg"}, {Name: "fd"}},
+		},
+	}
+
+	tree := BuildGroupTree(groups)
+	if len(tree) != 1 {
+		t.Fatalf("expected 1 top-level tree node for 'tools', got %d", len(tree))
+	}
+	root := tree[0]
+	if !root.HasActive("tools.group.html") {
+		t.Errorf("expected parent leaf tools.group.html to remain reachable in tree")
+	}
+	if !root.HasActive("tools_cli.group.html") {
+		t.Errorf("expected child tools_cli.group.html to remain reachable in tree")
+	}
+	if len(root.Subgroups) == 0 {
+		t.Errorf("expected Subgroups populated under collided parent tools, got 0")
+	}
+	if root.TotalPackages != 5 {
+		t.Errorf("expected cumulative TotalPackages 5, got %d", root.TotalPackages)
+	}
+}
+
+func TestGetLetterGroups_UTF8RuneAndDisambiguation(t *testing.T) {
+	pkgs := []*models.Package{
+		{Name: "übertool", Version: "1.0", Release: "1"},
+		{Name: "Alpha", Version: "1.0", Release: "1"},
+		{Name: "alpha", Version: "1.0", Release: "1"},
+	}
+
+	service := NewGroupingService(pkgs, nil)
+	letters := service.GetLetterGroups()
+
+	foundÜ := false
+	for _, lg := range letters {
+		if lg.Letter == "Ü" {
+			foundÜ = true
+		}
+	}
+	if !foundÜ {
+		t.Errorf("expected explicit UTF-8 Letter 'Ü' in GetLetterGroups(), got %+v", letters)
+	}
+
+	versions := service.PkgVersions()
+	AssignCollisionSafePackageFilenames(versions)
+	fnUpper := versions["Alpha"][0].Filename()
+	fnLower := versions["alpha"][0].Filename()
+	if fnUpper == fnLower {
+		t.Errorf("expected case-insensitive filename collision disambiguation between Alpha and alpha, both got %q", fnUpper)
+	}
+}
+
+func TestLogic_SectionsInferenceAndGroupCollision(t *testing.T) {
+	sections := map[string]string{
+		"editors":   "applications/editors",
+		"graphics":  "applications/multimedia",
+		"science":   "applications/engineering",
+		"sound":     "applications/multimedia",
+		"utils":     "applications/system",
+		"net":       "applications/internet",
+		"perl":      "development/languages",
+		"ruby":      "development/languages",
+		"java":      "development/languages",
+		"mail":      "applications/internet",
+		"doc":       "documentation",
+		"gnome":     "user interface/desktops",
+		"x11":       "user interface/x",
+		"kernel":    "system environment/kernel",
+	}
+	for sec, want := range sections {
+		if got := MapDebianSectionToGroup(sec); got != want {
+			t.Errorf("MapDebianSectionToGroup(%q) = %q; want %q", sec, got, want)
+		}
+	}
+
+	inferred := []struct {
+		name, summary, wantSubstr string
+	}{
+		{"kubectl", "Kubernetes cluster CLI", "applications/system"},
+		{"golang-bin", "Go compiler", "development/languages"},
+		{"rust-cargo", "Rust package manager", "development/languages"},
+		{"nginx-mod", "HTTP reverse proxy server", "applications/internet"},
+		{"dejavu-fonts", "Font family", "user interface/x"},
+		{"linux-kernel-headers", "Kernel C headers", "system environment/kernel"},
+		{"foo-libs", "Shared runtime library", "system environment/libraries"},
+	}
+	for _, tc := range inferred {
+		if got := InferGroupForPackage(&models.Package{Name: tc.name, Summary: tc.summary}); got == "" {
+			t.Errorf("expected non-empty inferred group for %s", tc.name)
+		}
+	}
+
+	groups := []*GroupData{
+		{ID: "a_b", Name: "a/b", Filename: "a.b.group.html", Packages: []*models.Package{{Name: "p1"}}},
+		{ID: "a_B", Name: "a/B", Filename: "a.b.group.html", Packages: []*models.Package{{Name: "p2"}}},
+	}
+	disambiguateGroupFilenames(groups)
+	if groups[0].Filename == groups[1].Filename {
+		t.Errorf("expected disambiguateGroupFilenames to separate colliding filenames, got %q", groups[0].Filename)
+	}
+}

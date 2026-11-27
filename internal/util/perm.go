@@ -17,24 +17,3 @@ const (
 	// required for static web servers to read HTML, CSS, JS, JSON, XML, and other static assets.
 	DefaultFilePerm os.FileMode = 0o644
 )
-
-// EnsureDir creates a directory hierarchy with DefaultDirPerm (0755) and explicitly
-// applies os.Chmod so that restrictive process umasks (e.g. 027 or 077) do not strip
-// directory traversal permissions for unprivileged web servers.
-func EnsureDir(dir string) error {
-	if err := os.MkdirAll(dir, DefaultDirPerm); err != nil {
-		return err
-	}
-	return os.Chmod(dir, DefaultDirPerm)
-}
-
-// WriteWebFile writes data to a file with DefaultFilePerm (0644) and explicitly
-// applies os.Chmod so that restrictive process umasks do not strip read permissions
-// for unprivileged web servers.
-func WriteWebFile(path string, content []byte) error {
-	// #nosec G306 -- static web assets require 0644 permissions for web servers
-	if err := os.WriteFile(path, content, DefaultFilePerm); err != nil {
-		return err
-	}
-	return os.Chmod(path, DefaultFilePerm)
-}

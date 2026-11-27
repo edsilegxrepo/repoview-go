@@ -2,8 +2,10 @@ package render
 
 import (
 	"bytes"
+	"encoding/xml"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -144,8 +146,10 @@ func TestTemplateRendering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to stat layout dir: %v", err)
 	}
-	if perm := layoutDirInfo.Mode().Perm(); perm != util.DefaultDirPerm {
-		t.Errorf("expected layout dir to have %04o permissions, got %04o", util.DefaultDirPerm, perm)
+	if runtime.GOOS != "windows" {
+		if perm := layoutDirInfo.Mode().Perm(); perm != util.DefaultDirPerm {
+			t.Errorf("expected layout dir to have %04o permissions, got %04o", util.DefaultDirPerm, perm)
+		}
 	}
 
 	// 5. Test Atomic WriteToFile with permissions check
@@ -158,8 +162,12 @@ func TestTemplateRendering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to stat written testpage.html: %v", err)
 	}
-	if perm := fileInfo.Mode().Perm(); perm != util.DefaultFilePerm {
-		t.Errorf("expected written file to have %04o permissions, got %04o", util.DefaultFilePerm, perm)
+	if runtime.GOOS != "windows" {
+		if perm := fileInfo.Mode().Perm(); perm != util.DefaultFilePerm {
+			t.Errorf("expected written file to have %04o permissions, got %04o", util.DefaultFilePerm, perm)
+		}
+	} else if got, readErr := os.ReadFile(filepath.Join(r.OutDir, "testpage.html")); readErr != nil || !bytes.Equal(got, testContent) {
+		t.Errorf("expected written content on Windows, got err=%v len=%d", readErr, len(got))
 	}
 
 	// 6. Test Path Traversal Protection
@@ -423,6 +431,247 @@ func TestRenderer_PackageBaseURL(t *testing.T) {
 	expectedRSSLink := `<a href="https://mirrors.example.com/repos/el9/base/x86_64/Packages/n/nginx-1.20-1.el9.x86_64.rpm">`
 	if !strings.Contains(rssStr, expectedRSSLink) {
 		t.Errorf("expected RSS package download link %q, got:\n%s", expectedRSSLink, rssStr)
+	}
+}
+
+func TestRenderer_RSS_XMLAndCDATAInjectionDefense(t *testing.T) {
+	outDir := t.TempDir()
+	r, err := NewRenderer(outDir, "", `Repo <Title> & "Quotes"`, "1.0.0", []string{"A"})
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+
+	evilPkg := &models.Package{
+		Name:         "evilpkg",
+		Version:      "1.0",
+		Release:      "1",
+		Arch:         "x86_64",
+		Summary:      `Summary ]]> <script>alert(1)</script>`,
+		Description:  `Desc ]]> <injected>bad</injected>`,
+		TimeBuild:    time.Now().Unix(),
+		LocationHref: `javascript:alert(1)`,
+		Changelog: &models.ChangelogEntry{
+			Author:    `Hacker <h@x.org> ]]>`,
+			Date:      time.Now().Unix(),
+			Changelog: `- Fix ]]> <img src=x onerror=alert(1)>`,
+		},
+	}
+	evilPkg.AllVersions = []*models.Package{evilPkg}
+
+	rssBytes, err := r.RenderRSS([]*models.Package{evilPkg}, "javascript:alert(2)")
+	if err != nil {
+		t.Fatalf("RenderRSS failed: %v", err)
+	}
+	rssStr := string(rssBytes)
+
+	// Must parse cleanly as valid XML with zero injected tags
+	var parsed struct {
+		XMLName xml.Name `xml:"rss"`
+		Channel struct {
+			Title string `xml:"title"`
+			Link  string `xml:"link"`
+			Items []struct {
+				Title       string `xml:"title"`
+				Description string `xml:"description"`
+			} `xml:"item"`
+		} `xml:"channel"`
+	}
+	if err := xml.Unmarshal(rssBytes, &parsed); err != nil {
+		t.Fatalf("RSS output is not valid XML after adversarial payload: %v\nXML:\n%s", err, rssStr)
+	}
+	if parsed.Channel.Title != `Repo <Title> & "Quotes"` {
+		t.Errorf("unexpected decoded channel title: %q", parsed.Channel.Title)
+	}
+	if strings.Contains(rssStr, "<script>") || strings.Contains(rssStr, "<injected>") {
+		t.Errorf("unescaped HTML/XML tags leaked into RSS output:\n%s", rssStr)
+	}
+	if strings.Contains(rssStr, "javascript:") {
+		t.Errorf("unsafe javascript: URI leaked into RSS output:\n%s", rssStr)
+	}
+}
+
+func TestRenderer_WriteSymlinkRejection(t *testing.T) {
+	outDir := t.TempDir()
+	outsideDir := t.TempDir()
+	r, err := NewRenderer(outDir, "", "Test Repo", "1.0.0", []string{"A"})
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+
+	outsideFile := filepath.Join(outsideDir, "victim.html")
+	if err := os.WriteFile(outsideFile, []byte("original"), 0o600); err != nil {
+		t.Fatalf("failed to create outside file: %v", err)
+	}
+
+	// 1. WriteToFile via symlinked subdirectory escaping outDir
+	linkDir := filepath.Join(outDir, "sub")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Skipf("skipping symlink rejection test (symlinks unsupported): %v", err)
+	}
+	if err := r.WriteToFile("sub/victim.html", []byte("pwned")); err == nil {
+		t.Errorf("expected WriteToFile through symlinked subdir to fail")
+	}
+
+	// 2. WriteAssets with pre-placed symlinked layout directory
+	layoutLink := filepath.Join(outDir, "layout")
+	if err := os.Symlink(outsideDir, layoutLink); err != nil {
+		t.Fatalf("failed to create layout symlink: %v", err)
+	}
+	if err := r.WriteAssets(); err == nil {
+		t.Errorf("expected WriteAssets into symlinked layout dir to fail")
+	}
+
+	got, _ := os.ReadFile(outsideFile)
+	if string(got) != "original" {
+		t.Errorf("outside target file was modified through symlink: %q", string(got))
+	}
+}
+
+func TestRenderer_SnippetAndCommandHardening(t *testing.T) {
+	outDir := t.TempDir()
+	r, err := NewRenderer(outDir, "", "Safe Title\ngpgcheck=0", "1.0.0", []string{"P"})
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+	r.SetRepoMeta("my\nrepo", "https://repo.example.com/el9\ngpgcheck=0")
+	r.SetGPGKey("https://repo.example.com/RPM-GPG-KEY\nevil=1")
+
+	idxBytes, err := r.RenderIndex(nil, nil, "")
+	if err != nil {
+		t.Fatalf("RenderIndex failed: %v", err)
+	}
+	idxStr := string(idxBytes)
+	wantSnippet := "[myrepo]\nname=Safe Titlegpgcheck=0\nbaseurl=https://repo.example.com/el9gpgcheck=0\nenabled=1\ngpgcheck=1\ngpgkey=https://repo.example.com/RPM-GPG-KEYevil=1"
+	if !strings.Contains(idxStr, wantSnippet) {
+		t.Errorf("expected sanitized .repo snippet %q in index.html, got:\n%s", wantSnippet, idxStr)
+	}
+
+	evilPkg := &models.Package{
+		Name:    "pkg;rm -rf /",
+		Version: "1.0",
+		Release: "1",
+		Arch:    "x86_64",
+		Details: &models.PackageDetails{},
+	}
+	evilPkg.AllVersions = []*models.Package{evilPkg}
+	pkgBytes, err := r.RenderPackage(evilPkg, &logic.GroupData{Name: "System", Filename: "sys.group.html"})
+	if err != nil {
+		t.Fatalf("RenderPackage failed: %v", err)
+	}
+	pkgStr := string(pkgBytes)
+	if !strings.Contains(pkgStr, "sudo dnf install &#39;pkg;rm -rf /&#39;") {
+		t.Errorf("expected shell-quoted install command in package.html, got:\n%s", pkgStr)
+	}
+}
+
+type mockAssetState struct {
+	hashes     map[string]string
+	writeCount int
+}
+
+func (m *mockAssetState) CheckChanged(filename string, content []byte) (string, bool) {
+	h := string(content) // simple test digest sufficient for unit verification
+	if prev, ok := m.hashes[filename]; ok && prev == h {
+		return h, false
+	}
+	return h, true
+}
+
+func (m *mockAssetState) MarkWritten(filename, hash string) {
+	m.hashes[filename] = hash
+	m.writeCount++
+}
+
+func TestRenderer_WriteAssetsWithState_SkipsUnchanged(t *testing.T) {
+	outDir := t.TempDir()
+	r, err := NewRenderer(outDir, "", "Repo", "1.0.0", []string{"A"})
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+
+	st := &mockAssetState{hashes: make(map[string]string)}
+	keys1, err := r.WriteAssetsWithState(st, false)
+	if err != nil || len(keys1) == 0 {
+		t.Fatalf("first WriteAssetsWithState failed: keys=%v err=%v", keys1, err)
+	}
+	initialWrites := st.writeCount
+
+	// Second call with force=false must skip writing unchanged assets
+	if _, err := r.WriteAssetsWithState(st, false); err != nil {
+		t.Fatalf("second WriteAssetsWithState failed: %v", err)
+	}
+	if st.writeCount != initialWrites {
+		t.Errorf("expected unchanged assets to be skipped, got writeCount=%d want=%d", st.writeCount, initialWrites)
+	}
+
+	// Third call with force=true must re-write assets
+	if _, err := r.WriteAssetsWithState(st, true); err != nil {
+		t.Fatalf("forced WriteAssetsWithState failed: %v", err)
+	}
+	if st.writeCount == initialWrites {
+		t.Errorf("expected force=true to write assets, writeCount stayed at %d", st.writeCount)
+	}
+}
+
+func TestRenderer_SettersSearchAndAtomicLocalSink(t *testing.T) {
+	outDir := t.TempDir()
+	r, err := NewRenderer(outDir, "", "Phase5 Repo", "1.2.3", []string{"A"})
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+
+	sink := &AtomicLocalSink{RootDir: outDir}
+	r.SetSink(sink)
+	r.SetTotalPackages(42)
+	r.SetRevision("rev-99")
+	r.SetDescription("Custom repo description")
+
+	pkgs := []*models.Package{
+		{
+			Name:     "alpha",
+			Version:  "1.0",
+			Release:  "1",
+			Arch:     "x86_64",
+			Summary:  "Alpha package",
+			RpmGroup: "System/Base",
+			License:  "MIT",
+			Tags:     []string{"implemented-in::go", "role::program"},
+			Advisories: []models.Advisory{
+				{ID: "ELSA-2026:1000", CVEs: []string{"CVE-2026-1000"}},
+			},
+			Dependencies: &models.PackageDependencies{
+				Provides: []*models.DependencyEntry{{Name: "alpha-cap"}, {Name: "libalpha.so"}},
+			},
+		},
+	}
+	searchJSON, err := r.RenderSearchIndex(pkgs)
+	if err != nil {
+		t.Fatalf("RenderSearchIndex failed: %v", err)
+	}
+	if !strings.Contains(string(searchJSON), "alpha-cap") || !strings.Contains(string(searchJSON), "CVE-2026-1000") {
+		t.Errorf("expected provides and CVEs in search.json, got %s", string(searchJSON))
+	}
+
+	if err := r.WriteToFile("sub/test.html", []byte("<html>ok</html>")); err != nil {
+		t.Fatalf("WriteToFile via AtomicLocalSink failed: %v", err)
+	}
+	if !sink.Exists("sub/test.html") {
+		t.Errorf("expected AtomicLocalSink.Exists(\"sub/test.html\") to be true")
+	}
+	if err := sink.RemoveFile("sub/test.html"); err != nil {
+		t.Fatalf("RemoveFile failed: %v", err)
+	}
+	if sink.Exists("sub/test.html") {
+		t.Errorf("expected sub/test.html removed")
+	}
+	if err := sink.WriteFile("../escape.html", []byte("bad")); err == nil {
+		t.Errorf("expected traversal write error")
+	}
+	if err := sink.RemoveFile("../escape.html"); err == nil {
+		t.Errorf("expected traversal remove error")
+	}
+	if sink.Exists("../escape.html") {
+		t.Errorf("expected Exists false on traversal path")
 	}
 }
 

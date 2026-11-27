@@ -79,12 +79,12 @@ func TestStateStoreConcurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func() {
 			defer wg.Done()
 			filename := "file.html"
 			data := []byte("concurrent content")
 			_ = store.HasChanged(filename, data)
-		}(i)
+		}()
 	}
 	wg.Wait()
 }
@@ -141,5 +141,28 @@ func TestStateStore_CorruptJSON_Recovery(t *testing.T) {
 	// Save again when clean (not dirty) should be a no-op
 	if err := store.Save(); err != nil {
 		t.Fatalf("expected Save when clean to succeed: %v", err)
+	}
+}
+
+func TestStateStore_CheckChangedAndMarkWritten(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store, err := NewStateStore(statePath)
+	if err != nil {
+		t.Fatalf("NewStateStore failed: %v", err)
+	}
+
+	content := []byte("<html>page</html>")
+	hash, changed := store.CheckChanged("page.html", content)
+	if !changed || hash == "" {
+		t.Fatalf("expected CheckChanged to report changed=true with hash, got changed=%v hash=%q", changed, hash)
+	}
+	// Must NOT mutate state until MarkWritten is explicitly called
+	if _, stillChanged := store.CheckChanged("page.html", content); !stillChanged {
+		t.Errorf("expected CheckChanged not to persist hash prior to MarkWritten")
+	}
+
+	store.MarkWritten("page.html", hash)
+	if _, afterMarkChanged := store.CheckChanged("page.html", content); afterMarkChanged {
+		t.Errorf("expected CheckChanged to report false after MarkWritten")
 	}
 }

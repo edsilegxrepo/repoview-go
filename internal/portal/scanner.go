@@ -24,15 +24,17 @@ import (
 	"strings"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/taxonomy"
 )
 
 // ScanConfig defines traversal and filtering options for repository auto-discovery.
 type ScanConfig struct {
-	RootDir         string   // Root directory to crawl (HOME PATH)
-	PortalHome      string   // Optional detached portal home directory (containing rendered views)
-	MaxDepth        int      // Maximum directory recursion depth (default: 5)
-	RequireRendered bool     // If true, filters out unbuilt/raw repositories
-	ExcludePatterns []string // Directory names or glob patterns to skip
+	RootDir         string          // Root directory to crawl (HOME PATH)
+	PortalHome      string          // Optional detached portal home directory (containing rendered views)
+	MaxDepth        int             // Maximum directory recursion depth (default: 5)
+	RequireRendered bool            // If true, filters out unbuilt/raw repositories
+	ExcludePatterns []string        // Directory names or glob patterns to skip
+	TaxonomyRules   *taxonomy.Rules // Optional custom path patterns and distro icon aliases
 }
 
 // Scanner crawls directory trees to locate and classify repositories.
@@ -40,6 +42,12 @@ type Scanner struct {
 	config        ScanConfig
 	visitedPaths  map[string]*DiscoveredRepo // canonical path -> discovered repo
 	visitedInodes map[fileID]bool            // dev+ino -> visited
+	warnings      []string                   // non-fatal directory read warnings
+}
+
+// Warnings returns non-fatal directory traversal warnings recorded during the last Scan.
+func (s *Scanner) Warnings() []string {
+	return s.warnings
 }
 
 // NewScanner creates a new Scanner instance.
@@ -81,10 +89,11 @@ func (s *Scanner) Scan() ([]*DiscoveredRepo, error) {
 
 	s.visitedPaths = make(map[string]*DiscoveredRepo)
 	s.visitedInodes = make(map[fileID]bool)
+	s.warnings = nil
 
 	var discovered []*DiscoveredRepo
 
-	if rootID, ok := getFileID(fi); ok {
+	if rootID, ok := getFileID(absRoot, fi); ok {
 		s.visitedInodes[rootID] = true
 	}
 	s.visitedPaths[absRoot] = nil
@@ -110,7 +119,8 @@ func (s *Scanner) crawl(dirPath, virtualRel string, depth int, absRoot string, d
 
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		return nil // Inaccessible directory, continue crawl without halting
+		s.warnings = append(s.warnings, fmt.Sprintf("warning: cannot read directory %s: %v", dirPath, err))
+		return nil // Inaccessible directory, record warning and continue crawl without halting
 	}
 
 	for _, entry := range entries {
@@ -152,9 +162,15 @@ func (s *Scanner) crawl(dirPath, virtualRel string, depth int, absRoot string, d
 			canonicalPath = childPath
 		}
 
-		// Device+Inode cycle guard
-		if fi, err := os.Stat(childPath); err == nil {
-			if id, ok := getFileID(fi); ok {
+		// Device+Inode cycle guard (reuse DirEntry info for non-symlinks to avoid extra stat syscalls)
+		var fi os.FileInfo
+		if isSymlink {
+			fi, err = os.Stat(childPath)
+		} else {
+			fi, err = entry.Info()
+		}
+		if err == nil && fi != nil {
+			if id, ok := getFileID(canonicalPath, fi); ok {
 				if s.visitedInodes[id] {
 					if existing := s.visitedPaths[canonicalPath]; existing != nil {
 						aliasRel := filepath.ToSlash(childRel)
@@ -186,7 +202,7 @@ func (s *Scanner) crawl(dirPath, virtualRel string, depth int, absRoot string, d
 		}
 
 		// Inspect directory for repository signatures
-		repo, isRepo := s.inspectDirectory(canonicalPath, canRel, absRoot)
+		repo, isRepo := s.inspectDirectory(canonicalPath, canRel)
 		if isRepo {
 			// If accessed via a symlink, record symlink as alias (avoiding self-alias)
 			if isSymlink {
@@ -218,7 +234,7 @@ func (s *Scanner) crawl(dirPath, virtualRel string, depth int, absRoot string, d
 }
 
 // inspectDirectory checks whether a directory node matches repository criteria.
-func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRepo, bool) {
+func (s *Scanner) inspectDirectory(path, relPath string) (*DiscoveredRepo, bool) {
 	// 0. Detached Portal Home check: inspect detached portal home for rendered view/metadata
 	if s.config.PortalHome != "" {
 		detachedSub := relPath
@@ -250,7 +266,14 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 						Arch:         desc.Arch,
 						Distro:       desc.Distro,
 						Channel:      desc.Channel,
+						Suite:        desc.Suite,
+						Components:   desc.Components,
 						Title:        desc.Title,
+						Description:  desc.Description,
+						BaseURL:      desc.BaseURL,
+						GPGKey:       desc.GPGKey,
+						Badge:        desc.Badge,
+						Icon:         desc.Icon,
 						PackageCount: desc.PackageCount,
 						LastBuild:    desc.LastBuild,
 						IsRendered:   true,
@@ -271,7 +294,7 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 			if fi, err := os.Stat(idxFile); err == nil && !fi.IsDir() {
 				if isRepoViewRendered(idxFile) {
 					format := sniffFormat(path)
-					arch := detectArchFromPath(path)
+					arch := taxonomy.DetectArchFromPath(path)
 					if arch == "unknown" || arch == "" {
 						if a := detectArchFromDebianMeta(path); a != "" && a != "unknown" {
 							arch = a
@@ -279,7 +302,7 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 							arch = a
 						}
 					}
-					distro, channel := inferDistroAndChannel(path)
+					distro, channel := s.inferDistroAndChannel(path)
 					targetURL := filepath.ToSlash(filepath.Join(relPath, "index.html"))
 					if strings.Contains(idxFile, filepath.Join("repoview", "index.html")) || relPath == "." || relPath == "" {
 						targetURL = filepath.ToSlash(filepath.Join(relPath, "repoview", "index.html"))
@@ -293,7 +316,10 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 					if title == "" || strings.EqualFold(title, "Repoview") {
 						title = fmt.Sprintf("%s %s", distro, channel)
 					}
-					pkgCount := countPackagesFromSearchJSON(filepath.Join(filepath.Dir(idxFile), "search.json"))
+					pkgCount, searchArch := parseSearchJSONFirst(filepath.Join(filepath.Dir(idxFile), "search.json"))
+					if (arch == "unknown" || arch == "") && searchArch != "" && searchArch != "unknown" {
+						arch = searchArch
+					}
 					repo := &DiscoveredRepo{
 						Path:         path,
 						RelPath:      filepath.ToSlash(relPath),
@@ -347,7 +373,14 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 				Arch:         desc.Arch,
 				Distro:       desc.Distro,
 				Channel:      desc.Channel,
+				Suite:        desc.Suite,
+				Components:   desc.Components,
 				Title:        desc.Title,
+				Description:  desc.Description,
+				BaseURL:      desc.BaseURL,
+				GPGKey:       desc.GPGKey,
+				Badge:        desc.Badge,
+				Icon:         desc.Icon,
 				PackageCount: desc.PackageCount,
 				LastBuild:    desc.LastBuild,
 				IsRendered:   true,
@@ -369,22 +402,22 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 	if fi, err := os.Stat(renderedIndex); err == nil && !fi.IsDir() {
 		if isRepoViewRendered(renderedIndex) {
 			format := sniffFormat(path)
-			arch := detectArchFromPath(path)
+			pkgCount, searchArch := parseSearchJSONFirst(
+				filepath.Join(path, "repoview", "search.json"),
+				filepath.Join(path, "search.json"),
+			)
+
+			arch := taxonomy.DetectArchFromPath(path)
 			if arch == "unknown" || arch == "" {
-				if a := detectArchFromSearchJSON(filepath.Join(path, "repoview", "search.json")); a != "" && a != "unknown" {
+				if searchArch != "" && searchArch != "unknown" {
+					arch = searchArch
+				} else if a := detectArchFromDebianMeta(path); a != "" && a != "unknown" {
 					arch = a
-				} else if a := detectArchFromSearchJSON(filepath.Join(path, "search.json")); a != "" && a != "unknown" {
+				} else if a := detectArchFromPackageFiles(path); a != "" && a != "unknown" {
 					arch = a
-				}
-				if arch == "unknown" || arch == "" {
-					if a := detectArchFromDebianMeta(path); a != "" && a != "unknown" {
-						arch = a
-					} else if a := detectArchFromPackageFiles(path); a != "" && a != "unknown" {
-						arch = a
-					}
 				}
 			}
-			distro, channel := inferDistroAndChannel(path)
+			distro, channel := s.inferDistroAndChannel(path)
 			targetURL := filepath.ToSlash(filepath.Join(relPath, "repoview", "index.html"))
 			if !renderedInSubDir {
 				targetURL = filepath.ToSlash(filepath.Join(relPath, "index.html"))
@@ -395,11 +428,6 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 			title = strings.TrimSpace(title)
 			if title == "" || strings.EqualFold(title, "Repoview") {
 				title = fmt.Sprintf("%s %s", distro, channel)
-			}
-
-			pkgCount := countPackagesFromSearchJSON(filepath.Join(path, "repoview", "search.json"))
-			if pkgCount == 0 {
-				pkgCount = countPackagesFromSearchJSON(filepath.Join(path, "search.json"))
 			}
 
 			repo := &DiscoveredRepo{
@@ -423,13 +451,13 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 	// 3. Raw/unrendered RPM repository (repodata directory present)
 	repodataPath := filepath.Join(path, "repodata")
 	if fi, err := os.Stat(repodataPath); err == nil && fi.IsDir() {
-		arch := detectArchFromPath(path)
+		arch := taxonomy.DetectArchFromPath(path)
 		if arch == "unknown" || arch == "" {
 			if a := detectArchFromPackageFiles(path); a != "" && a != "unknown" {
 				arch = a
 			}
 		}
-		distro, channel := inferDistroAndChannel(path)
+		distro, channel := s.inferDistroAndChannel(path)
 		targetURL := defaultRawTargetURL
 
 		repo := &DiscoveredRepo{
@@ -450,7 +478,7 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 	base := filepath.Base(path)
 	if strings.HasPrefix(base, "binary-") {
 		arch := strings.TrimPrefix(base, "binary-")
-		distro, channel := inferDistroAndChannel(path)
+		distro, channel := s.inferDistroAndChannel(path)
 		targetURL := defaultRawTargetURL
 
 		repo := &DiscoveredRepo{
@@ -468,9 +496,9 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 		return repo, true
 	}
 
-	// Flat Debian package index (Packages, Packages.gz, Packages.xz)
+	// Flat Debian package index (Packages, Packages.gz, Packages.bz2, Packages.xz, Packages.zst)
 	if hasDebianIndex(path) {
-		arch := detectArchFromPath(path)
+		arch := taxonomy.DetectArchFromPath(path)
 		if arch == "unknown" || arch == "" {
 			if a := detectArchFromDebianMeta(path); a != "" && a != "unknown" {
 				arch = a
@@ -478,7 +506,7 @@ func (s *Scanner) inspectDirectory(path, relPath, rootDir string) (*DiscoveredRe
 				arch = a
 			}
 		}
-		distro, channel := inferDistroAndChannel(path)
+		distro, channel := s.inferDistroAndChannel(path)
 		targetURL := defaultRawTargetURL
 
 		repo := &DiscoveredRepo{
@@ -593,7 +621,7 @@ func AggregateDebianSuites(repos []*DiscoveredRepo) []*DiscoveredRepo {
 	return result
 }
 
-// isExcluded returns true if the directory name matches default or custom exclusion patterns.
+// isExcluded returns true if the directory name matches default or custom glob exclusion patterns.
 func (s *Scanner) isExcluded(name string) bool {
 	if defaultExcludedDirs[name] {
 		return true
@@ -603,9 +631,6 @@ func (s *Scanner) isExcluded(name string) bool {
 			continue
 		}
 		if matched, _ := filepath.Match(pattern, name); matched {
-			return true
-		}
-		if strings.Contains(name, pattern) {
 			return true
 		}
 	}
@@ -682,9 +707,9 @@ func extractHTMLTitle(indexPath string) string {
 	return strings.TrimSpace(content[start : start+end])
 }
 
-// hasDebianIndex checks for existence of Packages, Packages.gz, or Packages.xz.
+// hasDebianIndex checks for existence of Packages, Packages.gz, Packages.bz2, Packages.xz, or Packages.zst.
 func hasDebianIndex(dir string) bool {
-	for _, name := range []string{"Packages", "Packages.gz", "Packages.xz"} {
+	for _, name := range []string{"Packages", "Packages.gz", "Packages.bz2", "Packages.xz", "Packages.zst"} {
 		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && !fi.IsDir() {
 			return true
 		}
@@ -703,14 +728,8 @@ func sniffFormat(dir string) models.RepoFormat {
 	return models.FormatRPM
 }
 
-// detectArchFromPath extracts recognized architecture tokens from path segments.
-func detectArchFromPath(repoDir string) string {
-	return DetectArchFromPath(repoDir)
-}
-
-// inferDistroAndChannel extracts distro and channel names from directory layouts.
-func inferDistroAndChannel(repoDir string) (string, string) {
-	return InferDistroAndChannel(repoDir)
+func (s *Scanner) inferDistroAndChannel(repoDir string) (string, string) {
+	return taxonomy.InferDistroAndChannelWithRules(repoDir, s.config.TaxonomyRules)
 }
 
 func containsString(slice []string, val string) bool {
@@ -740,36 +759,33 @@ func sortRepos(repos []*DiscoveredRepo) {
 	})
 }
 
-// countPackagesFromSearchJSON extracts package count from search.json index if present.
-func countPackagesFromSearchJSON(searchPath string) int {
-	// #nosec G304 -- inspecting discovered search.json for package count
-	data, err := os.ReadFile(filepath.Clean(searchPath))
-	if err != nil {
-		return 0
+// parseSearchJSONFirst tries candidate search.json paths in order and extracts both package count
+// and primary architecture in a single read + JSON unmarshal pass.
+func parseSearchJSONFirst(paths ...string) (int, string) {
+	for _, p := range paths {
+		count, arch, ok := parseSearchJSON(p)
+		if ok {
+			return count, arch
+		}
 	}
-	var index struct {
-		Data [][]interface{} `json:"data"`
-	}
-	if err := json.Unmarshal(data, &index); err == nil {
-		return len(index.Data)
-	}
-	return 0
+	return 0, ""
 }
 
-// detectArchFromSearchJSON extracts the primary architecture from search.json index if present.
-func detectArchFromSearchJSON(searchPath string) string {
-	// #nosec G304 -- inspecting discovered search.json for arch
+// parseSearchJSON parses search.json once to return total indexed package count and primary architecture.
+func parseSearchJSON(searchPath string) (int, string, bool) {
+	// #nosec G304 -- inspecting discovered search.json for package count and arch
 	data, err := os.ReadFile(filepath.Clean(searchPath))
 	if err != nil {
-		return ""
+		return 0, "", false
 	}
 	var index struct {
 		Schema []string        `json:"schema"`
 		Data   [][]interface{} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &index); err != nil {
-		return ""
+		return 0, "", false
 	}
+
 	archIdx := -1
 	for i, s := range index.Schema {
 		if s == "a" {
@@ -777,21 +793,21 @@ func detectArchFromSearchJSON(searchPath string) string {
 			break
 		}
 	}
-	if archIdx == -1 {
-		return ""
-	}
-	var archList []string
-	for _, row := range index.Data {
-		if archIdx < len(row) {
-			if a, ok := row[archIdx].(string); ok && a != "" {
-				archList = append(archList, a)
+	var primaryArch string
+	if archIdx != -1 {
+		var archList []string
+		for _, row := range index.Data {
+			if archIdx < len(row) {
+				if a, ok := row[archIdx].(string); ok && a != "" {
+					archList = append(archList, a)
+				}
 			}
 		}
+		if len(archList) > 0 {
+			primaryArch = DetectPrimaryArch(archList)
+		}
 	}
-	if len(archList) > 0 {
-		return DetectPrimaryArch(archList)
-	}
-	return ""
+	return len(index.Data), primaryArch, true
 }
 
 // detectArchFromDebianMeta inspects Release or InRelease files in the directory for Architecture(s).

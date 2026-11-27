@@ -667,7 +667,9 @@ a:hover {
 	align-items: center;
 	color: var(--primary);
 	font-weight: 600;
-	transition: color 0.15s ease, opacity 0.15s ease;
+	transition:
+		color 0.15s ease,
+		opacity 0.15s ease;
 }
 
 .breadcrumb-item a.portal-back-link:hover {
@@ -1992,4 +1994,60 @@ summary.section-header:focus-visible {
 	position: absolute;
 	top: 0.5rem;
 	right: 0.5rem;
+}
+
+/* Rich Metadata, Advisories, Debtags & Search Keyboard Selection */
+.tag-chip-row,
+.advisory-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.45rem;
+	margin-top: 0.65rem;
+}
+
+.advisory-list {
+	flex-direction: column;
+}
+
+.advisory-item {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	font-size: 0.85rem;
+}
+
+.debtag-chip,
+.flag-badge,
+.advisory-badge,
+.cve-badge {
+	display: inline-block;
+	font-family: var(--font-mono);
+	font-size: 0.72rem;
+	font-weight: 600;
+	padding: 0.12rem 0.45rem;
+	border-radius: 4px;
+	background: var(--bg-subtle);
+	border: 1px solid var(--border);
+	color: var(--text-muted);
+}
+
+.flag-badge-essential,
+.advisory-security,
+.cve-badge {
+	background: rgba(239, 68, 68, 0.15);
+	border-color: rgba(239, 68, 68, 0.35);
+	color: #f87171;
+}
+
+.symlink-target {
+	color: var(--text-muted);
+	font-family: var(--font-mono);
+	font-size: 0.82rem;
+	margin-left: 0.35rem;
+}
+
+.search-result-item.active {
+	background: var(--primary-subtle);
+	border-left: 2px solid var(--primary);
 }

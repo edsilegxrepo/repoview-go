@@ -39,7 +39,7 @@ func FilterPackages(pkgs []*models.Package, ignoreGlobs, excludeArches []string)
 	// Pre-validate all glob patterns to fail fast before processing packages
 	for _, pattern := range ignoreGlobs {
 		if _, err := filepath.Match(pattern, ""); err != nil {
-			return nil, fmt.Errorf("invalid ignore-package glob pattern %q: %w", pattern, err)
+			return nil, fmt.Errorf("%w: invalid ignore-package glob pattern %q: %w", models.ErrConfig, pattern, err)
 		}
 	}
 

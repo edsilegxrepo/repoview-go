@@ -12,7 +12,7 @@ type fileID struct {
 	ino uint64
 }
 
-func getFileID(fi os.FileInfo) (fileID, bool) {
+func getFileID(_ string, fi os.FileInfo) (fileID, bool) {
 	if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
 		return fileID{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}, true
 	}

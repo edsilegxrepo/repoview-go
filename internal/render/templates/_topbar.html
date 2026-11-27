@@ -1,0 +1,54 @@
+{{ define "_topbar.html" }}
+        <header class="top-bar">
+            <nav aria-label="breadcrumb">
+                <ol class="breadcrumb">
+                    {{ if .Repo.PortalURL }}
+                    <li class="breadcrumb-item"><a href="{{ .Repo.PortalURL }}" class="portal-back-link"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: -2px; margin-right: 4px;"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>All Repositories</a></li>
+                    <li class="breadcrumb-sep">/</li>
+                    {{ end }}
+                    {{ if eq .PageKind "index" }}
+                    <li class="breadcrumb-item active" aria-current="page">Home</li>
+                    {{ else if eq .PageKind "group" }}
+                    <li class="breadcrumb-item"><a href="index.html">{{ .Repo.Title }}</a></li>
+                    <li class="breadcrumb-sep">/</li>
+                    <li class="breadcrumb-item active" aria-current="page">{{ .Group.Name }}</li>
+                    {{ else if eq .PageKind "package" }}
+                    <li class="breadcrumb-item"><a href="index.html">{{ .Repo.Title }}</a></li>
+                    <li class="breadcrumb-sep">/</li>
+                    <li class="breadcrumb-item"><a href="{{ .Group.Filename }}">{{ .Group.Name }}</a></li>
+                    <li class="breadcrumb-sep">/</li>
+                    <li class="breadcrumb-item active" aria-current="page">{{ .Pkg.Name }}</li>
+                    {{ end }}
+                </ol>
+            </nav>
+            <div class="top-bar-actions">
+                {{ if gt (len .Repo.Siblings) 1 }}
+                <div class="sibling-switcher">
+                    <span class="switcher-label">Channel/Arch:</span>
+                    <div class="sibling-chips">
+                        {{ range .Repo.Siblings }}
+                        <a href="{{ .RelURL }}" class="sibling-chip {{ if .IsActive }}active{{ end }}" title="Switch to {{ .Name }} repository">
+                            {{ .Name }}
+                        </a>
+                        {{ end }}
+                    </div>
+                </div>
+                {{ end }}
+                {{ if eq .PageKind "index" }}
+                <button type="button" class="btn-configure-repo btn-open-repo-modal" title="Configure {{ if eq .Repo.Format "deb" }}APT Repository{{ else }}DNF/YUM Repository{{ end }}">
+                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>Configure {{ if eq .Repo.Format "deb" }}APT (.sources){{ else }}DNF / YUM (.repo){{ end }}</span>
+                </button>
+                <div class="stat-label">Generated: {{ now | ymd }}</div>
+                {{ else if eq .PageKind "group" }}
+                <div class="stat-label">{{ len .Group.Packages }} packages</div>
+                {{ else if eq .PageKind "package" }}
+                <div class="stat-label"><a href="{{ .Group.Filename }}">&laquo; {{ .Group.Name }}</a></div>
+                {{ end }}
+            </div>
+        </header>
+{{ end }}

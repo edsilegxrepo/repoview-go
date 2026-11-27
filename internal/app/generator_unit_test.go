@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/render"
+	"github.com/edsilegxrepo/repoview/internal/state"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -251,5 +253,182 @@ func TestGenerator_Errors(t *testing.T) {
 	gen := NewGenerator(cfg)
 	if err := gen.Run(); err == nil {
 		t.Errorf("expected error for non-existent repo, got nil")
+	}
+
+	// 2. --force with broken custom template directory must NOT wipe pre-existing outputDir
+	repoDir := createMockRepository(t)
+	existingOut := t.TempDir()
+	preservedFile := filepath.Join(existingOut, "index.html")
+	if err := os.WriteFile(preservedFile, []byte("existing site"), 0o644); err != nil {
+		t.Fatalf("failed to write existing index.html: %v", err)
+	}
+
+	badTmplDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(badTmplDir, "index.html"), []byte("{{ .BrokenTemplate "), 0o644); err != nil {
+		t.Fatalf("failed to write broken template: %v", err)
+	}
+
+	forceGen := NewGenerator(Config{
+		RepoDir:     repoDir,
+		OutputDir:   existingOut,
+		TemplateDir: badTmplDir,
+		Force:       true,
+		Quiet:       true,
+	})
+	if err := forceGen.Run(); err == nil {
+		t.Fatalf("expected error for broken template directory, got nil")
+	}
+	afterBytes, err := os.ReadFile(preservedFile)
+	if err != nil {
+		t.Fatalf("pre-existing output file was deleted despite template failure: %v", err)
+	}
+	if string(afterBytes) != "existing site" {
+		t.Errorf("pre-existing output file was corrupted: %q", string(afterBytes))
+	}
+
+	// 3. Uncreatable --state-dir (path blocked by existing regular file) must return error cleanly without nil panic
+	blockingFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blockingFile, []byte("blocker"), 0o644); err != nil {
+		t.Fatalf("failed to write blocking file: %v", err)
+	}
+	stateErrGen := NewGenerator(Config{
+		RepoDir:   repoDir,
+		OutputDir: t.TempDir(),
+		StateDir:  filepath.Join(blockingFile, "nested"),
+		Quiet:     true,
+	})
+	if err := stateErrGen.Run(); err == nil {
+		t.Errorf("expected error when --state-dir cannot be created, got nil")
+	}
+}
+
+type stubFilesReader struct {
+	files []models.PackageFile
+}
+
+func (s *stubFilesReader) GetAllPackages() ([]*models.Package, error) { return nil, nil }
+func (s *stubFilesReader) EnrichPackageDetails([]*models.Package)    {}
+func (s *stubFilesReader) ReadPackageFiles(string, *models.Package) ([]models.PackageFile, error) {
+	return s.files, nil
+}
+func (s *stubFilesReader) GetPackageDependencies(int64) (*models.PackageDependencies, error) {
+	return &models.PackageDependencies{}, nil
+}
+func (s *stubFilesReader) Close() error { return nil }
+
+func TestRenderSinglePackage_ClearsFilesAfterRender(t *testing.T) {
+	repoDir := t.TempDir()
+	outDir := t.TempDir()
+	r, err := render.NewRenderer(outDir, "", "Test Repo", "1.0.0", []string{"F"})
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+	st, err := state.NewStateStore(filepath.Join(outDir, "state.json"))
+	if err != nil {
+		t.Fatalf("NewStateStore failed: %v", err)
+	}
+
+	latest := &models.Package{
+		PkgKey:       1,
+		Name:         "foo",
+		Version:      "2.0",
+		Release:      "1",
+		Arch:         "x86_64",
+		LocationHref: "Packages/foo-2.0-1.x86_64.rpm",
+		Details:      &models.PackageDetails{BuildHost: "builder.example.org"},
+	}
+	older := &models.Package{
+		PkgKey:  2,
+		Name:    "foo",
+		Version: "1.0",
+		Release: "1",
+		Arch:    "x86_64",
+	}
+
+	gen := NewGenerator(Config{RepoDir: repoDir, OutputDir: outDir, Quiet: true})
+	db := &stubFilesReader{
+		files: []models.PackageFile{
+			{Name: "/usr/bin/foo", Mode: "-rwxr-xr-x", Size: 123},
+			{Name: "/etc/foo.conf", Mode: "-rw-r--r--", Size: 45},
+		},
+	}
+
+	filename, err := gen.renderSinglePackage(db, r, st, []*models.Package{latest, older}, nil, "foo")
+	if err != nil {
+		t.Fatalf("renderSinglePackage failed: %v", err)
+	}
+	if filename != "foo.html" {
+		t.Errorf("expected foo.html, got %q", filename)
+	}
+	if latest.Details == nil {
+		t.Fatalf("expected non-file metadata on Details to be preserved")
+	}
+	if latest.Details.Files != nil {
+		t.Errorf("expected latest.Details.Files to be cleared after render, still has %d entries", len(latest.Details.Files))
+	}
+	if older.Details != nil {
+		t.Errorf("expected older version Details to remain nil")
+	}
+
+	renderedBytes, err := os.ReadFile(filepath.Join(outDir, "foo.html"))
+	if err != nil {
+		t.Fatalf("failed to read rendered foo.html: %v", err)
+	}
+	if len(renderedBytes) == 0 {
+		t.Errorf("rendered foo.html is empty")
+	}
+}
+
+func TestValidateOutputDirSafety_SymlinkRepoDir(t *testing.T) {
+	realRepo := t.TempDir()
+	symlinkParent := t.TempDir()
+	repoLink := filepath.Join(symlinkParent, "repo_link")
+	if err := os.Symlink(realRepo, repoLink); err != nil {
+		t.Skipf("skipping symlink safety test (symlinks unsupported): %v", err)
+	}
+
+	if err := validateOutputDirSafety(realRepo, repoLink); err == nil {
+		t.Errorf("expected validateOutputDirSafety to block outputDir pointing to repoDir via symlink")
+	}
+	if err := validateOutputDirSafety(realRepo, filepath.Join(repoLink, "repodata")); err == nil {
+		t.Errorf("expected validateOutputDirSafety to block repodata inside symlinked repoDir")
+	}
+}
+
+func TestGenerator_WindowsCycleGuardHelper_BuildCheck(t *testing.T) {
+	// Also ensure a failing GetPackageDependencies propagates through renderSinglePackage
+	repoDir := t.TempDir()
+	outDir := t.TempDir()
+	r, err := render.NewRenderer(outDir, "", "Test Repo", "1.0.0", []string{"F"})
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+	st, err := state.NewStateStore(filepath.Join(outDir, "state.json"))
+	if err != nil {
+		t.Fatalf("NewStateStore failed: %v", err)
+	}
+	gen := NewGenerator(Config{RepoDir: repoDir, OutputDir: outDir, Quiet: true})
+	errDB := &failingDepsReader{}
+	pkg := &models.Package{PkgKey: 1, Name: "foo", Version: "1.0", Release: "1", Arch: "x86_64"}
+	if _, err := gen.renderSinglePackage(errDB, r, st, []*models.Package{pkg}, nil, "foo"); err == nil {
+		t.Errorf("expected renderSinglePackage to propagate GetPackageDependencies error")
+	}
+}
+
+type failingDepsReader struct{ stubFilesReader }
+
+func (f *failingDepsReader) GetPackageDependencies(int64) (*models.PackageDependencies, error) {
+	return nil, os.ErrInvalid
+}
+
+func TestGenerator_EffectiveWorkersClamp(t *testing.T) {
+	if got := NewGenerator(Config{Workers: 64}).effectiveWorkers(100); got != 16 {
+		t.Errorf("expected workers clamped to 16, got %d", got)
+	}
+	if got := NewGenerator(Config{Workers: 8}).effectiveWorkers(3); got != 3 {
+		t.Errorf("expected workers capped at itemCount 3, got %d", got)
+	}
+	if got := NewGenerator(Config{}).effectiveWorkers(0); got != 0 {
+		t.Errorf("expected 0 workers for 0 items, got %d", got)
 	}
 }

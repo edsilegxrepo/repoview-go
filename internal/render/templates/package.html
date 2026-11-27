@@ -1,170 +1,11 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
-<head>
-  <meta charset="utf-8">
-  <title>RepoView: {{ .Pkg.Name }} - {{ .Repo.Title }}</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script>
-    (function() {
-      var theme = localStorage.getItem("repoview-theme") || "dark";
-      document.documentElement.setAttribute("data-theme", theme);
-    })();
-  </script>
-  <link rel="stylesheet" href="layout/repostyle.css" type="text/css">
-  <meta name="robots" content="noindex,follow">
-</head>
+{{ template "_head.html" . }}
 <body>
-    <aside class="sidebar">
-        <div class="sidebar-header">
-            <div class="brand-row">
-                <a href="index.html" class="brand-title" title="{{ .Repo.Title }}">
-                    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                        <line x1="12" y1="22.08" x2="12" y2="12"></line>
-                    </svg>
-                    <span>RepoView</span>
-                </a>
-                <div class="header-actions">
-                    <button id="themeToggleBtn" class="icon-btn" title="Switch to light theme">
-                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                            <circle cx="12" cy="12" r="5"></circle>
-                            <line x1="12" y1="1" x2="12" y2="3"></line>
-                            <line x1="12" y1="21" x2="12" y2="23"></line>
-                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-                            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                            <line x1="1" y1="12" x2="3" y2="12"></line>
-                            <line x1="21" y1="12" x2="23" y2="12"></line>
-                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-                            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-                        </svg>
-                    </button>
-                    <a href="latest-feed.xml" class="icon-btn" title="RSS Feed" target="_blank">
-                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
-                            <path d="M4 11a9 9 0 0 1 9 9"></path>
-                            <path d="M4 4a16 16 0 0 1 16 16"></path>
-                            <circle cx="5" cy="19" r="1"></circle>
-                        </svg>
-                    </a>
-                </div>
-            </div>
-            <div class="search-container">
-                <div class="search-input-wrapper">
-                    <svg class="search-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
-                        <circle cx="11" cy="11" r="8"></circle>
-                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                    </svg>
-                    <input type="text" id="pkgSearchInput" placeholder="Search packages..." autocomplete="off">
-                    <span class="kbd-hint">/</span>
-                </div>
-                <div id="searchResults"></div>
-            </div>
-        </div>
-
-        <nav class="sidebar-tree">
-            <div class="nav-section">
-                <div class="nav-section-title">Navigation</div>
-                <ul class="nav-list">
-                    <li>
-                        <a href="index.html" class="nav-item-link">
-                            <span class="nav-item-label">&laquo; Repository Home</span>
-                        </a>
-                    </li>
-                    <li>
-                        <a href="{{ .Group.Filename }}" class="nav-item-link">
-                            <span class="nav-item-label">&larr; Back to {{ .Group.Name }}</span>
-                        </a>
-                    </li>
-                </ul>
-            </div>
-
-            <div class="nav-section">
-                <div class="nav-section-title">
-                    <span>Package Groups</span>
-                    <span class="count-badge">{{ len .Repo.Groups }}</span>
-                </div>
-                <div class="nav-tree">
-                    {{ range .Repo.GroupTree }}
-                    {{ if .IsLeaf }}
-                    <div class="nav-tree-leaf">
-                        <a href="{{ .Filename }}" class="nav-item-link {{ if $.Group }}{{ if eq $.Group.Filename .Filename }}active{{ end }}{{ end }}" title="{{ .Name }}">
-                            <span class="nav-item-label">{{ .Name }}</span>
-                            <span class="count-badge">{{ .TotalPackages }}</span>
-                        </a>
-                    </div>
-                    {{ else }}
-                    <details class="nav-tree-category" open>
-                        <summary class="nav-tree-summary" title="{{ .Name }} ({{ .TotalPackages }} packages)">
-                            <span class="nav-tree-title">
-                                <span class="nav-tree-icon">&#9656;</span>
-                                <span class="nav-tree-cat-name">{{ .Name }}</span>
-                            </span>
-                            <span class="count-badge">{{ .TotalPackages }}</span>
-                        </summary>
-                        <ul class="nav-tree-list">
-                            {{ range .Subgroups }}
-                            <li>
-                                <a href="{{ .Filename }}" class="nav-tree-item-link {{ if $.Group }}{{ if eq $.Group.Filename .Filename }}active{{ end }}{{ end }}" title="{{ .FullName }}">
-                                    <span class="nav-tree-branch">&#9500;&#9472;</span>
-                                    <span class="nav-tree-sub-name">{{ .Name }}</span>
-                                    <span class="count-badge">{{ .Count }}</span>
-                                </a>
-                            </li>
-                            {{ end }}
-                        </ul>
-                    </details>
-                    {{ end }}
-                    {{ end }}
-                </div>
-            </div>
-
-            <div class="nav-section">
-                <div class="nav-section-title">By Letter</div>
-                <div class="letter-matrix">
-                    {{ range .Repo.Letters }}
-                    <a href="letter_{{ . | lower }}.group.html" class="letter-matrix-link">{{ . }}</a>
-                    {{ end }}
-                </div>
-            </div>
-        </nav>
-
-        <footer class="sidebar-footer">
-            <span>RepoView-Go</span>
-            <a href="https://github.com/mshedsilegx/repoview-ng" target="_blank" rel="noopener">v{{ .Repo.MyVersion }}</a>
-        </footer>
-    </aside>
+{{ template "_sidebar.html" . }}
 
     <div class="main-wrapper">
-        <header class="top-bar">
-            <nav aria-label="breadcrumb">
-                <ol class="breadcrumb">
-                    {{ if .Repo.PortalURL }}
-                    <li class="breadcrumb-item"><a href="{{ .Repo.PortalURL }}" class="portal-back-link"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: -2px; margin-right: 4px;"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>All Repositories</a></li>
-                    <li class="breadcrumb-sep">/</li>
-                    {{ end }}
-                    <li class="breadcrumb-item"><a href="index.html">{{ .Repo.Title }}</a></li>
-                    <li class="breadcrumb-sep">/</li>
-                    <li class="breadcrumb-item"><a href="{{ .Group.Filename }}">{{ .Group.Name }}</a></li>
-                    <li class="breadcrumb-sep">/</li>
-                    <li class="breadcrumb-item active" aria-current="page">{{ .Pkg.Name }}</li>
-                </ol>
-            </nav>
-            <div class="top-bar-actions">
-                {{ if gt (len .Repo.Siblings) 1 }}
-                <div class="sibling-switcher">
-                    <span class="switcher-label">Channel/Arch:</span>
-                    <div class="sibling-chips">
-                        {{ range .Repo.Siblings }}
-                        <a href="{{ .RelURL }}" class="sibling-chip {{ if .IsActive }}active{{ end }}" title="Switch to {{ .Name }} repository">
-                            {{ .Name }}
-                        </a>
-                        {{ end }}
-                    </div>
-                </div>
-                {{ end }}
-                <div class="stat-label"><a href="{{ .Group.Filename }}">&laquo; {{ .Group.Name }}</a></div>
-            </div>
-        </header>
+{{ template "_topbar.html" . }}
 
         <main class="content-area">
             <div class="pkg-hero">
@@ -173,9 +14,17 @@
                         <span>{{ .Pkg.Name }}</span>
                         <span class="arch-badge">{{ .Pkg.VersionRelease }}</span>
                         <span class="arch-badge">{{ .Pkg.Arch }}</span>
+                        {{ if .Pkg.Essential }}<span class="flag-badge flag-badge-essential">Essential</span>{{ end }}
+                        {{ if .Pkg.Priority }}<span class="arch-badge">{{ .Pkg.Priority }}</span>{{ end }}
+                        {{ if .Pkg.MultiArch }}<span class="arch-badge">Multi-Arch: {{ .Pkg.MultiArch }}</span>{{ end }}
                     </h1>
                 </div>
                 <p class="pkg-hero-summary">{{ .Pkg.Summary }}</p>
+                {{ if .Pkg.Tags }}
+                <div class="tag-chip-row">
+                    {{ range .Pkg.Tags }}<span class="debtag-chip">{{ . }}</span>{{ end }}
+                </div>
+                {{ end }}
                 <div class="quick-install-bar">
                     <div class="install-tool-tabs">
                         {{ if eq .Pkg.Format "deb" }}
@@ -192,11 +41,11 @@
                     </div>
                     <div class="install-cmd-wrap">
                         {{ if eq .Pkg.Format "deb" }}
-                        <code id="installCmdDisplay">sudo apt install {{ .Pkg.Name }}</code>
-                        <button type="button" class="cmd-copy-btn" id="btnCopyInstallCmd" data-copy="sudo apt install {{ .Pkg.Name }}" title="Copy install command">
+                        <code id="installCmdDisplay">sudo apt install {{ .Pkg.Name | shellQuote }}</code>
+                        <button type="button" class="cmd-copy-btn" id="btnCopyInstallCmd" data-copy="sudo apt install {{ .Pkg.Name | shellQuote }}" title="Copy install command">
                         {{ else }}
-                        <code id="installCmdDisplay">sudo dnf install {{ .Pkg.Name }}</code>
-                        <button type="button" class="cmd-copy-btn" id="btnCopyInstallCmd" data-copy="sudo dnf install {{ .Pkg.Name }}" title="Copy install command">
+                        <code id="installCmdDisplay">sudo dnf install {{ .Pkg.Name | shellQuote }}</code>
+                        <button type="button" class="cmd-copy-btn" id="btnCopyInstallCmd" data-copy="sudo dnf install {{ .Pkg.Name | shellQuote }}" title="Copy install command">
                         {{ end }}
                             <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
@@ -232,6 +81,11 @@
                     <div class="metadata-label">Maintainer</div>
                     <div class="metadata-value">{{ .Pkg.Maintainer }}</div>
                 </div>
+                {{ else if .Pkg.Packager }}
+                <div class="metadata-card">
+                    <div class="metadata-label">Packager</div>
+                    <div class="metadata-value">{{ .Pkg.Packager }}</div>
+                </div>
                 {{ end }}
 
                 {{ if .Pkg.Vendor }}
@@ -244,7 +98,7 @@
                 <div class="metadata-card">
                     <div class="metadata-label">{{ if eq .Pkg.Format "deb" }}Section{{ else }}Primary Group{{ end }}</div>
                     <div class="metadata-value">
-                        <a href="{{ .Group.Filename }}">{{ .Group.Name }}</a>
+                        {{ if .Group }}<a href="{{ .Group.Filename }}">{{ .Group.Name }}</a>{{ else }}{{ .Pkg.Group }}{{ end }}
                     </div>
                 </div>
 
@@ -257,7 +111,7 @@
 
                 {{ if .Pkg.InstalledSize }}
                 <div class="metadata-card">
-                    <div class="metadata-label">Installed Size & Footprint</div>
+                    <div class="metadata-label">Installed Size &amp; Footprint</div>
                     <div class="metadata-value">
                         <span>{{ .Pkg.InstalledSize | humanSize }}</span>
                         <span style="color: var(--text-subtle); font-size: 0.8rem; margin-left: 0.25rem;">({{ .Pkg.InstalledSize }} bytes)</span>
@@ -291,6 +145,20 @@
                     <div class="metadata-value" style="font-family: var(--font-mono); font-size: 0.78rem; word-break: break-all;">{{ .Pkg.SHA256 }}</div>
                 </div>
                 {{ end }}
+
+                {{ if .Pkg.Bugs }}
+                <div class="metadata-card">
+                    <div class="metadata-label">Issue Tracker</div>
+                    <div class="metadata-value"><a href="{{ .Pkg.Bugs }}" target="_blank" rel="noopener noreferrer">{{ .Pkg.Bugs }} &#x2197;</a></div>
+                </div>
+                {{ end }}
+
+                {{ if and .Pkg.Details .Pkg.Details.VCS }}
+                <div class="metadata-card">
+                    <div class="metadata-label">VCS / Source</div>
+                    <div class="metadata-value" style="font-family: var(--font-mono); font-size: 0.8rem; word-break: break-all;">{{ .Pkg.Details.VCS }}</div>
+                </div>
+                {{ end }}
             </div>
 
             {{ if or .Pkg.BuildHost (and .Pkg.Details .Pkg.Details.Signature) }}
@@ -317,6 +185,22 @@
                     <div class="metadata-value" style="font-family: var(--font-mono); font-size: 0.82rem;">{{ .Pkg.Details.Signature }}</div>
                 </div>
                 {{ end }}
+            </div>
+            {{ end }}
+
+            {{ if .Pkg.Advisories }}
+            <div class="description-card">
+                <div class="metadata-label" style="margin-bottom: 0.6rem;">Security &amp; Errata Advisories</div>
+                <div class="advisory-list">
+                    {{ range .Pkg.Advisories }}
+                    <div class="advisory-item">
+                        <span class="advisory-badge advisory-{{ .Type | lower }}">{{ .ID }}</span>
+                        {{ if .Severity }}<span class="arch-badge">{{ .Severity }}</span>{{ end }}
+                        <span>{{ .Title }}</span>
+                        {{ range .CVEs }}<span class="cve-badge">{{ . }}</span>{{ end }}
+                    </div>
+                    {{ end }}
+                </div>
             </div>
             {{ end }}
 
@@ -362,6 +246,16 @@
                             {{ if .Pkg.Dependencies.Suggests }}
                             <button type="button" class="dep-tab-btn" data-tab="suggests">
                                 Suggests ({{ len .Pkg.Dependencies.Suggests }})
+                            </button>
+                            {{ end }}
+                            {{ if .Pkg.Dependencies.Enhances }}
+                            <button type="button" class="dep-tab-btn" data-tab="enhances">
+                                Enhances ({{ len .Pkg.Dependencies.Enhances }})
+                            </button>
+                            {{ end }}
+                            {{ if .Pkg.Dependencies.Supplements }}
+                            <button type="button" class="dep-tab-btn" data-tab="supplements">
+                                Supplements ({{ len .Pkg.Dependencies.Supplements }})
                             </button>
                             {{ end }}
                             {{ if .Pkg.Dependencies.Provides }}
@@ -433,6 +327,36 @@
                     </div>
                     {{ end }}
 
+                    {{ if .Pkg.Dependencies.Enhances }}
+                    <div class="dep-tab-panel" id="depPanel-enhances">
+                        <div class="dep-grid">
+                            {{ range .Pkg.Dependencies.Enhances }}
+                            <div class="dep-item">
+                                <span class="dep-name">{{ .Name }}</span>
+                                {{ with .FormattedRelation }}
+                                <span class="dep-relation">{{ . }}</span>
+                                {{ end }}
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                    {{ end }}
+
+                    {{ if .Pkg.Dependencies.Supplements }}
+                    <div class="dep-tab-panel" id="depPanel-supplements">
+                        <div class="dep-grid">
+                            {{ range .Pkg.Dependencies.Supplements }}
+                            <div class="dep-item">
+                                <span class="dep-name">{{ .Name }}</span>
+                                {{ with .FormattedRelation }}
+                                <span class="dep-relation">{{ . }}</span>
+                                {{ end }}
+                            </div>
+                            {{ end }}
+                        </div>
+                    </div>
+                    {{ end }}
+
                     {{ if .Pkg.Dependencies.Provides }}
                     <div class="dep-tab-panel {{ if and (not .Pkg.Dependencies.Requires) (not .Pkg.Dependencies.Recommends) }}active{{ end }}" id="depPanel-provides">
                         <div class="dep-grid">
@@ -487,6 +411,7 @@
                 <summary class="section-header" style="cursor: pointer;">
                     <h2 class="section-title">
                         <span>Package Scriptlets</span>
+                        {{ if .Pkg.Details.HasTriggers }}<span class="flag-badge">triggers</span>{{ end }}
                     </h2>
                     <span class="stat-label">[Click to toggle]</span>
                 </summary>
@@ -553,7 +478,11 @@
                                 <td><code>{{ .Mode }}</code></td>
                                 <td style="color: var(--text-subtle); font-size: 0.85rem;">{{ .User }}:{{ .Group }}</td>
                                 <td style="text-align: right; font-family: var(--font-mono); font-size: 0.85rem;">{{ .Size | humanSize }}</td>
-                                <td><span class="file-path">{{ .Name }}</span></td>
+                                <td>
+                                    <span class="file-path">{{ .Name }}</span>
+                                    {{ if .LinkTarget }}<span class="symlink-target">&rarr; {{ .LinkTarget }}</span>{{ end }}
+                                    {{ range .Flags }}<span class="flag-badge">{{ . }}</span>{{ end }}
+                                </td>
                             </tr>
                             {{ end }}
                         </tbody>
@@ -586,7 +515,26 @@
                         </div>
                     </div>
 
-                    {{ if .Changelog }}
+                    {{ if .Changelogs }}
+                    <details class="changelog-details">
+                        <summary>
+                            <span>Changelog:</span>
+                            {{ with (index .Changelogs 0) }}
+                            <span class="changelog-author">{{ .Author }}</span>
+                            <span class="changelog-date">({{ .Date | ymd }})</span>
+                            {{ end }}
+                            {{ if gt (len .Changelogs) 1 }}<span class="count-badge">{{ len .Changelogs }} entries</span>{{ end }}
+                        </summary>
+                        <div class="changelog-body">
+                            {{ range .Changelogs }}
+                            <div style="margin-bottom: 0.75rem;">
+                                <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.25rem;"><strong>{{ .Author }}</strong> ({{ .Date | ymd }})</div>
+                                <pre>{{ .Changelog }}</pre>
+                            </div>
+                            {{ end }}
+                        </div>
+                    </details>
+                    {{ else if .Changelog }}
                     <details class="changelog-details">
                         <summary>
                             <span>Changelog:</span>
@@ -631,8 +579,8 @@
                 <div class="modal-section">
                     <label class="modal-label">1. Run Verification Command on Linux</label>
                     <div class="cmd-box">
-                        <code id="verifyCmdCode">rpm -vK {{ .Pkg.ArchiveFilename }}</code>
-                        <button type="button" class="cmd-copy-btn" id="copyVerifyCmdBtn" data-copy="rpm -vK {{ .Pkg.ArchiveFilename }}" title="Copy command to clipboard">
+                        <code id="verifyCmdCode">rpm -vK {{ .Pkg.ArchiveFilename | shellQuote }}</code>
+                        <button type="button" class="cmd-copy-btn" id="copyVerifyCmdBtn" data-copy="rpm -vK {{ .Pkg.ArchiveFilename | shellQuote }}" title="Copy command to clipboard">
                             <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                                 <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                                 <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>

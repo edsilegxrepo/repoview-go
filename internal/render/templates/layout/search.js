@@ -28,10 +28,24 @@
 (() => {
 	// Configuration
 	const SEARCH_FILE = "search.json";
+
+	function stripControlChars(val) {
+		const s = String(val || "");
+		let out = "";
+		for (let i = 0; i < s.length; i++) {
+			const code = s.charCodeAt(i);
+			if (code >= 32 && code !== 127) {
+				out += s[i];
+			}
+		}
+		return out;
+	}
 	const SEARCH_LIMIT = 50;
 
 	// State
 	let searchData = null;
+	let searchColMap = { n: 0, v: 1, a: 2, s: 3, f: 4, g: 5, l: 6, p: 7, t: 8 };
+	let activeResultIndex = -1;
 	let isLoading = false;
 
 	// =========================================================================
@@ -101,9 +115,42 @@
 		if (!searchInput || !resultsContainer) return;
 
 		searchInput.addEventListener("focus", loadIndex);
-		searchInput.addEventListener("input", (e) =>
-			handleInput(e.target.value, resultsContainer),
-		);
+		searchInput.addEventListener("input", (e) => {
+			activeResultIndex = -1;
+			handleInput(e.target.value, resultsContainer);
+		});
+
+		searchInput.addEventListener("keydown", (e) => {
+			const items = resultsContainer.querySelectorAll(".search-result-item");
+			if (!items.length || resultsContainer.style.display === "none") return;
+			if (e.key === "ArrowDown") {
+				e.preventDefault();
+				activeResultIndex = (activeResultIndex + 1) % items.length;
+				updateActiveResult(items);
+			} else if (e.key === "ArrowUp") {
+				e.preventDefault();
+				activeResultIndex =
+					activeResultIndex <= 0 ? items.length - 1 : activeResultIndex - 1;
+				updateActiveResult(items);
+			} else if (e.key === "Enter" && activeResultIndex >= 0) {
+				e.preventDefault();
+				const href = items[activeResultIndex].getAttribute("href");
+				if (href && href !== "#") {
+					window.location.href = href;
+				}
+			}
+		});
+
+		function updateActiveResult(items) {
+			items.forEach((el, idx) => {
+				if (idx === activeResultIndex) {
+					el.classList.add("active");
+					el.scrollIntoView({ block: "nearest" });
+				} else {
+					el.classList.remove("active");
+				}
+			});
+		}
 
 		// Hide results when clicking outside
 		document.addEventListener("click", (e) => {
@@ -143,6 +190,20 @@
 				return;
 			}
 			searchData = json.data;
+			searchColMap = {
+				n: -1,
+				v: -1,
+				a: -1,
+				s: -1,
+				f: -1,
+				g: -1,
+				l: -1,
+				p: -1,
+				t: -1,
+			};
+			json.schema.forEach((col, idx) => {
+				searchColMap[col] = idx;
+			});
 		} catch (error) {
 			console.error("Failed to load search index:", error);
 		} finally {
@@ -181,19 +242,49 @@
 		});
 	}
 
-	function search(query) {
-		const results = [];
+	function parseQueryQualifiers(rawQuery) {
+		const filters = {
+			arch: "",
+			group: "",
+			license: "",
+			provides: "",
+			tag: "",
+			cve: "",
+		};
+		const freeTokens = [];
+		const parts = String(rawQuery || "")
+			.trim()
+			.split(/\s+/);
+		for (const part of parts) {
+			if (!part) continue;
+			const colon = part.indexOf(":");
+			if (colon > 0 && colon < part.length - 1) {
+				const key = part.slice(0, colon).toLowerCase();
+				const val = part.slice(colon + 1).toLowerCase();
+				if (Object.hasOwn(filters, key)) {
+					filters[key] = val;
+					continue;
+				}
+			}
+			freeTokens.push(part);
+		}
+		return { filters, text: freeTokens.join(" ") };
+	}
+
+	function search(rawQuery) {
+		const { filters, text } = parseQueryQualifiers(rawQuery);
+		const hasQualifiers = Object.values(filters).some((v) => v !== "");
 		let regex = null;
 		let isRegex = false;
 
 		// Support /pattern/ regex search with ReDoS protection (max 50 chars, no nested quantifiers)
 		if (
-			query.length > 2 &&
-			query.startsWith("/") &&
-			query.endsWith("/") &&
-			query.length <= 52
+			text.length > 2 &&
+			text.startsWith("/") &&
+			text.endsWith("/") &&
+			text.length <= 52
 		) {
-			const pattern = query.slice(1, -1);
+			const pattern = text.slice(1, -1);
 			// Block catastrophic backtracking patterns like (a+)+ or (a*)*
 			const isUnsafeRegex =
 				/(\+|\*|\{\d+,?\d*\})\s*(\+|\*|\{\d+,?\d*\})|\([^)]*(\+|\*)[^)]*\)\s*(\+|\*)/.test(
@@ -210,31 +301,75 @@
 			}
 		}
 
-		if (!isRegex) {
-			query = query.toLowerCase();
-		}
+		const queryLower = isRegex ? "" : text.toLowerCase();
+		const scored = [];
+		const col = (row, key) => {
+			const i = searchColMap[key];
+			return i >= 0 && i < row.length ? row[i] || "" : "";
+		};
 
 		for (let i = 0; i < searchData.length; i++) {
 			const row = searchData[i];
-			const name = row[0];
-			const summary = row[3] || "";
+			const name = col(row, "n");
+			const arch = col(row, "a");
+			const summary = col(row, "s");
+			const group = col(row, "g");
+			const license = col(row, "l");
+			const provides = col(row, "p");
+			const tags = col(row, "t");
 
-			let match = false;
-			if (isRegex) {
-				match = regex.test(name) || regex.test(summary);
-			} else {
-				match =
-					name.toLowerCase().includes(query) ||
-					summary.toLowerCase().includes(query);
+			if (filters.arch && arch.toLowerCase() !== filters.arch) continue;
+			if (filters.group && !group.toLowerCase().includes(filters.group))
+				continue;
+			if (filters.license && !license.toLowerCase().includes(filters.license))
+				continue;
+			if (
+				filters.provides &&
+				!provides.toLowerCase().includes(filters.provides)
+			)
+				continue;
+			if (filters.tag && !tags.toLowerCase().includes(filters.tag)) continue;
+			if (filters.cve && !tags.toLowerCase().includes(filters.cve)) continue;
+
+			let score = hasQualifiers && text === "" ? 10 : 0;
+			if (text !== "") {
+				if (isRegex) {
+					if (regex.test(name)) score = 60;
+					else if (regex.test(summary)) score = 30;
+					else if (regex.test(provides) || regex.test(tags)) score = 15;
+				} else {
+					const nameLower = name.toLowerCase();
+					const summaryLower = summary.toLowerCase();
+					const providesLower = provides.toLowerCase();
+					const tagsLower = tags.toLowerCase();
+					const groupLower = group.toLowerCase();
+					const licenseLower = license.toLowerCase();
+
+					if (nameLower === queryLower) score = 100;
+					else if (nameLower.startsWith(queryLower)) score = 80;
+					else if (nameLower.includes(queryLower)) score = 60;
+					else if (summaryLower.includes(queryLower)) score = 40;
+					else if (providesLower.includes(queryLower)) score = 25;
+					else if (
+						groupLower.includes(queryLower) ||
+						licenseLower.includes(queryLower) ||
+						tagsLower.includes(queryLower)
+					) {
+						score = 15;
+					}
+				}
 			}
 
-			if (match) {
-				results.push(row);
+			if (score > 0) {
+				scored.push({ row, score, name });
 			}
-
-			if (results.length >= SEARCH_LIMIT) break;
 		}
-		return results;
+
+		scored.sort((a, b) => {
+			if (b.score !== a.score) return b.score - a.score;
+			return a.name.localeCompare(b.name);
+		});
+		return scored.slice(0, SEARCH_LIMIT).map((item) => item.row);
 	}
 
 	function renderResults(results, container) {
@@ -245,15 +380,31 @@
 			return;
 		}
 
+		const col = (row, key) => {
+			const i = searchColMap[key];
+			return i >= 0 && i < row.length ? row[i] || "" : "";
+		};
+
 		const html = results
 			.map((row) => {
-				const [name, evr, arch, summary, filename] = row;
-				// Sanitize filename to only allow alphanumeric, dot, underscore, dash
-				const safeHref = encodeURI(filename || "").replace(/["'<>]/g, "");
+				const name = col(row, "n");
+				const evr = col(row, "v");
+				const arch = col(row, "a");
+				const summary = col(row, "s");
+				const filename = col(row, "f");
+				const group = col(row, "g");
+				// Enforce strict relative HTML filename allowlist (no schemes, slashes, or traversal)
+				const cleanFile = typeof filename === "string" ? filename.trim() : "";
+				const safeHref =
+					/^[A-Za-z0-9][A-Za-z0-9._+,@~-]*\.html$/.test(cleanFile) &&
+					!cleanFile.includes("..")
+						? encodeURIComponent(cleanFile)
+						: "#";
+				const groupMeta = group ? ` &bull; ${escapeHTML(group)}` : "";
 				return `
                 <a href="${safeHref}" class="search-result-item">
                     <div class="sr-name">${escapeHTML(name)}</div>
-                    <div class="sr-meta">${escapeHTML(evr)}.${escapeHTML(arch)}</div>
+                    <div class="sr-meta">${escapeHTML(evr)}.${escapeHTML(arch)}${groupMeta}</div>
                     <div class="sr-summary">${escapeHTML(summary || "")}</div>
                 </a>
             `;
@@ -440,16 +591,26 @@
 		const copyBtn = document.getElementById("btnCopyInstallCmd");
 		if (!tabs.length || !cmdDisplay || !copyBtn) return;
 
+		function shellQuote(val) {
+			const clean = stripControlChars(val).trim();
+			if (clean === "") return "''";
+			if (/^[A-Za-z0-9][A-Za-z0-9._:=+/@-]*$/.test(clean)) {
+				return clean;
+			}
+			return `'${clean.replace(/'/g, "'\\''")}'`;
+		}
+
 		function getCmd(tool, pkgName, href) {
+			const safePkg = shellQuote(pkgName);
 			if (tool === "apt") {
-				return `sudo apt install ${pkgName}`;
+				return `sudo apt install ${safePkg}`;
 			} else if (tool === "dpkg") {
 				const filename = href.split("/").pop() || `${pkgName}.deb`;
-				return `sudo dpkg -i ${filename}`;
+				return `sudo dpkg -i ${shellQuote(filename)}`;
 			} else if (tool === "dnf") {
-				return `sudo dnf install ${pkgName}`;
+				return `sudo dnf install ${safePkg}`;
 			} else if (tool === "yum") {
-				return `sudo yum install ${pkgName}`;
+				return `sudo yum install ${safePkg}`;
 			} else if (tool === "wget") {
 				let fullUrl = href;
 				try {
@@ -457,7 +618,7 @@
 						fullUrl = new URL(href, window.location.href).href;
 					}
 				} catch {}
-				return `wget ${fullUrl}`;
+				return `wget ${shellQuote(fullUrl)}`;
 			} else if (tool === "curl") {
 				let fullUrl = href;
 				try {
@@ -465,9 +626,9 @@
 						fullUrl = new URL(href, window.location.href).href;
 					}
 				} catch {}
-				return `curl -O ${fullUrl}`;
+				return `curl -O ${shellQuote(fullUrl)}`;
 			}
-			return `sudo dnf install ${pkgName}`;
+			return `sudo dnf install ${safePkg}`;
 		}
 
 		tabs.forEach((tab) => {
@@ -608,7 +769,7 @@
 			configuredBaseURL !== "" && !configuredBaseURL.startsWith("$");
 
 		if (!isBaseURLConfigured && window.location.protocol.startsWith("http")) {
-			const detectedBaseURL = getDetectedBaseURL();
+			const detectedBaseURL = stripControlChars(getDetectedBaseURL());
 			if (snippetCode) {
 				snippetCode.textContent = snippetCode.textContent
 					.replace(/^baseurl=.*$/m, `baseurl=${detectedBaseURL}`)

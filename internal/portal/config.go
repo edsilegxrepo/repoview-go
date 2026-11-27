@@ -2,12 +2,19 @@ package portal
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
+
+	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/taxonomy"
 )
+
+const maxPortalConfigBytes = 2 * 1024 * 1024 // 2 MiB ceiling for portal.yaml
 
 // PortalConfig represents the schema of the optional portal.yaml configuration file.
 type PortalConfig struct {
@@ -19,7 +26,10 @@ type PortalConfig struct {
 	PortalHome    string                        `yaml:"portal_home,omitempty"`
 	InPlace       bool                          `yaml:"in_place,omitempty"`
 	AutoDiscovery AutoDiscoveryConfig           `yaml:"auto_discovery"`
+	Taxonomy      *taxonomy.Rules               `yaml:"taxonomy,omitempty"`
 	Overrides     map[string]RepoOverrideConfig `yaml:"overrides,omitempty"`
+	Repositories  []LocalRepoConfig             `yaml:"repositories,omitempty"`
+	LocalRepos    []LocalRepoConfig             `yaml:"local_repos,omitempty"`
 	Pinned        []string                      `yaml:"pinned,omitempty"`
 	ExternalRepos []*DiscoveredRepo             `yaml:"external_repos,omitempty"`
 }
@@ -32,11 +42,77 @@ type AutoDiscoveryConfig struct {
 	Exclude         []string `yaml:"exclude,omitempty"`
 }
 
-// RepoOverrideConfig defines custom display overrides for specific repository paths.
+// RepoOverrideConfig defines custom display and build overrides for specific repository paths.
 type RepoOverrideConfig struct {
-	Title string `yaml:"title,omitempty"`
-	Icon  string `yaml:"icon,omitempty"`
-	Badge string `yaml:"badge,omitempty"`
+	Title         string   `yaml:"title,omitempty"`
+	Description   string   `yaml:"description,omitempty"`
+	Icon          string   `yaml:"icon,omitempty"`
+	Badge         string   `yaml:"badge,omitempty"`
+	Distro        string   `yaml:"distro,omitempty"`
+	Channel       string   `yaml:"channel,omitempty"`
+	Suite         string   `yaml:"suite,omitempty"`
+	Arch          string   `yaml:"arch,omitempty"`
+	Format        string   `yaml:"format,omitempty"`
+	BaseURL       string   `yaml:"base_url,omitempty"`
+	GPGKey        string   `yaml:"gpgkey,omitempty"`
+	GPGCheck      *bool    `yaml:"gpgcheck,omitempty"`
+	IgnorePackage []string `yaml:"ignore_package,omitempty"`
+	ExcludeArch   []string `yaml:"exclude_arch,omitempty"`
+	Comps         string   `yaml:"comps,omitempty"`
+	Hidden        bool     `yaml:"hidden,omitempty"`
+}
+
+// LocalRepoConfig declares an explicit local repository entry when auto-discovery cannot infer layout
+// or when custom output/suite/arch mappings are desired.
+type LocalRepoConfig struct {
+	Path          string   `yaml:"path"`
+	RelPath       string   `yaml:"rel_path,omitempty"`
+	TargetURL     string   `yaml:"target_url,omitempty"`
+	OutputDir     string   `yaml:"output_dir,omitempty"`
+	Title         string   `yaml:"title,omitempty"`
+	Description   string   `yaml:"description,omitempty"`
+	Distro        string   `yaml:"distro,omitempty"`
+	Channel       string   `yaml:"channel,omitempty"`
+	Suite         string   `yaml:"suite,omitempty"`
+	Components    []string `yaml:"components,omitempty"`
+	Arch          string   `yaml:"arch,omitempty"`
+	Format        string   `yaml:"format,omitempty"`
+	BaseURL       string   `yaml:"base_url,omitempty"`
+	GPGKey        string   `yaml:"gpgkey,omitempty"`
+	Icon          string   `yaml:"icon,omitempty"`
+	Badge         string   `yaml:"badge,omitempty"`
+	IgnorePackage []string `yaml:"ignore_package,omitempty"`
+	ExcludeArch   []string `yaml:"exclude_arch,omitempty"`
+	Comps         string   `yaml:"comps,omitempty"`
+	Hidden        bool     `yaml:"hidden,omitempty"`
+}
+
+// DeclaredRepos returns the combined list of Repositories and LocalRepos.
+func (c *PortalConfig) DeclaredRepos() []LocalRepoConfig {
+	out := make([]LocalRepoConfig, 0, len(c.Repositories)+len(c.LocalRepos))
+	out = append(out, c.Repositories...)
+	out = append(out, c.LocalRepos...)
+	return out
+}
+
+// LookupOverride looks up normalized slash override entries by candidate relative or full paths.
+func (c *PortalConfig) LookupOverride(keys ...string) (RepoOverrideConfig, bool) {
+	if c == nil || len(c.Overrides) == 0 {
+		return RepoOverrideConfig{}, false
+	}
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		norm := filepath.ToSlash(k)
+		if ov, ok := c.Overrides[norm]; ok {
+			return ov, true
+		}
+		if ov, ok := c.Overrides[k]; ok {
+			return ov, true
+		}
+	}
+	return RepoOverrideConfig{}, false
 }
 
 // DefaultPortalConfig returns a PortalConfig populated with production defaults.
@@ -62,14 +138,23 @@ func DefaultPortalConfig() *PortalConfig {
 // LoadConfig reads and validates portal.yaml from path.
 func LoadConfig(path string) (*PortalConfig, error) {
 	// #nosec G304 -- loading validated configuration file path
-	data, err := os.ReadFile(filepath.Clean(path))
+	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
-		return nil, fmt.Errorf("failed to read configuration file: %w", err)
+		return nil, fmt.Errorf("%w: failed to read configuration file: %w", models.ErrConfig, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxPortalConfigBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: failed to read configuration file: %w", models.ErrConfig, err)
+	}
+	if int64(len(data)) > maxPortalConfigBytes {
+		return nil, fmt.Errorf("%w: configuration file %s exceeds maximum allowed size (%d bytes)", models.ErrConfig, path, maxPortalConfigBytes)
 	}
 
 	cfg := DefaultPortalConfig()
 	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML configuration: %w", err)
+		return nil, fmt.Errorf("%w: failed to parse YAML configuration: %w", models.ErrConfig, err)
 	}
 
 	if cfg.AutoDiscovery.MaxDepth <= 0 {
@@ -81,6 +166,14 @@ func LoadConfig(path string) (*PortalConfig, error) {
 	}
 	if cfg.BaseURL == "" && cfg.PortalURL != "" {
 		cfg.BaseURL = cfg.PortalURL
+	}
+
+	if len(cfg.Overrides) > 0 {
+		normalized := make(map[string]RepoOverrideConfig, len(cfg.Overrides))
+		for k, v := range cfg.Overrides {
+			normalized[strings.ReplaceAll(filepath.ToSlash(k), "\\", "/")] = v
+		}
+		cfg.Overrides = normalized
 	}
 
 	return cfg, nil
@@ -120,7 +213,9 @@ func DumpConfig(outputPath string, catalog *Catalog) error {
 	}
 
 	header := []byte("# portal.yaml - RepoView Multi-Repository Portal Configuration\n\n")
-	content := append(header, data...)
+	content := make([]byte, 0, len(header)+len(data))
+	content = append(content, header...)
+	content = append(content, data...)
 
 	cleanPath := filepath.Clean(outputPath)
 	// #nosec G306 -- writing generated configuration file with standard web readability (0644)
@@ -147,17 +242,97 @@ func ApplyConfig(catalog *Catalog, cfg *PortalConfig) {
 		catalog.BaseURL = cfg.BaseURL
 	}
 
-	// 1. Apply overrides and default icons to discovered repos
+	// 1. Apply overrides and default icons to discovered repos, filtering out Hidden entries
+	visible := make([]*DiscoveredRepo, 0, len(catalog.Repos))
 	for _, repo := range catalog.Repos {
-		if ov, ok := cfg.Overrides[repo.RelPath]; ok {
-			applyOverride(repo, ov)
-		} else if ov, ok := cfg.Overrides[repo.Path]; ok {
+		if ov, ok := cfg.LookupOverride(repo.RelPath, repo.Path); ok {
 			applyOverride(repo, ov)
 		}
-
+		if repo.Hidden {
+			continue
+		}
 		if repo.Icon == "" {
-			repo.Icon = MatchDistroIcon(repo.Distro)
+			repo.Icon = taxonomy.MatchDistroIconWithRules(repo.Distro, cfg.Taxonomy)
 		}
+		visible = append(visible, repo)
+	}
+	catalog.Repos = visible
+
+	// 1b. Merge explicitly declared local repositories (DISC-02)
+	existingRel := make(map[string]bool, len(catalog.Repos))
+	existingPath := make(map[string]bool, len(catalog.Repos))
+	for _, r := range catalog.Repos {
+		if r.RelPath != "" {
+			existingRel[filepath.ToSlash(r.RelPath)] = true
+		}
+		if r.Path != "" {
+			existingPath[filepath.ToSlash(r.Path)] = true
+		}
+	}
+	for _, lr := range cfg.DeclaredRepos() {
+		if lr.Hidden {
+			continue
+		}
+		rel := filepath.ToSlash(lr.RelPath)
+		if rel == "" {
+			rel = filepath.ToSlash(lr.Path)
+		}
+		normPath := filepath.ToSlash(lr.Path)
+		if existingRel[rel] || (normPath != "" && existingPath[normPath]) {
+			continue
+		}
+		fmtVal := models.RepoFormat(strings.ToLower(strings.TrimSpace(lr.Format)))
+		if fmtVal == "" {
+			fmtVal = models.FormatRPM
+		}
+		distro := lr.Distro
+		channel := lr.Channel
+		if distro == "" || channel == "" {
+			infD, infC := taxonomy.InferDistroAndChannelWithRules(rel, cfg.Taxonomy)
+			if distro == "" {
+				distro = infD
+			}
+			if channel == "" {
+				channel = infC
+			}
+		}
+		arch := lr.Arch
+		if arch == "" {
+			arch = taxonomy.DetectArchFromPath(rel)
+		}
+		title := lr.Title
+		if title == "" {
+			title = fmt.Sprintf("%s %s", distro, channel)
+		}
+		targetURL := lr.TargetURL
+		if targetURL == "" {
+			targetURL = filepath.ToSlash(filepath.Join(rel, "repoview", "index.html"))
+		}
+		icon := lr.Icon
+		if icon == "" {
+			icon = taxonomy.MatchDistroIconWithRules(distro, cfg.Taxonomy)
+		}
+		catalog.Repos = append(catalog.Repos, &DiscoveredRepo{
+			Path:          lr.Path,
+			RelPath:       rel,
+			TargetURL:     targetURL,
+			Title:         title,
+			Description:   lr.Description,
+			Format:        fmtVal,
+			Distro:        distro,
+			Channel:       channel,
+			Suite:         lr.Suite,
+			Components:    lr.Components,
+			Arch:          arch,
+			Badge:         lr.Badge,
+			Icon:          icon,
+			BaseURL:       lr.BaseURL,
+			GPGKey:        lr.GPGKey,
+			IgnorePackage: lr.IgnorePackage,
+			ExcludeArch:   lr.ExcludeArch,
+			Comps:         lr.Comps,
+			IsRendered:    true,
+		})
 	}
 
 	// 2. Append external repositories
@@ -200,7 +375,10 @@ func ApplyConfig(catalog *Catalog, cfg *PortalConfig) {
 			return orderI < orderJ
 		})
 
-		catalog.Repos = append(pinnedRepos, unpinnedRepos...)
+		reordered := make([]*DiscoveredRepo, 0, len(pinnedRepos)+len(unpinnedRepos))
+		reordered = append(reordered, pinnedRepos...)
+		reordered = append(reordered, unpinnedRepos...)
+		catalog.Repos = reordered
 	}
 
 	// 4. Recalculate catalog totals and chips
@@ -252,11 +430,47 @@ func applyOverride(repo *DiscoveredRepo, ov RepoOverrideConfig) {
 	if ov.Title != "" {
 		repo.Title = ov.Title
 	}
+	if ov.Description != "" {
+		repo.Description = ov.Description
+	}
 	if ov.Icon != "" {
 		repo.Icon = ov.Icon
 	}
 	if ov.Badge != "" {
 		repo.Badge = ov.Badge
+	}
+	if ov.Distro != "" {
+		repo.Distro = ov.Distro
+	}
+	if ov.Channel != "" {
+		repo.Channel = ov.Channel
+	}
+	if ov.Suite != "" {
+		repo.Suite = ov.Suite
+	}
+	if ov.Arch != "" {
+		repo.Arch = ov.Arch
+	}
+	if ov.Format != "" {
+		repo.Format = models.RepoFormat(strings.ToLower(strings.TrimSpace(ov.Format)))
+	}
+	if ov.BaseURL != "" {
+		repo.BaseURL = ov.BaseURL
+	}
+	if ov.GPGKey != "" {
+		repo.GPGKey = ov.GPGKey
+	}
+	if len(ov.IgnorePackage) > 0 {
+		repo.IgnorePackage = ov.IgnorePackage
+	}
+	if len(ov.ExcludeArch) > 0 {
+		repo.ExcludeArch = ov.ExcludeArch
+	}
+	if ov.Comps != "" {
+		repo.Comps = ov.Comps
+	}
+	if ov.Hidden {
+		repo.Hidden = true
 	}
 }
 

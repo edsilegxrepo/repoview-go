@@ -170,3 +170,21 @@ func TestSortPackagesByEVR_Debian(t *testing.T) {
 		}
 	}
 }
+
+func TestSortPackagesByEVR_TwoElementFastPath(t *testing.T) {
+	pLow := &models.Package{Name: "a", Version: "1.0", Release: "1", Arch: "x86_64"}
+	pHigh := &models.Package{Name: "a", Version: "2.0", Release: "1", Arch: "x86_64"}
+	pkgs := []*models.Package{pLow, pHigh}
+	SortPackagesByEVR(pkgs)
+	if pkgs[0] != pHigh || pkgs[1] != pLow {
+		t.Errorf("expected two-element fast path to place 2.0 before 1.0")
+	}
+
+	// Tie on EVR -> ascending Arch
+	pArm := &models.Package{Name: "a", Version: "2.0", Release: "1", Arch: "aarch64"}
+	pkgsTie := []*models.Package{pHigh, pArm}
+	SortPackagesByEVR(pkgsTie)
+	if pkgsTie[0] != pArm || pkgsTie[1] != pHigh {
+		t.Errorf("expected two-element tie to place aarch64 before x86_64")
+	}
+}

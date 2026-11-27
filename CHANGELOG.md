@@ -5,6 +5,32 @@ All notable changes to the `repoview-go` project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0] - 2026-11-26
+
+### Security Hardening, Rich Metadata, Declarative Workflows & Architecture Refactoring
+
+#### Security & Data Safety
+- **Path Containment & Archive Integrity**: Added `util.ResolveContainedPath` / `util.ResolveRealPath` symlink-safe containment across RPM/DEB payloads and `repomd.xml` entries, SHA-256 verification for metadata and `.deb` packages, and `validateOutputDirSafety` blocking protected `repodata/` and `dists/` directories.
+- **XSS, XXE & Bomb Protection**: Enforced `safeURL` validation, JS `shellQuote` and control-character sanitization, strict XML decoding with 4 GiB decompression ceilings, and atomic temp-write + `fsync` + rename persistence via `util.AtomicWriteFile`.
+- **Cross-Platform Permissions**: Moved umask enforcement exclusively to process startup, restricted internal `state.json` writes to `0600`, and normalized case-insensitive filename collision handling.
+
+#### Workflow, Declarative Configuration & Repository Discovery
+- **Declarative Config (`repoview.yaml` & Expanded `portal.yaml`)**: Added per-repository `repoview.yaml` config support and extended `portal.yaml` with `repositories`, per-repo overrides (`distro`, `channel`, `arch`, `suite`, `base_url`, `gpgkey`, `ignore_package`, `exclude_arch`, `hidden`), and custom taxonomy `path_patterns` / `distro_aliases`.
+- **Incremental Fingerprinting & Single-Pass Portal**: Added repository-level fingerprint short-circuiting (`__repoview_fingerprint__`) in `state.json` and single-pass `repoview.json` descriptor updates in `repoview portal`, eliminating redundant rescans.
+- **CLI & Pluggable Output**: Added `--suite`, `--arch`, `--gpgkey`, and `--workers` flags, consistent `Packages.bz2`/`.zst` discovery, `primary.xml`/`other.xml` fallback when SQLite DBs are absent, `OutputSink` (`AtomicLocalSink`), and `0`–`8` granular exit codes.
+
+#### Rich RPM/DEB Metadata & Client Search
+- **Extended Package Metadata**: Added RPM `pkgId`, `repomd.Revision`, weak dependencies (`Recommends`/`Suggests`/`Enhances`/`Supplements`), multi-entry changelogs, `BUGURL`/`VCS`/file flags, and `updateinfo.xml` CVE advisories; added DEB `Release`/`InRelease` parsing, `Priority`, `MultiArch`, `Tags`, `BuiltUsing`, `Bugs`, `Origin`, `conffiles`, and DEP-5 `copyright` license extraction.
+- **Enhanced Search Engine**: Expanded `search.json` schema with group/license/provides/tags/CVE tokens, adding relevance ranking, structured query qualifiers (`arch:`, `group:`, `license:`, `provides:`, `tag:`, `cve:`), and keyboard navigation in the search UI.
+
+#### Architecture, Modularity & Performance
+- **Shared Core & Decoupling**: Extracted `internal/taxonomy`, `internal/util` (`AtomicWriteFile`, `ForEachConcurrent`, `DecompressFile`), `repo.Open` / `OpenWithOptions`, minimal `RepoReader` capability interfaces, and shared HTML template partials (`_head.html`, `_sidebar.html`, `_topbar.html`).
+- **Concurrency, SQLite & Race Safety**: Added SQLite read-only URI mode with bounded batch queries (`chunk = 500`) and single-pass `GROUP_CONCAT` changelogs, mutex-protected concurrent logging (`logMu` / `syncWriter`), and thread-safe portal scan warnings.
+
+#### Tooling, Dependencies & Test Coverage
+- **Hygiene & Dependencies**: Migrated `gopkg.in/yaml.v3` to `go.yaml.in/yaml/v3`, retained `go-sqlite3` with CGo aligned in `build.json`, updated `biome.json` (`2.6.9`), removed dead helpers/lint smells, and aligned `README.md`, `ARCHITECTURE.md`, and `TESTING.md`.
+- **Cross-Platform Verification**: Expanded tests across all 11 Go packages (including synthetic RPM binary fixtures and the full `0`–`8` exit-code matrix), exceeding 80% statement coverage in every package with clean `-race`, integration, `govulncheck`, `gosec`, `golangci-lint`, `staticcheck`, and `biome` passes on Windows and WSL Linux.
+
 ## [v0.3.0] - 2026-09-18
 
 ### Multi-Repository Catalog Portal, Taxonomy Inference & High-Performance Concurrency

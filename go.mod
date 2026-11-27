@@ -11,7 +11,7 @@ require (
 require (
 	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/sassoftware/go-rpmutils v0.4.0
-	gopkg.in/yaml.v3 v3.0.1
+	go.yaml.in/yaml/v3 v3.0.6
 	pault.ag/go/debian v0.21.4
 )
 

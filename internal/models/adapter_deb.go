@@ -37,7 +37,20 @@ func PackageFromBinaryIndex(idx control.BinaryIndex) *Package {
 		RpmGroup:      section,
 		URL:           idx.Homepage,
 		SHA256:        idx.SHA256,
+		MD5sum:        idx.MD5sum,
+		SHA1:          idx.SHA1,
 		SourcePackage: idx.SourcePackage(),
+		Priority:      strings.TrimSpace(idx.Priority),
+		MultiArch:     strings.TrimSpace(idx.MultiArch),
+		Essential:     strings.EqualFold(strings.TrimSpace(idx.Values["Essential"]), "yes"),
+		Bugs:          strings.TrimSpace(idx.Values["Bugs"]),
+		Origin:        strings.TrimSpace(idx.Values["Origin"]),
+		BuiltUsing:    strings.TrimSpace(idx.Values["Built-Using"]),
+	}
+	for _, t := range idx.Tags {
+		if trimmed := strings.TrimSpace(t); trimmed != "" {
+			pkg.Tags = append(pkg.Tags, trimmed)
+		}
 	}
 
 	// First line of Description is summary; remaining lines form full description
@@ -49,15 +62,12 @@ func PackageFromBinaryIndex(idx control.BinaryIndex) *Package {
 		}
 	}
 
-	// Map dependencies directly from parsed dependency.Dependency fields
-	recommendsDep := parseOptionalDependency(idx.Values["Recommends"])
-	providesDep := parseOptionalDependency(idx.Values["Provides"])
-
 	pkg.Dependencies = &PackageDependencies{
 		Requires:   mapDebianDependencies(idx.GetPreDepends(), true),
-		Provides:   mapDebianDependencies(providesDep, false),
-		Recommends: mapDebianDependencies(recommendsDep, false),
+		Provides:   mapDebianDependencies(idx.GetProvides(), false),
+		Recommends: mapDebianDependencies(idx.GetRecommends(), false),
 		Suggests:   mapDebianDependencies(idx.GetSuggests(), false),
+		Enhances:   mapDebianDependencies(idx.GetEnhances(), false),
 		Conflicts:  mapDebianDependencies(idx.GetConflicts(), false),
 		Obsoletes:  mapDebianDependencies(idx.GetReplaces(), false),
 	}
@@ -67,19 +77,6 @@ func PackageFromBinaryIndex(idx control.BinaryIndex) *Package {
 	pkg.Dependencies.Conflicts = append(pkg.Dependencies.Conflicts, mapDebianDependencies(idx.GetBreaks(), false)...)
 
 	return pkg
-}
-
-// parseOptionalDependency safely parses a raw dependency line if present.
-func parseOptionalDependency(val string) dependency.Dependency {
-	val = strings.TrimSpace(val)
-	if val == "" {
-		return dependency.Dependency{}
-	}
-	dep, err := dependency.Parse(val)
-	if err != nil {
-		return dependency.Dependency{}
-	}
-	return *dep
 }
 
 // mapDebianDependencies converts pault.ag/go/debian Dependency objects into DependencyEntry records.

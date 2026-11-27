@@ -383,7 +383,7 @@ sequenceDiagram
 
     rect rgb(255, 250, 240)
         note over Gen, Render: Phase 3: Parallel Rendering & State Caching
-        Gen->>State: NewStateStore(.state.json)
+        Gen->>State: NewStateStore(state.json)
         Gen->>Gen: findParentPortal() -> auto-detect parent portal URL
         Gen->>Render: NewRenderer(templates, assets, portalURL)
         
@@ -599,13 +599,13 @@ All external dependencies have been audited for reliability, active maintenance,
 
 | Module Path | Version | License | Architectural Role |
 | :--- | :---: | :---: | :--- |
-| **`github.com/mattn/go-sqlite3`** | `v1.14.52` | MIT | CGo SQLite3 driver utilized for low-latency querying of `primary.sqlite` and `other.sqlite`. |
-| **`github.com/klauspost/compress`** | `v1.20.0` | BSD-3-Clause | Highly optimized, multi-threaded Zstandard (`zstd`) and accelerated Gzip decompression engine. |
-| **`github.com/ulikunitz/xz`** | `v0.5.16` | BSD-3-Clause | Pure Go XZ decompression library handling `.xz` compressed SQLite databases. |
+| **`github.com/mattn/go-sqlite3`** | `v1.14.53` | MIT | CGo SQLite3 driver utilized for low-latency querying of `primary.sqlite` and `other.sqlite`. |
+| **`github.com/klauspost/compress`** | `v1.20.5` | BSD-3-Clause | Highly optimized, multi-threaded Zstandard (`zstd`) and accelerated Gzip decompression engine. |
+| **`github.com/ulikunitz/xz`** | `v0.5.17` | BSD-3-Clause | Pure Go XZ decompression library handling `.xz` compressed SQLite databases. |
 | **`github.com/knqyf263/go-rpm-version`** | Latest | MIT | Upstream-compliant RPM EVR (Epoch-Version-Release) parsing and comparison engine. |
 | **`github.com/sassoftware/go-rpmutils`** | `v0.4.0` | Apache-2.0 | RPM payload reader for extracting RPM lead, signatures, scriptlets, and file lists directly from `.rpm` files. |
-| **`pault.ag/go/debian`** | `v0.21.0` | MIT | Debian control file, Deb822 index parsing, and Debian EVR version comparison engine. |
-| **`gopkg.in/yaml.v3`** | `v3.0.1` | Apache-2.0 / MIT | YAML configuration parser powering `portal.yaml` parsing, parent discovery, and `--dump-config`. |
+| **`pault.ag/go/debian`** | `v0.21.4` | MIT | Debian control file, Deb822 index parsing, and Debian EVR version comparison engine. |
+| **`go.yaml.in/yaml/v3`** | `v3.0.6` | Apache-2.0 / MIT | YAML configuration parser powering `repoview.yaml`, `portal.yaml` parsing, and `--dump-config`. |
 
 ### Build Tooling & System Dependencies
 
@@ -627,6 +627,7 @@ graph TD
         MODELS["github.com/edsilegxrepo/repoview/internal/models"]
         RENDER["github.com/edsilegxrepo/repoview/internal/render"]
         STATE["github.com/edsilegxrepo/repoview/internal/state"]
+        TAX["github.com/edsilegxrepo/repoview/internal/taxonomy"]
         UTIL["github.com/edsilegxrepo/repoview/internal/util"]
     end
 
@@ -637,15 +638,17 @@ graph TD
         RPM_VER["github.com/knqyf263/go-rpm-version"]
         RPM_UTILS["github.com/sassoftware/go-rpmutils"]
         DEB_MOD["pault.ag/go/debian"]
-        YAML_LIB["gopkg.in/yaml.v3"]
+        YAML_LIB["go.yaml.in/yaml/v3"]
     end
 
     CMD --> APP
     CMD --> PORTAL
     PORTAL --> YAML_LIB
     PORTAL --> MODELS
+    PORTAL --> TAX
     PORTAL --> UTIL
-    PORTAL --> APP
+    APP --> YAML_LIB
+    APP --> TAX
     APP --> REPO
     REPO --> REPO_DEB
     APP --> LOGIC
@@ -760,7 +763,7 @@ RepoView-Go repositories support four primary enterprise authentication patterns
 | **Anonymous Consumer** | Read-Only | Public index, group listings, search metadata (`search.json`), RSS feeds | Reverse proxy allows `GET /`, `GET /*.html`, `GET /search.json` without challenge. |
 | **Licensed / Internal Developer** | Read-Only (Full) | All HTML pages, search indices, and downloadable `.rpm` package binaries | Reverse proxy enforces HTTP Basic or OIDC session cookie; restricts download endpoints. |
 | **Automated CI/CD Worker** | Read-Only (Automated) | DNF repository metadata (`repodata/`) and dependency RPMs | mTLS machine certificate or static API token in `Authorization` header. |
-| **Release Engineer / Publisher** | Write / Execute | CLI binary execution, file generation, `.state.json` management, stale cleanup | Linux filesystem POSIX permissions (`chmod 0750`, dedicated `repoview` system group). |
+| **Release Engineer / Publisher** | Write / Execute | CLI binary execution, file generation, `state.json` management, stale cleanup | Linux filesystem POSIX permissions (`chmod 0750`, dedicated `repoview` system group). |
 | **System Administrator** | Admin / Configuration | Reverse proxy configuration, TLS certificates, cron/systemd service units | OS root / sudo access, infrastructure-as-code management. |
 
 ### Content Security Policy (CSP) & Client-Side Hardening

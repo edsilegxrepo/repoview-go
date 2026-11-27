@@ -10,23 +10,31 @@ import (
 
 // DebRepoLocations encapsulates discovered paths to Debian repository metadata.
 type DebRepoLocations struct {
-	BaseDir       string   // Root repository directory
-	PackagesFile  string   // Primary absolute path to Packages (.gz, .xz, .zst, or uncompressed)
-	PackagesFiles []string // All discovered Packages files for multi-component aggregation
-	ReleaseFile   string   // Absolute path to Release or InRelease (optional in flat repos)
-	Suite         string   // Suite name (e.g., "noble", "stable")
-	Component     string   // Primary component name (e.g., "main", "universe")
-	Components    []string // All discovered components (e.g., ["main", "universe"])
-	Arch          string   // Target architecture (e.g., "amd64", "arm64")
-	IsFlat        bool     // True if flat directory layout without dists/
+	BaseDir       string       // Root repository directory
+	PackagesFile  string       // Primary absolute path to Packages (.gz, .bz2, .xz, .zst, or uncompressed)
+	PackagesFiles []string     // All discovered Packages files for multi-component aggregation
+	ReleaseFile   string       // Absolute path to Release or InRelease (optional in flat repos)
+	ReleaseInfo   *ReleaseInfo // Parsed Release/InRelease metadata (optional)
+	Suite         string       // Suite name (e.g., "noble", "stable")
+	Component     string       // Primary component name (e.g., "main", "universe")
+	Components    []string     // All discovered components (e.g., ["main", "universe"])
+	Arch          string       // Target architecture (e.g., "amd64", "arm64")
+	IsFlat        bool         // True if flat directory layout without dists/
+}
+
+// DiscoverOptions optionally constrains multi-suite / multi-architecture Debian discovery.
+type DiscoverOptions struct {
+	Suite string // Target Debian suite/codename when repoDir has multiple suites
+	Arch  string // Target Debian architecture when suite has multiple architectures
 }
 
 // Discover resolves the active Debian repository metadata files from a repository path.
-// It handles:
-//   - Multi-suite/multi-component pool layouts (from root or dists/ hierarchy) with aggregation
-//   - Direct pointers to suite or binary-<arch> directories
-//   - Flat single-directory repositories
 func Discover(repoDir string) (*DebRepoLocations, error) {
+	return DiscoverWithOptions(repoDir, DiscoverOptions{})
+}
+
+// DiscoverWithOptions resolves Debian repository metadata honoring optional suite and architecture selectors.
+func DiscoverWithOptions(repoDir string, opts DiscoverOptions) (*DebRepoLocations, error) {
 	absDir, err := filepath.Abs(repoDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine absolute path for %s: %w", repoDir, err)
@@ -48,14 +56,13 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 				relFile = findReleaseFile(suiteDir)
 			}
 
-			// Find repository base dir (parent of dists or root)
 			distsDir := filepath.Dir(suiteDir)
 			baseDir := absDir
 			if filepath.Base(distsDir) == "dists" {
 				baseDir = filepath.Dir(distsDir)
 			}
 
-			return &DebRepoLocations{
+			locs := &DebRepoLocations{
 				BaseDir:       baseDir,
 				PackagesFile:  pkgFile,
 				PackagesFiles: []string{pkgFile},
@@ -65,17 +72,21 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 				Components:    []string{component},
 				Arch:          arch,
 				IsFlat:        false,
-			}, nil
+			}
+			attachReleaseInfo(locs)
+			return locs, nil
 		}
 
 		// Flat repository
-		return &DebRepoLocations{
+		locs := &DebRepoLocations{
 			BaseDir:       absDir,
 			PackagesFile:  pkgFile,
 			PackagesFiles: []string{pkgFile},
 			ReleaseFile:   relFile,
 			IsFlat:        true,
-		}, nil
+		}
+		attachReleaseInfo(locs)
+		return locs, nil
 	}
 
 	// 2. Check if repoDir contains a dists directory
@@ -90,6 +101,9 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 				continue
 			}
 			suiteName := s.Name()
+			if opts.Suite != "" && !strings.EqualFold(suiteName, opts.Suite) {
+				continue
+			}
 			suitePath := filepath.Join(distsDir, suiteName)
 			releaseFile := findReleaseFile(suitePath)
 
@@ -98,52 +112,14 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 				continue
 			}
 
-			targetArch := findTargetArch(suitePath, components)
+			targetArch := findTargetArch(suitePath, components, opts.Arch)
 			if targetArch == "" {
 				continue
 			}
 
-			sortComponents(components)
-
-			var (
-				pkgFiles       []string
-				compNames      []string
-				seenPkgFiles   = make(map[string]bool)
-				seenComponents = make(map[string]bool)
-			)
-
-			for _, c := range components {
-				if !c.IsDir() {
-					continue
-				}
-				compName := c.Name()
-				compPath := filepath.Join(suitePath, compName)
-
-				archPath := filepath.Join(compPath, "binary-"+targetArch)
-				if pkgFile := findPackagesFile(archPath); pkgFile != "" {
-					if !seenPkgFiles[pkgFile] {
-						seenPkgFiles[pkgFile] = true
-						pkgFiles = append(pkgFiles, pkgFile)
-					}
-					if !seenComponents[compName] {
-						seenComponents[compName] = true
-						compNames = append(compNames, compName)
-					}
-				}
-
-				if targetArch != "all" {
-					allPath := filepath.Join(compPath, "binary-all")
-					if pkgFile := findPackagesFile(allPath); pkgFile != "" {
-						if !seenPkgFiles[pkgFile] {
-							seenPkgFiles[pkgFile] = true
-							pkgFiles = append(pkgFiles, pkgFile)
-						}
-					}
-				}
-			}
-
+			pkgFiles, compNames := collectComponentPackages(suitePath, components, targetArch)
 			if len(pkgFiles) > 0 {
-				return &DebRepoLocations{
+				locs := &DebRepoLocations{
 					BaseDir:       absDir,
 					PackagesFile:  pkgFiles[0],
 					PackagesFiles: pkgFiles,
@@ -153,14 +129,16 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 					Components:    compNames,
 					Arch:          targetArch,
 					IsFlat:        false,
-				}, nil
+				}
+				attachReleaseInfo(locs)
+				return locs, nil
 			}
 		}
 	}
 
 	// 3. Check if repoDir is a suite directory containing components
 	if entries, err := os.ReadDir(absDir); err == nil {
-		targetArch := findTargetArch(absDir, entries)
+		targetArch := findTargetArch(absDir, entries, opts.Arch)
 		if targetArch != "" {
 			releaseFile := findReleaseFile(absDir)
 			suite := filepath.Base(absDir)
@@ -170,47 +148,9 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 				baseDir = filepath.Dir(parent)
 			}
 
-			sortComponents(entries)
-
-			var (
-				pkgFiles       []string
-				compNames      []string
-				seenPkgFiles   = make(map[string]bool)
-				seenComponents = make(map[string]bool)
-			)
-
-			for _, c := range entries {
-				if !c.IsDir() {
-					continue
-				}
-				compName := c.Name()
-				compPath := filepath.Join(absDir, compName)
-
-				archPath := filepath.Join(compPath, "binary-"+targetArch)
-				if pkgFile := findPackagesFile(archPath); pkgFile != "" {
-					if !seenPkgFiles[pkgFile] {
-						seenPkgFiles[pkgFile] = true
-						pkgFiles = append(pkgFiles, pkgFile)
-					}
-					if !seenComponents[compName] {
-						seenComponents[compName] = true
-						compNames = append(compNames, compName)
-					}
-				}
-
-				if targetArch != "all" {
-					allPath := filepath.Join(compPath, "binary-all")
-					if pkgFile := findPackagesFile(allPath); pkgFile != "" {
-						if !seenPkgFiles[pkgFile] {
-							seenPkgFiles[pkgFile] = true
-							pkgFiles = append(pkgFiles, pkgFile)
-						}
-					}
-				}
-			}
-
+			pkgFiles, compNames := collectComponentPackages(absDir, entries, targetArch)
 			if len(pkgFiles) > 0 {
-				return &DebRepoLocations{
+				locs := &DebRepoLocations{
 					BaseDir:       baseDir,
 					PackagesFile:  pkgFiles[0],
 					PackagesFiles: pkgFiles,
@@ -220,7 +160,9 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 					Components:    compNames,
 					Arch:          targetArch,
 					IsFlat:        false,
-				}, nil
+				}
+				attachReleaseInfo(locs)
+				return locs, nil
 			}
 		}
 
@@ -242,6 +184,19 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 				return archDirs[i] < archDirs[j]
 			})
 			targetArch := archDirs[0]
+			if opts.Arch != "" {
+				found := ""
+				for _, a := range archDirs {
+					if strings.EqualFold(a, opts.Arch) {
+						found = a
+						break
+					}
+				}
+				if found == "" {
+					return nil, fmt.Errorf("requested Debian architecture %q not found in %s (available: %v)", opts.Arch, repoDir, archDirs)
+				}
+				targetArch = found
+			}
 			archPath := filepath.Join(absDir, "binary-"+targetArch)
 			if pkgFile := findPackagesFile(archPath); pkgFile != "" {
 				compName := filepath.Base(absDir)
@@ -260,7 +215,7 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 						pkgFiles = append(pkgFiles, allPkg)
 					}
 				}
-				return &DebRepoLocations{
+				locs := &DebRepoLocations{
 					BaseDir:       baseDir,
 					PackagesFile:  pkgFile,
 					PackagesFiles: pkgFiles,
@@ -270,7 +225,9 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 					Components:    []string{compName},
 					Arch:          targetArch,
 					IsFlat:        false,
-				}, nil
+				}
+				attachReleaseInfo(locs)
+				return locs, nil
 			}
 		}
 	}
@@ -278,7 +235,58 @@ func Discover(repoDir string) (*DebRepoLocations, error) {
 	return nil, fmt.Errorf("no Debian repository metadata (Packages or dists/ hierarchy) found in %s", repoDir)
 }
 
-func findTargetArch(suitePath string, components []os.DirEntry) string {
+func attachReleaseInfo(locs *DebRepoLocations) {
+	if locs != nil && locs.ReleaseFile != "" {
+		if info, err := ParseReleaseMetadata(locs.ReleaseFile); err == nil {
+			locs.ReleaseInfo = info
+		}
+	}
+}
+
+func collectComponentPackages(suitePath string, components []os.DirEntry, targetArch string) ([]string, []string) {
+	sortComponents(components)
+
+	var (
+		pkgFiles       []string
+		compNames      []string
+		seenPkgFiles   = make(map[string]bool)
+		seenComponents = make(map[string]bool)
+	)
+
+	for _, c := range components {
+		if !c.IsDir() {
+			continue
+		}
+		compName := c.Name()
+		compPath := filepath.Join(suitePath, compName)
+
+		archPath := filepath.Join(compPath, "binary-"+targetArch)
+		if pkgFile := findPackagesFile(archPath); pkgFile != "" {
+			if !seenPkgFiles[pkgFile] {
+				seenPkgFiles[pkgFile] = true
+				pkgFiles = append(pkgFiles, pkgFile)
+			}
+			if !seenComponents[compName] {
+				seenComponents[compName] = true
+				compNames = append(compNames, compName)
+			}
+		}
+
+		if targetArch != "all" {
+			allPath := filepath.Join(compPath, "binary-all")
+			if pkgFile := findPackagesFile(allPath); pkgFile != "" {
+				if !seenPkgFiles[pkgFile] {
+					seenPkgFiles[pkgFile] = true
+					pkgFiles = append(pkgFiles, pkgFile)
+				}
+			}
+		}
+	}
+
+	return pkgFiles, compNames
+}
+
+func findTargetArch(suitePath string, components []os.DirEntry, preferredArch string) string {
 	var archs []string
 	seen := make(map[string]bool)
 
@@ -303,6 +311,15 @@ func findTargetArch(suitePath string, components []os.DirEntry) string {
 	}
 
 	if len(archs) == 0 {
+		return ""
+	}
+
+	if preferredArch != "" {
+		for _, a := range archs {
+			if strings.EqualFold(a, preferredArch) {
+				return a
+			}
+		}
 		return ""
 	}
 
@@ -351,6 +368,7 @@ func findPackagesFile(dir string) string {
 	candidates := []string{
 		"Packages",
 		"Packages.gz",
+		"Packages.bz2",
 		"Packages.xz",
 		"Packages.zst",
 	}

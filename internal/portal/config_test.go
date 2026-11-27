@@ -3,277 +3,287 @@ package portal
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
 )
 
-// TEST STRATEGY:
-// Verify YAML configuration parsing, default fallbacks, starter config dumping,
-// metadata override merging, icon matching, external repo appending, and pinned ordering.
-
-func TestDefaultPortalConfig(t *testing.T) {
-	cfg := DefaultPortalConfig()
-	if cfg.Title == "" {
-		t.Errorf("expected non-empty default title")
-	}
-	if !cfg.AutoDiscovery.Enabled {
-		t.Errorf("expected AutoDiscovery.Enabled=true")
-	}
-	if cfg.AutoDiscovery.MaxDepth != 5 {
-		t.Errorf("expected MaxDepth=5, got %d", cfg.AutoDiscovery.MaxDepth)
-	}
-}
-
-func TestLoadConfig_Valid(t *testing.T) {
-	tempDir := t.TempDir()
-	configPath := filepath.Join(tempDir, "portal.yaml")
-
-	content := `
-title: "Custom Title"
-description: "Custom Description"
-base_url: "https://custom.repo.net/"
-auto_discovery:
-  enabled: true
-  max_depth: 4
-  require_rendered: true
-  exclude:
-    - "*debug*"
+func TestPortalConfig_OverrideNormalizationAndHidden(t *testing.T) {
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "portal.yaml")
+	yamlData := `title: Enterprise Hub
 overrides:
-  "el9/base/x86_64":
-    title: "Overridden EL9"
-    icon: "redhat"
-    badge: "Production"
-pinned:
-  - "el9/base/x86_64"
-external_repos:
-  - title: "External Build"
-    rel_path: "https://remote.example.com/"
-    format: "rpm"
-    distro: "fedora"
-    arch: "x86_64"
-    package_count: 50
+  el9\base\x86_64:
+    title: Enterprise Linux 9 BaseOS
+    distro: RHEL 9
+    channel: baseos
+    badge: Production
+  hidden-repo:
+    hidden: true
+repositories:
+  - path: custom/path
+    title: Declared Local
 `
-	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("failed to write portal.yaml: %v", err)
+	if err := os.WriteFile(cfgPath, []byte(yamlData), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig(configPath)
+	cfg, err := LoadConfig(cfgPath)
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
-
-	if cfg.Title != "Custom Title" {
-		t.Errorf("cfg.Title = %q; want %q", cfg.Title, "Custom Title")
-	}
-	if cfg.AutoDiscovery.MaxDepth != 4 {
-		t.Errorf("cfg.AutoDiscovery.MaxDepth = %d; want 4", cfg.AutoDiscovery.MaxDepth)
-	}
-	if !cfg.AutoDiscovery.RequireRendered {
-		t.Errorf("expected RequireRendered=true")
-	}
-	if len(cfg.Overrides) != 1 {
-		t.Errorf("expected 1 override, got %d", len(cfg.Overrides))
-	}
-	if len(cfg.ExternalRepos) != 1 {
-		t.Errorf("expected 1 external repo, got %d", len(cfg.ExternalRepos))
-	}
-}
-
-func TestLoadConfig_Errors(t *testing.T) {
-	// 1. Non-existent file
-	if _, err := LoadConfig("/nonexistent/portal.yaml"); err == nil {
-		t.Errorf("expected error for non-existent file, got nil")
+	if len(cfg.Repositories) != 1 || cfg.Repositories[0].Path != "custom/path" {
+		t.Errorf("expected 1 declared repository entry, got %+v", cfg.Repositories)
 	}
 
-	// 2. Corrupted YAML
-	tempDir := t.TempDir()
-	corruptPath := filepath.Join(tempDir, "corrupt.yaml")
-	_ = os.WriteFile(corruptPath, []byte("title: [broken: yaml: :::"), 0o644)
-	if _, err := LoadConfig(corruptPath); err == nil {
-		t.Errorf("expected error for corrupted YAML, got nil")
-	}
-}
-
-func TestDumpConfig(t *testing.T) {
-	tempDir := t.TempDir()
-	outputPath := filepath.Join(tempDir, "portal.yaml")
-
-	repos := []*DiscoveredRepo{
-		{
-			Title:        "EL9 BaseOS",
-			RelPath:      "el9/base/x86_64",
-			Distro:       "el9",
-			Arch:         "x86_64",
-			Format:       models.FormatRPM,
-			PackageCount: 120,
-			LastBuild:    time.Now().UTC(),
-		},
-		{
-			Title:        "Ubuntu 24.04 Noble",
-			RelPath:      "ubuntu/dists/noble/main/binary-amd64",
-			Distro:       "ubuntu",
-			Arch:         "amd64",
-			Format:       models.FormatDEB,
-			PackageCount: 300,
-			LastBuild:    time.Now().UTC(),
-		},
+	ov, ok := cfg.LookupOverride("el9/base/x86_64", "/var/repos/el9/base/x86_64")
+	if !ok || ov.Title != "Enterprise Linux 9 BaseOS" || ov.Badge != "Production" {
+		t.Fatalf("expected LookupOverride to normalize backslash key, got ok=%v ov=%+v", ok, ov)
 	}
 
-	catalog := BuildCatalog("Mirrors", "Company package mirrors", "https://mirror.org/", repos)
-
-	if err := DumpConfig(outputPath, catalog); err != nil {
-		t.Fatalf("DumpConfig failed: %v", err)
-	}
-
-	// Verify dumped file can be parsed back
-	loaded, err := LoadConfig(outputPath)
-	if err != nil {
-		t.Fatalf("failed to reload dumped config: %v", err)
-	}
-
-	if loaded.Title != "Mirrors" {
-		t.Errorf("loaded.Title = %q; want %q", loaded.Title, "Mirrors")
-	}
-	if len(loaded.Pinned) != 2 {
-		t.Errorf("expected 2 pinned repos in starter config, got %d", len(loaded.Pinned))
-	}
-	if len(loaded.Overrides) != 2 {
-		t.Errorf("expected 2 overrides in starter config, got %d", len(loaded.Overrides))
-	}
-}
-
-func TestApplyConfig(t *testing.T) {
-	repo1 := &DiscoveredRepo{
-		Title:        "Raw Repo 1",
-		RelPath:      "el9/base/x86_64",
-		Distro:       "el9",
-		Arch:         "x86_64",
-		Format:       models.FormatRPM,
-		PackageCount: 100,
-	}
-	repo2 := &DiscoveredRepo{
-		Title:        "Raw Repo 2",
-		RelPath:      "ubuntu/dists/noble/main/binary-amd64",
-		Distro:       "ubuntu",
-		Arch:         "amd64",
-		Format:       models.FormatDEB,
-		PackageCount: 200,
-	}
-
-	catalog := BuildCatalog("Default Title", "Default Desc", "", []*DiscoveredRepo{repo1, repo2})
-
-	cfg := &PortalConfig{
-		Title:       "Custom Catalog",
-		Description: "Custom Description",
-		BaseURL:     "https://repos.company.net/",
-		Overrides: map[string]RepoOverrideConfig{
-			"el9/base/x86_64": {
-				Title: "Enterprise Linux 9",
-				Badge: "Stable",
-				Icon:  "redhat",
-			},
-		},
-		Pinned: []string{"ubuntu/dists/noble/main/binary-amd64"},
-		ExternalRepos: []*DiscoveredRepo{
-			{
-				Title:        "External Repo",
-				RelPath:      "https://ext.org/",
-				Distro:       "fedora",
-				Arch:         "x86_64",
-				Format:       models.FormatRPM,
-				PackageCount: 50,
-			},
-		},
-	}
-
+	catalog := BuildCatalog(cfg.Title, cfg.Description, "", []*DiscoveredRepo{
+		{RelPath: "el9/base/x86_64", Path: "/var/repos/el9/base/x86_64", Format: models.FormatRPM, Distro: "el9", PackageCount: 10},
+		{RelPath: "hidden-repo", Path: "/var/repos/hidden-repo", Format: models.FormatRPM, Distro: "el9", PackageCount: 5},
+	})
 	ApplyConfig(catalog, cfg)
 
-	if catalog.Title != "Custom Catalog" {
-		t.Errorf("catalog.Title = %q; want %q", catalog.Title, "Custom Catalog")
+	if catalog.TotalRepos != 2 {
+		t.Fatalf("expected 2 repos (el9/base/x86_64 + declared custom/path, with hidden-repo excluded), got %d", catalog.TotalRepos)
 	}
-	if catalog.TotalRepos != 3 {
-		t.Errorf("catalog.TotalRepos = %d; want 3 (2 local + 1 external)", catalog.TotalRepos)
-	}
-	if catalog.TotalPkgs != 350 {
-		t.Errorf("catalog.TotalPkgs = %d; want 350", catalog.TotalPkgs)
-	}
-
-	// Pinned repo (repo2: ubuntu) should be first
-	if catalog.Repos[0].RelPath != "ubuntu/dists/noble/main/binary-amd64" {
-		t.Errorf("first repo should be pinned ubuntu, got %s", catalog.Repos[0].RelPath)
-	}
-
-	// Check overrides on repo1
-	var el9Repo *DiscoveredRepo
 	for _, r := range catalog.Repos {
-		if r.RelPath == "el9/base/x86_64" {
-			el9Repo = r
-			break
+		if r.RelPath == "hidden-repo" {
+			t.Errorf("expected hidden-repo to be excluded from catalog")
 		}
 	}
-	if el9Repo == nil {
-		t.Fatalf("missing el9 repo")
+	if catalog.Repos[0].Title != "Enterprise Linux 9 BaseOS" || catalog.Repos[0].Channel != "baseos" {
+		t.Errorf("expected ApplyConfig overrides applied, got %+v", catalog.Repos[0])
 	}
-	if el9Repo.Title != "Enterprise Linux 9" {
-		t.Errorf("el9Repo.Title = %q; want %q", el9Repo.Title, "Enterprise Linux 9")
-	}
-	if el9Repo.Badge != "Stable" {
-		t.Errorf("el9Repo.Badge = %q; want %q", el9Repo.Badge, "Stable")
-	}
-	if el9Repo.Icon != "redhat" {
-		t.Errorf("el9Repo.Icon = %q; want %q", el9Repo.Icon, "redhat")
+	if catalog.Repos[1].Title != "Declared Local" {
+		t.Errorf("expected declared local repository to be appended, got %+v", catalog.Repos[1])
 	}
 }
 
-func TestFindPortalConfigIn(t *testing.T) {
-	tempRoot := t.TempDir()
+func TestScanner_IsExcludedGlobVsSubstringAndWarnings(t *testing.T) {
+	root := t.TempDir()
+	// "latest" MUST NOT be excluded by ExcludePatterns: ["test"]
+	latestRepo := filepath.Join(root, "latest")
+	excludedRepo := filepath.Join(root, "test")
+	_ = os.MkdirAll(filepath.Join(latestRepo, "repodata"), 0o755)
+	_ = os.MkdirAll(filepath.Join(excludedRepo, "repodata"), 0o755)
 
-	// portal.yaml at tempRoot
-	configPath := filepath.Join(tempRoot, "portal.yaml")
-	_ = os.WriteFile(configPath, []byte("title: Root\n"), 0o644)
-
-	childDir := filepath.Join(tempRoot, "a", "b", "c")
-	_ = os.MkdirAll(childDir, 0o755)
-
-	found, err := FindPortalConfigIn(childDir)
+	s := NewScanner(ScanConfig{
+		RootDir:         root,
+		MaxDepth:        4,
+		ExcludePatterns: []string{"test"},
+	})
+	repos, err := s.Scan()
 	if err != nil {
-		t.Fatalf("FindPortalConfigIn failed: %v", err)
+		t.Fatalf("Scan failed: %v", err)
 	}
-	if found != configPath {
-		t.Errorf("FindPortalConfigIn = %q; want %q", found, configPath)
+	if len(repos) != 1 || repos[0].RelPath != "latest" {
+		t.Fatalf("expected only 'latest' repo (not blocked by 'test' exclude pattern), got %+v", repos)
+	}
+	_ = s.Warnings()
+}
+
+func TestRenderer_DetachedRootLatestFeedResolution(t *testing.T) {
+	rawRoot := t.TempDir()
+	portalHome := t.TempDir()
+
+	// Write latest-feed.xml under detached portalHome/repoview/latest-feed.xml (root repo RelPath == ".")
+	childFeedDir := filepath.Join(portalHome, "repoview")
+	if err := os.MkdirAll(childFeedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	childRSS := `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Root</title><item>
+  <title>nginx 1.26.0</title><link>nginx.html</link><guid>nginx-1</guid><pubDate>Thu, 15 Jan 2026 12:00:00 +0000</pubDate>
+</item></channel></rss>`
+	if err := os.WriteFile(filepath.Join(childFeedDir, "latest-feed.xml"), []byte(childRSS), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	// Empty dir with no config
-	otherDir := t.TempDir()
-	if _, err := FindPortalConfigIn(otherDir); err == nil {
-		t.Errorf("expected error when no config exists, got nil")
+	catalog := &Catalog{
+		Title: "Detached Hub",
+		Repos: []*DiscoveredRepo{
+			{
+				Title:      "Root Repo",
+				RelPath:    ".",
+				Path:       rawRoot,
+				TargetURL:  "repoview/index.html",
+				Format:     models.FormatRPM,
+				IsRendered: true,
+			},
+		},
+	}
+
+	r, err := NewRenderer("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.WritePortal(portalHome, rawRoot, catalog, false); err != nil {
+		t.Fatalf("WritePortal failed: %v", err)
+	}
+	feedBytes, err := os.ReadFile(filepath.Join(portalHome, "portal-feed.xml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(feedBytes), "repoview/nginx.html") {
+		t.Errorf("expected detached portal-feed.xml to resolve link to repoview/nginx.html, got:\n%s", string(feedBytes))
 	}
 }
 
-func TestMatchDistroIcon(t *testing.T) {
-	tests := []struct {
-		distro string
-		want   string
-	}{
-		{"el9", "redhat"},
-		{"RHEL8", "redhat"},
-		{"Fedora-40", "fedora"},
-		{"rocky-linux", "rocky"},
-		{"almalinux", "almalinux"},
-		{"centos7", "centos"},
-		{"ubuntu-24.04", "ubuntu"},
-		{"debian-12", "debian"},
-		{"archlinux", "arch"},
-		{"opensuse-leap", "opensuse"},
-		{"mycustomdistro", "generic"},
+func TestPortalConfig_DumpFindPinnedAndSafetyErrors(t *testing.T) {
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "portal.yaml")
+
+	cat := createMockCatalog()
+	if err := DumpConfig(dumpPath, cat); err != nil {
+		t.Fatalf("DumpConfig failed: %v", err)
+	}
+	found, err := FindPortalConfigIn(dir)
+	if err != nil || found != dumpPath {
+		t.Fatalf("FindPortalConfigIn failed: found=%q err=%v", found, err)
 	}
 
-	for _, tc := range tests {
-		got := MatchDistroIcon(tc.distro)
-		if got != tc.want {
-			t.Errorf("MatchDistroIcon(%q) = %q; want %q", tc.distro, got, tc.want)
+	cfg := DefaultPortalConfig()
+	cfg.Pinned = []string{"ubuntu/dists/noble", "el9/base/x86_64"}
+	cfg.Overrides["ubuntu/dists/noble"] = RepoOverrideConfig{
+		Title:         "Ubuntu Pinned",
+		Description:   "LTS packages",
+		Distro:        "ubuntu",
+		Channel:       "main",
+		Suite:         "noble",
+		Arch:          "amd64",
+		Format:        "deb",
+		BaseURL:       "https://apt.example.com",
+		GPGKey:        "https://apt.example.com/key.gpg",
+		IgnorePackage: []string{"*-dbg"},
+		ExcludeArch:   []string{"i386"},
+		Comps:         "/tmp/comps.xml",
+	}
+	ApplyConfig(cat, cfg)
+	if cat.Repos[0].RelPath != "ubuntu/dists/noble" || cat.Repos[0].Title != "Ubuntu Pinned" {
+		t.Errorf("expected Pinned repo ubuntu/dists/noble first with overrides, got %+v", cat.Repos[0])
+	}
+
+	safety := &ErrSafetyOverwrite{Path: "/tmp/index.html"}
+	if !strings.Contains(safety.Error(), "index.html") || safety.Unwrap() != models.ErrSafety {
+		t.Errorf("unexpected ErrSafetyOverwrite behavior: %q / %v", safety.Error(), safety.Unwrap())
+	}
+}
+
+func TestPortal_CustomTemplateAndMultiRepoDiscoverySort(t *testing.T) {
+	// Custom template renderer coverage
+	tmplDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmplDir, "portal.html"), []byte("CUSTOM: {{ .Catalog.Title }}"), 0o644)
+	cr, err := NewRenderer(tmplDir)
+	if err != nil {
+		t.Fatalf("NewRenderer(custom) failed: %v", err)
+	}
+	out, err := cr.RenderHTML(createMockCatalog())
+	if err != nil || !strings.Contains(string(out), "CUSTOM:") {
+		t.Errorf("custom template RenderHTML failed: %v / %s", err, string(out))
+	}
+	if _, err := NewRenderer(filepath.Join(t.TempDir(), "nonexistent")); err == nil {
+		t.Errorf("expected error for missing custom template dir")
+	}
+
+	// Multi-repo scan covering Debian meta/Packages arch sniffing and sortRepos ordering
+	root := t.TempDir()
+	debSuite := filepath.Join(root, "debian", "dists", "bookworm")
+	_ = os.MkdirAll(filepath.Join(debSuite, "main", "binary-amd64"), 0o755)
+	_ = os.WriteFile(filepath.Join(debSuite, "Release"), []byte("Origin: Debian\nSuite: bookworm\nCodename: bookworm\nArchitectures: amd64\nComponents: main\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(debSuite, "main", "binary-amd64", "Packages"), []byte("Package: vim\nVersion: 9.0\nArchitecture: amd64\n"), 0o644)
+
+	rpmBase := filepath.Join(root, "el9", "base", "x86_64")
+	rpmArm := filepath.Join(root, "el9", "base", "aarch64")
+	rpmExtras := filepath.Join(root, "el9", "extras", "x86_64")
+	for _, p := range []string{rpmBase, rpmArm, rpmExtras} {
+		_ = os.MkdirAll(filepath.Join(p, "repodata"), 0o755)
+	}
+
+	s := NewScanner(ScanConfig{RootDir: root, MaxDepth: 6})
+	repos, err := s.Scan()
+	if err != nil {
+		t.Fatalf("multi-repo Scan failed: %v", err)
+	}
+	if len(repos) < 4 {
+		t.Fatalf("expected >=4 discovered repos, got %d", len(repos))
+	}
+
+	for _, r := range repos {
+		if u := r.RepoDirURL("https://repo.example.com"); u == "" {
+			t.Errorf("expected non-empty RepoDirURL for %s", r.RelPath)
 		}
+		if r.Format == models.FormatDEB {
+			if u := r.DebArchiveURL("https://repo.example.com"); u == "" {
+				t.Errorf("expected non-empty DebArchiveURL for DEB repo")
+			}
+			if r.Arch != "amd64" || sniffFormat(filepath.Join(root, filepath.FromSlash(r.RelPath))) != models.FormatDEB {
+				t.Errorf("expected amd64 DEB repo detection, got format=%s arch=%s", r.Format, r.Arch)
+			}
+		}
+	}
+
+	// Verify flat DEB Release + Packages arch inference and RequireRendered skip
+	flatRoot := t.TempDir()
+	flatRepo := filepath.Join(flatRoot, "flat-apt-channel")
+	_ = os.MkdirAll(flatRepo, 0o755)
+	_ = os.WriteFile(filepath.Join(flatRepo, "Release"), []byte("Origin: Custom\nArchitectures: riscv64\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(flatRepo, "Packages"), []byte("Package: tool\nVersion: 1.0\nArchitecture: riscv64\n"), 0o644)
+
+	sFlat := NewScanner(ScanConfig{RootDir: flatRoot, MaxDepth: 4})
+	flatRepos, err := sFlat.Scan()
+	if err != nil || len(flatRepos) != 1 || flatRepos[0].Arch != "riscv64" {
+		t.Fatalf("expected flat DEB repo with riscv64 arch from Release, got repos=%+v err=%v", flatRepos, err)
+	}
+	// RequireRendered=true excludes unrendered repo
+	sReq := NewScanner(ScanConfig{RootDir: flatRoot, MaxDepth: 4, RequireRendered: true})
+	if reqRepos, err := sReq.Scan(); err != nil || len(reqRepos) != 0 {
+		t.Errorf("expected 0 rendered repos when RequireRendered=true, got %d (err=%v)", len(reqRepos), err)
+	}
+
+	// Verify LocalRepos inference when Title/Distro/Arch/Format omitted
+	cat2 := BuildCatalog("T", "D", "", nil)
+	cfg2 := DefaultPortalConfig()
+	cfg2.Repositories = []LocalRepoConfig{{Path: "centos-9-extras.aarch64"}, {Path: "skip-hidden", Hidden: true}}
+	ApplyConfig(cat2, cfg2)
+	if len(cat2.Repos) != 1 || cat2.Repos[0].Arch != "aarch64" {
+		t.Errorf("expected 1 inferred declared local repo aarch64, got %+v", cat2.Repos)
+	}
+
+	// Verify pinnedOrder matching via r.Path, plus .deb/.rpm & InRelease arch sniffing
+	pkgOnlyRoot := t.TempDir()
+	pkgOnlyRepo := filepath.Join(pkgOnlyRoot, "custom-pkg-only")
+	_ = os.MkdirAll(pkgOnlyRepo, 0o755)
+	_ = os.WriteFile(filepath.Join(pkgOnlyRepo, "Packages"), []byte("Package: jq\nVersion: 1.7\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(pkgOnlyRepo, "jq_1.7_riscv64.deb"), []byte("dummy"), 0o644)
+	_ = os.WriteFile(filepath.Join(pkgOnlyRepo, "curl-8.0-1.riscv64.rpm"), []byte("dummy"), 0o644)
+	_ = os.WriteFile(filepath.Join(pkgOnlyRepo, "InRelease"), []byte("Architecture: riscv64\n"), 0o644)
+	sPkgOnly := NewScanner(ScanConfig{RootDir: pkgOnlyRoot, MaxDepth: 4})
+	pkgRepos, err := sPkgOnly.Scan()
+	if err != nil || len(pkgRepos) != 1 || pkgRepos[0].Arch != "riscv64" {
+		t.Fatalf("expected riscv64 arch from InRelease/package files, got %+v err=%v", pkgRepos, err)
+	}
+	if got := detectArchFromPackageFiles(pkgOnlyRepo); got != "riscv64" {
+		t.Errorf("expected detectArchFromPackageFiles = riscv64, got %q", got)
+	}
+	linkAlias := filepath.Join(pkgOnlyRoot, "alias-repo")
+	if err := os.Symlink(pkgOnlyRepo, linkAlias); err == nil {
+		if _, err := NewScanner(ScanConfig{RootDir: pkgOnlyRoot, MaxDepth: 4}).Scan(); err != nil {
+			t.Errorf("unexpected error scanning symlinked alias: %v", err)
+		}
+	}
+	catPin := BuildCatalog("T", "D", "", []*DiscoveredRepo{
+		{Path: "/p/b", RelPath: "b", Format: models.FormatRPM},
+		{Path: "/p/a", RelPath: "a", Format: models.FormatRPM},
+	})
+	cfgPin := DefaultPortalConfig()
+	cfgPin.Pinned = []string{"/p/a", "nonexistent"}
+	ApplyConfig(catPin, cfgPin)
+	if catPin.Repos[0].Path != "/p/a" {
+		t.Errorf("expected /p/a pinned first by Path, got %+v", catPin.Repos[0])
 	}
 }

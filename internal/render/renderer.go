@@ -28,13 +28,15 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"html"
 	htmltmpl "html/template"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	// nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template -- text/template is strictly used for XML/RSS generation (rss.xml) where HTML contextual escaping would corrupt XML entities
+	// nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template -- text/template is strictly used for XML/RSS generation (rss.xml) with explicit xmlEscape/cdataHTML/safeURL escaping
 	texttmpl "text/template"
 	"time"
 
@@ -49,33 +51,74 @@ var templateFS embed.FS
 // RepoContext holds global data available to all templates.
 // This includes the repository title, navigation letters, tool version, and functional groups.
 type RepoContext struct {
-	Title     string                 // Repository title displayed in page headers
-	Letters   []string               // Alphabetical navigation index letters ("2", "3", "A"..."Z")
-	MyVersion string                 // Repoview version identifier
-	Groups    []*logic.GroupData     // Flat list of populated functional groups
-	GroupTree []*logic.GroupCategory // Hierarchical category tree for sidebar navigation
-	Siblings  []*logic.SiblingRepo   // Neighboring repository channels or architectures
-	RepoID    string                 // Normalized repository identifier for .repo configuration
-	BaseURL   string                 // Explicit or derived repository HTTP/HTTPS base URL
+	Title          string                 // Repository title displayed in page headers
+	Description    string                 // Optional repository description (Release / repoview.yaml)
+	Revision       string                 // Optional repomd revision or Debian suite identifier
+	TotalPackages  int                    // Total unique package count across the repository
+	Letters        []string               // Alphabetical navigation index letters ("2", "3", "A"..."Z")
+	MyVersion      string                 // Repoview version identifier
+	Groups         []*logic.GroupData     // Flat list of populated functional groups
+	GroupTree      []*logic.GroupCategory // Hierarchical category tree for sidebar navigation
+	Siblings       []*logic.SiblingRepo   // Neighboring repository channels or architectures
+	RepoID         string                 // Normalized repository identifier for .repo configuration
+	BaseURL        string                 // Explicit or derived repository HTTP/HTTPS base URL
 	Format         models.RepoFormat      // Underlying repository format ("rpm" or "deb")
 	PortalURL      string                 // Optional or auto-detected relative/absolute link to parent catalog portal
 	PackageBaseURL string                 // Optional base URL or relative path for raw package downloads
+	GPGKey         string                 // Optional GPG public key URL/path for client configuration snippets
+}
+
+// PageData unifies the template execution context passed to index, group, and package pages
+// and their shared layout partials (_head.html, _sidebar.html, _topbar.html).
+type PageData struct {
+	PageKind  string
+	PageTitle string
+	Robots    string
+	Repo      RepoContext
+	Groups    []*logic.GroupData
+	Group     *logic.GroupData
+	Latest    []*models.Package
+	Pkg       *models.Package
+	URL       string
 }
 
 // Renderer handles the generation of HTML and XML files using templates.
-// It manages the output directory, template context, and helper functions.
+// It manages the output directory, OutputSink, template context, and helper functions.
 type Renderer struct {
 	OutDir      string             // Filesystem destination directory for generated static files
 	TemplateDir string             // Optional path to custom external templates (empty if using embedded)
+	Sink        OutputSink         // Output sink (defaults to AtomicLocalSink on OutDir)
 	RepoCtx     RepoContext        // Global repository context shared across all template renders
 	HTMLTmpls   *htmltmpl.Template // Compiled HTML templates with contextual auto-escaping
 	XMLTmpls    *texttmpl.Template // Compiled XML templates for RSS feeds
+}
+
+// SetSink injects a custom OutputSink implementation.
+func (r *Renderer) SetSink(s OutputSink) {
+	if s != nil {
+		r.Sink = s
+	}
 }
 
 // SetGroups sets the functional package groups in the global repo context.
 func (r *Renderer) SetGroups(groups []*logic.GroupData) {
 	r.RepoCtx.Groups = groups
 	r.RepoCtx.GroupTree = logic.BuildGroupTree(groups)
+}
+
+// SetTotalPackages stores the repository-wide unique package count for index summary chips.
+func (r *Renderer) SetTotalPackages(total int) {
+	r.RepoCtx.TotalPackages = total
+}
+
+// SetRevision stores the repository revision or suite identifier.
+func (r *Renderer) SetRevision(rev string) {
+	r.RepoCtx.Revision = strings.TrimSpace(rev)
+}
+
+// SetDescription stores an optional repository description.
+func (r *Renderer) SetDescription(desc string) {
+	r.RepoCtx.Description = strings.TrimSpace(desc)
 }
 
 // SetSiblings sets detected sibling repository channels or architectures.
@@ -102,6 +145,11 @@ func (r *Renderer) SetFormat(format models.RepoFormat) {
 // SetPortalURL sets the parent catalog portal URL.
 func (r *Renderer) SetPortalURL(portalURL string) {
 	r.RepoCtx.PortalURL = portalURL
+}
+
+// SetGPGKey sets the optional GPG public key URL or local path for client snippets.
+func (r *Renderer) SetGPGKey(gpgKey string) {
+	r.RepoCtx.GPGKey = strings.TrimSpace(gpgKey)
 }
 
 // NewRenderer initializes a new Renderer instance.
@@ -131,11 +179,18 @@ func NewRenderer(outDir, templateDir, title, version string, letters []string) (
 			}
 			return res
 		},
+		"xmlEscape":  xmlEscape,
+		"cdataHTML":  cdataHTML,
+		"safeURL":    safeURL,
+		"shellQuote": util.ShellQuote,
+		"singleLine": util.SanitizeSingleLine,
+		"joinCSV":    func(items []string) string { return strings.Join(items, ", ") },
 	}
 
 	r := &Renderer{
 		OutDir:      outDir,
 		TemplateDir: templateDir,
+		Sink:        &AtomicLocalSink{RootDir: outDir},
 		RepoCtx: RepoContext{
 			Title:     title,
 			Letters:   letters,
@@ -151,14 +206,14 @@ func NewRenderer(outDir, templateDir, title, version string, letters []string) (
 		if len(htmlMatches) > 0 {
 			htmlTmpl, err = htmltmpl.New("repoview").Funcs(htmltmpl.FuncMap(funcMap)).ParseGlob(filepath.Join(templateDir, "*.html"))
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse custom html templates: %w", err)
+				return nil, fmt.Errorf("%w: failed to parse custom html templates: %w", models.ErrTemplate, err)
 			}
 		}
 	}
 	if htmlTmpl == nil {
 		htmlTmpl, err = htmltmpl.New("repoview").Funcs(htmltmpl.FuncMap(funcMap)).ParseFS(templateFS, "templates/*.html")
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse embedded html templates: %w", err)
+			return nil, fmt.Errorf("%w: failed to parse embedded html templates: %w", models.ErrTemplate, err)
 		}
 	}
 	r.HTMLTmpls = htmlTmpl
@@ -170,14 +225,14 @@ func NewRenderer(outDir, templateDir, title, version string, letters []string) (
 		if len(xmlMatches) > 0 {
 			xmlTmpl, err = texttmpl.New("repoview-xml").Funcs(texttmpl.FuncMap(funcMap)).ParseGlob(filepath.Join(templateDir, "*.xml"))
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse custom xml templates: %w", err)
+				return nil, fmt.Errorf("%w: failed to parse custom xml templates: %w", models.ErrTemplate, err)
 			}
 		}
 	}
 	if xmlTmpl == nil {
 		xmlTmpl, err = texttmpl.New("repoview-xml").Funcs(texttmpl.FuncMap(funcMap)).ParseFS(templateFS, "templates/*.xml")
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse embedded xml templates: %w", err)
+			return nil, fmt.Errorf("%w: failed to parse embedded xml templates: %w", models.ErrTemplate, err)
 		}
 	}
 	r.XMLTmpls = xmlTmpl
@@ -188,16 +243,14 @@ func NewRenderer(outDir, templateDir, title, version string, letters []string) (
 // RenderIndex generates the main 'index.html' file.
 // It displays the list of available groups and the most recently updated packages.
 func (r *Renderer) RenderIndex(groups []*logic.GroupData, latest []*models.Package, url string) ([]byte, error) {
-	data := struct {
-		Repo   RepoContext
-		Groups []*logic.GroupData
-		Latest []*models.Package
-		URL    string
-	}{
-		Repo:   r.RepoCtx,
-		Groups: groups,
-		Latest: latest,
-		URL:    url,
+	data := PageData{
+		PageKind:  "index",
+		PageTitle: "RepoView: " + r.RepoCtx.Title,
+		Robots:    "index,follow",
+		Repo:      r.RepoCtx,
+		Groups:    groups,
+		Latest:    latest,
+		URL:       url,
 	}
 
 	var buf bytes.Buffer
@@ -207,14 +260,18 @@ func (r *Renderer) RenderIndex(groups []*logic.GroupData, latest []*models.Packa
 	return buf.Bytes(), nil
 }
 
-// RenderGroup generates a group page
+// RenderGroup generates a group page.
 func (r *Renderer) RenderGroup(group *logic.GroupData) ([]byte, error) {
-	data := struct {
-		Repo  RepoContext
-		Group *logic.GroupData
-	}{
-		Repo:  r.RepoCtx,
-		Group: group,
+	groupName := ""
+	if group != nil {
+		groupName = group.Name
+	}
+	data := PageData{
+		PageKind:  "group",
+		PageTitle: fmt.Sprintf("RepoView: %s - %s", groupName, r.RepoCtx.Title),
+		Robots:    "noindex,follow",
+		Repo:      r.RepoCtx,
+		Group:     group,
 	}
 
 	var buf bytes.Buffer
@@ -225,17 +282,18 @@ func (r *Renderer) RenderGroup(group *logic.GroupData) ([]byte, error) {
 }
 
 // RenderPackage generates a package detail page.
-// It displays comprehensive information about a package, including description,
-// license, vendor, and a list of all available versions/architectures with changelogs.
 func (r *Renderer) RenderPackage(pkg *models.Package, group *logic.GroupData) ([]byte, error) {
-	data := struct {
-		Repo  RepoContext
-		Group *logic.GroupData
-		Pkg   *models.Package
-	}{
-		Repo:  r.RepoCtx,
-		Group: group,
-		Pkg:   pkg,
+	pkgName := ""
+	if pkg != nil {
+		pkgName = pkg.Name
+	}
+	data := PageData{
+		PageKind:  "package",
+		PageTitle: fmt.Sprintf("RepoView: %s - %s", pkgName, r.RepoCtx.Title),
+		Robots:    "noindex,follow",
+		Repo:      r.RepoCtx,
+		Group:     group,
+		Pkg:       pkg,
 	}
 
 	var buf bytes.Buffer
@@ -264,20 +322,32 @@ func (r *Renderer) RenderRSS(latest []*models.Package, url string) ([]byte, erro
 	return buf.Bytes(), nil
 }
 
-// RenderSearchIndex generates the search.json file content using a compact row-based format.
+// RenderSearchIndex generates search.json using extended Structure-of-Arrays columns:
+// ["n", "v", "a", "s", "f", "g", "l", "p", "t"] (name, evr, arch, summary, href, group, license, provides/source, tags/cves).
 func (r *Renderer) RenderSearchIndex(pkgs []*models.Package) ([]byte, error) {
 	index := models.SearchIndex{
-		Schema: []string{"n", "v", "a", "s", "f"},
+		Schema: []string{"n", "v", "a", "s", "f", "g", "l", "p", "t"},
 		Data:   make([][]string, 0, len(pkgs)),
 	}
 
 	for _, p := range pkgs {
+		groupVal := p.Group
+		if groupVal == "" {
+			groupVal = p.Section
+		}
+		if groupVal == "" {
+			groupVal = p.RpmGroup
+		}
 		row := []string{
 			p.Name,
 			p.EVR(),
 			p.Arch,
 			p.Summary,
 			p.Filename(),
+			groupVal,
+			p.License,
+			compactProvidesString(p),
+			compactTagsAndCVEs(p),
 		}
 		index.Data = append(index.Data, row)
 	}
@@ -285,102 +355,147 @@ func (r *Renderer) RenderSearchIndex(pkgs []*models.Package) ([]byte, error) {
 	return json.Marshal(index)
 }
 
-// WriteToFile atomically writes content to a file in the output directory.
-// It verifies that the target path does not escape the output directory (path traversal defense),
-// writes to a temporary file, flushes/syncs, and atomically renames to the destination.
-func (r *Renderer) WriteToFile(filename string, content []byte) error {
-	fullPath := filepath.Join(r.OutDir, filename)
-
-	// Security: Prevent path traversal
-	rel, err := filepath.Rel(r.OutDir, fullPath)
-	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return fmt.Errorf("security violation: target path %s escapes output directory %s", filename, r.OutDir)
+func compactProvidesString(p *models.Package) string {
+	var tokens []string
+	seen := make(map[string]bool)
+	addTok := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		tokens = append(tokens, s)
 	}
-
-	// Ensure parent directory exists
-	dir := filepath.Dir(fullPath)
-	if err := util.EnsureDir(dir); err != nil {
-		return fmt.Errorf("failed to create directory for %s: %w", fullPath, err)
-	}
-
-	// Write atomically via temporary file in the same directory (ensuring same filesystem for atomic rename)
-	tmpFile, err := os.CreateTemp(dir, ".repoview-tmp-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file for %s: %w", fullPath, err)
-	}
-	tmpName := tmpFile.Name()
-
-	// Ensure the generated web file has DefaultFilePerm permissions (os.CreateTemp defaults to 0600)
-	// #nosec G302, G306 -- public web pages require standard permissions for web server access
-	if err := os.Chmod(tmpName, util.DefaultFilePerm); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("failed to chmod temp file for %s: %w", fullPath, err)
-	}
-
-	if _, err := tmpFile.Write(content); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("failed to write temp file for %s: %w", fullPath, err)
-	}
-
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpName)
-		return fmt.Errorf("failed to sync temp file for %s: %w", fullPath, err)
-	}
-	_ = tmpFile.Close()
-
-	if err := os.Rename(tmpName, fullPath); err != nil {
-		// Windows replacement fallback
-		_ = os.Remove(fullPath)
-		if err2 := os.Rename(tmpName, fullPath); err2 != nil {
-			_ = os.Remove(tmpName)
-			return fmt.Errorf("failed to atomically rename %s to %s: %w", tmpName, fullPath, err2)
+	addTok(p.SourcePackage)
+	if p.Dependencies != nil {
+		for _, prov := range p.Dependencies.Provides {
+			if prov == nil || prov.Name == p.Name {
+				continue
+			}
+			addTok(prov.Name)
+			if len(tokens) >= 24 {
+				break
+			}
 		}
 	}
+	return strings.Join(tokens, " ")
+}
 
-	return nil
+func compactTagsAndCVEs(p *models.Package) string {
+	var tokens []string
+	seen := make(map[string]bool)
+	addTok := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		tokens = append(tokens, s)
+	}
+	for _, t := range p.Tags {
+		addTok(t)
+	}
+	for _, adv := range p.Advisories {
+		addTok(adv.ID)
+		for _, cve := range adv.CVEs {
+			addTok(cve)
+		}
+	}
+	return strings.Join(tokens, " ")
+}
+
+// WriteToFile delegates atomic contained writing to Renderer.Sink.
+func (r *Renderer) WriteToFile(filename string, content []byte) error {
+	if r.Sink == nil {
+		r.Sink = &AtomicLocalSink{RootDir: r.OutDir}
+	}
+	return r.Sink.WriteFile(filename, content)
+}
+
+// AssetStateTracker enables skipping unchanged static asset writes across incremental runs.
+type AssetStateTracker interface {
+	CheckChanged(filename string, content []byte) (string, bool)
+	MarkWritten(filename, hash string)
 }
 
 // WriteAssets copies the layout files to the output directory.
 // It supports both embedded assets and custom assets from the filesystem.
 func (r *Renderer) WriteAssets() error {
+	_, err := r.WriteAssetsWithState(nil, false)
+	return err
+}
+
+// WriteAssetsWithState writes layout CSS/JS assets, skipping files whose content hashes match state.
+// It returns the tracked relative asset keys (e.g. "layout/repostyle.css") for stale-file exclusion.
+func (r *Renderer) WriteAssetsWithState(state AssetStateTracker, force bool) ([]string, error) {
+	if r.Sink == nil {
+		r.Sink = &AtomicLocalSink{RootDir: r.OutDir}
+	}
 	layoutDir := filepath.Join(r.OutDir, "layout")
-	if err := util.EnsureDir(layoutDir); err != nil {
-		return err
+	var assetKeys []string
+
+	writeTrackedAsset := func(relPath, _ string, content []byte) error {
+		assetKey := filepath.ToSlash(filepath.Join("layout", relPath))
+		assetKeys = append(assetKeys, assetKey)
+
+		if state != nil {
+			hash, changed := state.CheckChanged(assetKey, content)
+			if !force && !changed && r.Sink.Exists(assetKey) {
+				return nil
+			}
+			if err := r.Sink.WriteFile(assetKey, content); err != nil {
+				return err
+			}
+			state.MarkWritten(assetKey, hash)
+			return nil
+		}
+
+		return r.Sink.WriteFile(assetKey, content)
 	}
 
 	if r.TemplateDir != "" {
 		// Copy recursively from custom layout directory
 		srcLayout := filepath.Join(r.TemplateDir, "layout")
 		if _, err := os.Stat(srcLayout); os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
 
-		return filepath.WalkDir(srcLayout, func(path string, d fs.DirEntry, err error) error {
+		err := filepath.WalkDir(srcLayout, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return err
+				return fmt.Errorf("%w: %w", models.ErrIO, err)
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%w: symlink not permitted in custom layout assets: %s", models.ErrIntegrity, path)
 			}
 			relPath, err := filepath.Rel(srcLayout, path)
 			if err != nil {
 				return err
 			}
-			destPath := filepath.Join(layoutDir, relPath)
-			if d.IsDir() {
-				return util.EnsureDir(destPath)
+			if relPath == "." {
+				return nil
 			}
-			// #nosec G304, G122 -- path is discovered from walking validated user templateDir
+			if _, err := util.ResolveContainedPath(srcLayout, relPath); err != nil {
+				return fmt.Errorf("%w: %w", models.ErrIntegrity, err)
+			}
+			destPath, err := util.ResolveContainedPath(layoutDir, relPath)
+			if err != nil {
+				return fmt.Errorf("%w: %w", models.ErrIntegrity, err)
+			}
+			if d.IsDir() {
+				return nil
+			}
+			// #nosec G304 G122 -- path is verified contained inside validated user templateDir without symlinks
 			content, err := os.ReadFile(filepath.Clean(path))
 			if err != nil {
-				return err
+				return fmt.Errorf("%w: %w", models.ErrIO, err)
 			}
-			return util.WriteWebFile(destPath, content)
+			return writeTrackedAsset(relPath, destPath, content)
 		})
+		return assetKeys, err
 	}
 
 	// Walk the embedded FS "templates/layout"
-	return fs.WalkDir(templateFS, "templates/layout", func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(templateFS, "templates/layout", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -388,10 +503,10 @@ func (r *Renderer) WriteAssets() error {
 		if err != nil {
 			return err
 		}
-		destPath := filepath.Join(layoutDir, relPath)
-		if d.IsDir() {
-			return util.EnsureDir(destPath)
+		if relPath == "." || d.IsDir() {
+			return nil
 		}
+		destPath := filepath.Join(layoutDir, relPath)
 
 		// Read file content
 		content, err := templateFS.ReadFile(path)
@@ -399,7 +514,43 @@ func (r *Renderer) WriteAssets() error {
 			return err
 		}
 
-		// Write to output
-		return util.WriteWebFile(destPath, content)
+		return writeTrackedAsset(relPath, destPath, content)
 	})
+	return assetKeys, err
+}
+
+// xmlEscape escapes arbitrary text for safe inclusion inside XML elements and attributes.
+func xmlEscape(v interface{}) string {
+	var buf bytes.Buffer
+	_ = xml.EscapeText(&buf, []byte(fmt.Sprint(v)))
+	return buf.String()
+}
+
+// cdataHTML HTML-escapes text and neutralizes any CDATA end sequence (]]>) for safe CDATA embedding.
+func cdataHTML(v interface{}) string {
+	escaped := html.EscapeString(fmt.Sprint(v))
+	return strings.ReplaceAll(escaped, "]]>", "]]]]><![CDATA[>")
+}
+
+// safeURL permits only relative URLs (excluding protocol-relative "//") or http/https/ftp schemes.
+// Any potentially dangerous scheme (such as javascript: or data:) is replaced with an empty string.
+func safeURL(v interface{}) string {
+	raw := strings.TrimSpace(fmt.Sprint(v))
+	if raw == "" {
+		return ""
+	}
+	lower := strings.ToLower(raw)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "ftp://") {
+		return raw
+	}
+	if strings.HasPrefix(raw, "//") {
+		return ""
+	}
+	if idx := strings.IndexByte(raw, ':'); idx != -1 {
+		// Reject scheme-prefixed URIs (e.g. javascript:, data:, vbscript:) unless matched above
+		if slashIdx := strings.IndexByte(raw, '/'); slashIdx == -1 || idx < slashIdx {
+			return ""
+		}
+	}
+	return raw
 }

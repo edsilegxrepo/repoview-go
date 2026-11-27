@@ -2,6 +2,7 @@ package repo
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -248,7 +249,8 @@ func TestRepositoryAccess_EnrichAndReadFiles(t *testing.T) {
 		Name:         "demo",
 		LocationHref: "demo-1.0.rpm",
 	}
-	ra.EnrichPackageDetails(tempDir, []*models.Package{pkg})
+	ra.SetRepoDir(tempDir)
+	ra.EnrichPackageDetails([]*models.Package{pkg})
 
 	// 2. ReadPackageFiles with empty location href
 	emptyPkg := &models.Package{LocationHref: ""}
@@ -267,5 +269,47 @@ func TestRepositoryAccess_EnrichAndReadFiles(t *testing.T) {
 	missingPkg := &models.Package{LocationHref: "missing.rpm"}
 	if _, err := ra.ReadPackageFiles(tempDir, missingPkg); err == nil {
 		t.Errorf("expected error for missing rpm file, got nil")
+	}
+}
+
+func TestRepositoryAccess_GetPackageDependencies_ErrorPropagation(t *testing.T) {
+	primaryPath, otherPath := setupTestDBs(t)
+
+	// Corrupt/remove requires table before opening read-only RepositoryAccess
+	rw, err := sql.Open("sqlite3", primaryPath)
+	if err != nil {
+		t.Fatalf("failed to open rw db: %v", err)
+	}
+	if _, err := rw.Exec(`DROP TABLE requires`); err != nil {
+		_ = rw.Close()
+		t.Fatalf("failed to drop requires table: %v", err)
+	}
+	_ = rw.Close()
+
+	ra, err := NewRepositoryAccess(primaryPath, otherPath)
+	if err != nil {
+		// Prepare on missing table also surfaces ErrRepoMetadata cleanly
+		if !errors.Is(err, models.ErrRepoMetadata) {
+			t.Fatalf("expected ErrRepoMetadata on missing requires table, got: %v", err)
+		}
+		return
+	}
+	defer func() { _ = ra.Close() }()
+
+	if _, err := ra.GetPackageDependencies(1); !errors.Is(err, models.ErrRepoMetadata) {
+		t.Errorf("expected ErrRepoMetadata when requires query fails, got: %v", err)
+	}
+}
+
+func TestRepositoryAccess_ReadOnlyAndSecurityPragmas(t *testing.T) {
+	primaryPath, otherPath := setupTestDBs(t)
+	ra, err := NewRepositoryAccess(primaryPath, otherPath)
+	if err != nil {
+		t.Fatalf("failed to open repo access: %v", err)
+	}
+	defer func() { _ = ra.Close() }()
+
+	if _, err := ra.PrimaryDB.Exec(`CREATE TABLE pwned (x INT)`); err == nil {
+		t.Errorf("expected write DDL to fail under query_only/ro mode")
 	}
 }

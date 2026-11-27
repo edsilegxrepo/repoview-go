@@ -22,13 +22,13 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -37,6 +37,31 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/portal"
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
+
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+func printOption(w io.Writer, long, desc string, def interface{}) {
+	defStr := ""
+	if def != nil {
+		defStr = fmt.Sprintf(" (default %v)", def)
+	}
+	if s, ok := def.(string); ok && s == "" {
+		defStr = ""
+	}
+	if b, ok := def.(bool); ok && !b {
+		defStr = ""
+	}
+	_, _ = fmt.Fprintf(w, "  --%-22s\t%s%s\n", long, desc, defStr)
+}
 
 // Version string for the repoview binary.
 var version = "dev"
@@ -59,10 +84,6 @@ func (s *stringList) Set(value string) error {
 // run parses arguments, executes the generation pipeline, and returns the appropriate exit code.
 // It accepts stdout and stderr writers to allow in-process unit testing without global state leaks.
 func run(args []string, stdout, stderr io.Writer) int {
-	// Enforce standard umask (0022) so directories (0755) and files (0644)
-	// are created with web-accessible permissions even if the parent environment (systemd/cron) has a restrictive umask.
-	util.SetUmask(util.DefaultUmask)
-
 	// Check for portal subcommand
 	if len(args) > 0 && args[0] == "portal" {
 		return runPortal(args[1:], stdout, stderr)
@@ -78,10 +99,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		url         string
 		baseURL     string
 		format      string
+		suite       string
+		arch        string
 		force       bool
 		quiet       bool
 		showVer     bool
 		portalURL   string
+		gpgKey      string
+		workers     int
 		ignoreList  stringList
 		excludeArch stringList
 	)
@@ -95,6 +120,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&url, "url", "", "Repository URL (for RSS feed)")
 	fs.StringVar(&baseURL, "baseurl", "", "Repository base URL for client configuration")
 	fs.StringVar(&format, "format", "auto", "Repository format: auto, rpm, or deb")
+	fs.StringVar(&suite, "suite", "", "Debian suite/codename selector for multi-suite roots")
+	fs.StringVar(&arch, "arch", "", "Target architecture selector for multi-arch Debian roots")
 	fs.StringVar(&templateDir, "template-dir", "", "Template directory")
 	fs.BoolVar(&force, "force", false, "Force regeneration")
 	fs.BoolVar(&quiet, "quiet", false, "Quiet mode")
@@ -102,44 +129,38 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&ignoreList, "ignore-package", "Ignore package glob (can be repeated)")
 	fs.Var(&excludeArch, "exclude-arch", "Exclude architecture (can be repeated)")
 	fs.StringVar(&portalURL, "portal-url", "auto", "Parent portal URL ('auto', 'none', or custom URL/path)")
+	fs.StringVar(&gpgKey, "gpgkey", "", "GPG public key URL or path for client snippets (enables gpgcheck=1)")
+	fs.IntVar(&workers, "workers", 0, "Parallel worker count (1-16, default auto)")
 	fs.BoolVar(&showVer, "version", false, "Display version")
 
 	// Custom Usage output to display clean long-only options to the user.
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "Usage:\n  repoview [options] <repodir>\n  repoview portal [options] [repodir]\n\nOptions:\n")
 
-		printOption := func(long, desc string, def interface{}) {
-			defStr := ""
-			if def != nil {
-				defStr = fmt.Sprintf(" (default %v)", def)
-			}
-			if s, ok := def.(string); ok && s == "" {
-				defStr = ""
-			}
-			if b, ok := def.(bool); ok && !b {
-				defStr = ""
-			}
-
-			_, _ = fmt.Fprintf(stderr, "  --%-20s\t%s%s\n", long, desc, defStr)
-		}
-
-		printOption("output-dir <dir>", "Output directory", "repoview")
-		printOption("state-dir <dir>", "State directory", "output directory")
-		printOption("title <text>", "Repository title", "Repoview")
-		printOption("url <url>", "Repository URL (for RSS feed)", "")
-		printOption("baseurl <url>", "Repository base URL for client configuration", "")
-		printOption("format <type>", "Repository format (auto, rpm, deb)", "auto")
-		printOption("template-dir <dir>", "Template directory", "embedded")
-		printOption("comps <file>", "Alternative comps.xml file", "")
-		printOption("ignore-package <glob>", "Ignore package glob (can be repeated)", "")
-		printOption("exclude-arch <arch>", "Exclude architecture (can be repeated)", "")
-		printOption("portal-url <url>", "Parent portal URL ('auto', 'none', or path)", "auto")
-		printOption("force", "Force regeneration", false)
-		printOption("quiet", "Quiet mode", false)
-		printOption("version", "Display version information", false)
+		printOption(stderr, "output-dir <dir>", "Output directory", "repoview")
+		printOption(stderr, "state-dir <dir>", "State directory", "output directory")
+		printOption(stderr, "title <text>", "Repository title", "Repoview")
+		printOption(stderr, "url <url>", "Repository URL (for RSS feed)", "")
+		printOption(stderr, "baseurl <url>", "Repository base URL for client configuration", "")
+		printOption(stderr, "format <type>", "Repository format (auto, rpm, deb)", "auto")
+		printOption(stderr, "suite <name>", "Debian suite selector for multi-suite roots", "")
+		printOption(stderr, "arch <arch>", "Debian arch selector for multi-arch roots", "")
+		printOption(stderr, "template-dir <dir>", "Template directory", "embedded")
+		printOption(stderr, "comps <file>", "Alternative comps.xml file", "")
+		printOption(stderr, "ignore-package <glob>", "Ignore package glob (can be repeated)", "")
+		printOption(stderr, "exclude-arch <arch>", "Exclude architecture (can be repeated)", "")
+		printOption(stderr, "portal-url <url>", "Parent portal URL ('auto', 'none', or path)", "auto")
+		printOption(stderr, "gpgkey <url-or-path>", "GPG public key URL or path (enables gpgcheck=1)", "")
+		printOption(stderr, "workers <n>", "Parallel worker count (1-16, default auto)", "")
+		printOption(stderr, "force", "Force regeneration", false)
+		printOption(stderr, "quiet", "Quiet mode", false)
+		printOption(stderr, "version", "Display version information", false)
 	}
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return app.ExitSuccess
+		}
 		return app.ExitUsageError
 	}
 
@@ -160,6 +181,71 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if fi, err := os.Stat(repoDir); err != nil || !fi.IsDir() {
 		_, _ = fmt.Fprintf(stderr, "Error: repository directory does not exist or is not a directory: %s\n", repoDir)
 		return app.ExitRepoMetadataError
+	}
+
+	// Load optional repoview.yaml defaults before resolving CLI flag overrides
+	cliFlags := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		cliFlags[f.Name] = true
+	})
+
+	var descText, distroName, channelName, badgeText, iconName string
+	if rcPath, ok := app.FindRepoConfig(repoDir); ok {
+		rc, err := app.LoadRepoConfig(rcPath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
+			return app.ExitConfigError
+		}
+		if !cliFlags["output-dir"] && rc.OutputDir != "" {
+			outputDir = rc.OutputDir
+		}
+		if !cliFlags["state-dir"] && rc.StateDir != "" {
+			stateDir = rc.StateDir
+		}
+		if !cliFlags["title"] && rc.Title != "" {
+			title = rc.Title
+		}
+		if !cliFlags["url"] && rc.URL != "" {
+			url = rc.URL
+		}
+		if !cliFlags["baseurl"] && rc.BaseURL != "" {
+			baseURL = rc.BaseURL
+		}
+		if !cliFlags["format"] && rc.Format != "" {
+			format = rc.Format
+		}
+		if !cliFlags["suite"] && rc.Suite != "" {
+			suite = rc.Suite
+		}
+		if !cliFlags["arch"] && rc.Arch != "" {
+			arch = rc.Arch
+		}
+		if !cliFlags["template-dir"] && rc.TemplateDir != "" {
+			templateDir = rc.TemplateDir
+		}
+		if !cliFlags["comps"] && rc.Comps != "" {
+			compsFile = rc.Comps
+		}
+		if !cliFlags["portal-url"] && rc.PortalURL != "" {
+			portalURL = rc.PortalURL
+		}
+		if !cliFlags["gpgkey"] && rc.GPGKey != "" {
+			gpgKey = rc.GPGKey
+		}
+		if !cliFlags["workers"] && rc.Workers > 0 {
+			workers = rc.Workers
+		}
+		if !cliFlags["ignore-package"] && len(rc.IgnorePackage) > 0 {
+			ignoreList = rc.IgnorePackage
+		}
+		if !cliFlags["exclude-arch"] && len(rc.ExcludeArch) > 0 {
+			excludeArch = rc.ExcludeArch
+		}
+		descText = rc.Description
+		distroName = rc.Distro
+		channelName = rc.Channel
+		badgeText = rc.Badge
+		iconName = rc.Icon
 	}
 
 	// Validate format option
@@ -197,50 +283,56 @@ func run(args []string, stdout, stderr io.Writer) int {
 		CompsFile:   compsFile,
 		TemplateDir: templateDir,
 		Title:       title,
+		Description: descText,
 		URL:         url,
 		BaseURL:     baseURL,
 		Format:      repoFormat,
+		Suite:       suite,
+		Arch:        arch,
+		Distro:      distroName,
+		Channel:     channelName,
+		Badge:       badgeText,
+		Icon:        iconName,
 		Force:       force,
 		Quiet:       quiet,
 		IgnoreList:  ignoreList,
 		ExcludeArch: excludeArch,
 		PortalURL:   portalURL,
+		GPGKey:      gpgKey,
+		Workers:     workers,
 		Version:     version,
+		Stdout:      stdout,
+		Stderr:      stderr,
 	}
 
 	// Instantiate generator and execute generation workflow
 	generator := app.NewGenerator(config)
 	if err := generator.Run(); err != nil {
 		var partialErr *app.PartialFailureError
-		var safetyErr *app.SafetyError
 
-		// Translate internal errors into structured diagnostic exit codes
+		// Translate domain errors deterministically via errors.Is / errors.As
 		switch {
-		case errors.As(err, &safetyErr):
-			_, _ = fmt.Fprintf(stderr, "Safety Violation: %v\n", safetyErr)
-			return app.ExitUsageError
+		case errors.Is(err, app.ErrSafety) || errors.Is(err, app.ErrIntegrity):
+			_, _ = fmt.Fprintf(stderr, "Safety Violation: %v\n", err)
+			return app.ExitSafetyError
 		case errors.As(err, &partialErr):
 			_, _ = fmt.Fprintf(stderr, "Warning: %v\n", partialErr)
 			return app.ExitPartialFailure
+		case errors.Is(err, app.ErrConfig):
+			_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
+			return app.ExitConfigError
+		case errors.Is(err, app.ErrRepoMetadata):
+			_, _ = fmt.Fprintf(stderr, "Repository Metadata Error: %v\n", err)
+			return app.ExitRepoMetadataError
+		case errors.Is(err, app.ErrTemplate):
+			_, _ = fmt.Fprintf(stderr, "Template Error: %v\n", err)
+			return app.ExitTemplateError
+		case errors.Is(err, app.ErrIO):
+			_, _ = fmt.Fprintf(stderr, "I/O Error: %v\n", err)
+			return app.ExitIOError
 		default:
-			errMsg := strings.ToLower(err.Error())
-			switch {
-			case strings.Contains(errMsg, "safety violation"):
-				_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
-				return app.ExitUsageError
-			case strings.Contains(errMsg, "repomd") || strings.Contains(errMsg, "primary") || strings.Contains(errMsg, "sqlite") || strings.Contains(errMsg, "decompress") || strings.Contains(errMsg, "packages") || strings.Contains(errMsg, "debian"):
-				_, _ = fmt.Fprintf(stderr, "Repository Metadata Error: %v\n", err)
-				return app.ExitRepoMetadataError
-			case strings.Contains(errMsg, "template"):
-				_, _ = fmt.Fprintf(stderr, "Template Error: %v\n", err)
-				return app.ExitTemplateError
-			case strings.Contains(errMsg, "output dir") || strings.Contains(errMsg, "no space") || strings.Contains(errMsg, "permission"):
-				_, _ = fmt.Fprintf(stderr, "I/O Error: %v\n", err)
-				return app.ExitIOError
-			default:
-				_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
-				return 1
-			}
+			_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
+			return app.ExitGeneralError
 		}
 	}
 
@@ -268,12 +360,7 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		showVer         bool
 	)
 
-	defaultWorkers := runtime.NumCPU() * 2
-	if defaultWorkers < 1 {
-		defaultWorkers = 1
-	} else if defaultWorkers > 16 {
-		defaultWorkers = 16
-	}
+	defaultWorkers := util.ClampWorkers(0, util.MaxDefaultWorkers)
 
 	fs := flag.NewFlagSet("repoview portal", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -298,39 +385,28 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(stderr, "Usage: repoview portal [options] [repodir]\n\nOptions:\n")
 
-		printOption := func(long, desc string, def interface{}) {
-			defStr := ""
-			if def != nil {
-				defStr = fmt.Sprintf(" (default %v)", def)
-			}
-			if s, ok := def.(string); ok && s == "" {
-				defStr = ""
-			}
-			if b, ok := def.(bool); ok && !b {
-				defStr = ""
-			}
-			_, _ = fmt.Fprintf(stderr, "  --%-20s\t%s%s\n", long, desc, defStr)
-		}
-
-		printOption("portal-home <dir>", "Detached portal output directory (outside repo)", "")
-		printOption("in-place", "Generate repoview files inside source repository mirrors (legacy)", false)
-		printOption("portal-url <url>", "Portal public base URL for UI browsing and portal RSS feed", "")
-		printOption("repo-url <url>", "Repository package download and client configuration base URL", "")
-		printOption("title <text>", "Portal page title", "Enterprise Package Repositories")
-		printOption("description <text>", "Portal page description", "")
-		printOption("config <file>", "Path to optional portal.yaml configuration", "")
-		printOption("dump-config <file>", "Dump auto-discovered catalog to starter YAML and exit", "")
-		printOption("max-depth <n>", "Maximum directory scan depth", 5)
-		printOption("require-rendered", "Only include repositories with generated repoview pages", false)
-		printOption("render-missing", "Automatically generate repoview pages for raw repositories in parallel", false)
-		printOption("render-all", "Force generate repoview pages for all discovered repositories in parallel", false)
-		printOption("workers <n>", "Parallel worker concurrency for batch rendering (1-16)", defaultWorkers)
-		printOption("force", "Force overwrite existing index.html even if not created by RepoView", false)
-		printOption("quiet", "Quiet mode", false)
-		printOption("version", "Display version information", false)
+		printOption(stderr, "portal-home <dir>", "Detached portal output directory (outside repo)", "")
+		printOption(stderr, "in-place", "Generate repoview files inside source repository mirrors (legacy)", false)
+		printOption(stderr, "portal-url <url>", "Portal public base URL for UI browsing and portal RSS feed", "")
+		printOption(stderr, "repo-url <url>", "Repository package download and client configuration base URL", "")
+		printOption(stderr, "title <text>", "Portal page title", "Enterprise Package Repositories")
+		printOption(stderr, "description <text>", "Portal page description", "")
+		printOption(stderr, "config <file>", "Path to optional portal.yaml configuration", "")
+		printOption(stderr, "dump-config <file>", "Dump auto-discovered catalog to starter YAML and exit", "")
+		printOption(stderr, "max-depth <n>", "Maximum directory scan depth", 5)
+		printOption(stderr, "require-rendered", "Only include repositories with generated repoview pages", false)
+		printOption(stderr, "render-missing", "Automatically generate repoview pages for raw repositories in parallel", false)
+		printOption(stderr, "render-all", "Force generate repoview pages for all discovered repositories in parallel", false)
+		printOption(stderr, "workers <n>", "Parallel worker concurrency for batch rendering (1-16)", defaultWorkers)
+		printOption(stderr, "force", "Force overwrite existing index.html even if not created by RepoView", false)
+		printOption(stderr, "quiet", "Quiet mode", false)
+		printOption(stderr, "version", "Display version information", false)
 	}
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return app.ExitSuccess
+		}
 		return app.ExitUsageError
 	}
 
@@ -346,8 +422,8 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 
 	absTargetDir, err := filepath.Abs(targetDir)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "Error: failed to resolve directory: %v\n", err)
-		return app.ExitUsageError
+		_, _ = fmt.Fprintf(stderr, "I/O Error: failed to resolve directory: %v\n", err)
+		return app.ExitIOError
 	}
 
 	fi, err := os.Stat(absTargetDir)
@@ -362,7 +438,7 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		loadedCfg, err := portal.LoadConfig(configPath)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
-			return app.ExitUsageError
+			return app.ExitConfigError
 		}
 		portalCfg = loadedCfg
 	} else {
@@ -371,7 +447,7 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 			loadedCfg, err := portal.LoadConfig(foundConfig)
 			if err != nil {
 				_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
-				return app.ExitUsageError
+				return app.ExitConfigError
 			}
 			portalCfg = loadedCfg
 		} else {
@@ -452,8 +528,8 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		} else {
 			absHome, err := filepath.Abs(effectivePortalHome)
 			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "Error: failed to resolve portal home directory: %v\n", err)
-				return app.ExitUsageError
+				_, _ = fmt.Fprintf(stderr, "I/O Error: failed to resolve portal home directory: %v\n", err)
+				return app.ExitIOError
 			}
 			finalOutputDir = absHome
 		}
@@ -480,6 +556,7 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		MaxDepth:        portalCfg.AutoDiscovery.MaxDepth,
 		RequireRendered: initialRequireRendered,
 		ExcludePatterns: portalCfg.AutoDiscovery.Exclude,
+		TaxonomyRules:   portalCfg.Taxonomy,
 	}
 	scanner := portal.NewScanner(scanCfg)
 	repos, err := scanner.Scan()
@@ -487,12 +564,21 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "Scan Error: %v\n", err)
 		return app.ExitRepoMetadataError
 	}
+	if !quiet {
+		for _, wMsg := range scanner.Warnings() {
+			_, _ = fmt.Fprintln(stderr, wMsg)
+		}
+	}
 
-	// Parallel Batch Rendering for unrendered or all repositories
+	// Parallel Batch Rendering for unrendered or all repositories (updating catalog entries in memory without re-scanning)
+	renderFailureCount := 0
 	if renderAll || renderMissing {
 		var targets []*portal.DiscoveredRepo
 		for _, r := range repos {
 			if r.IsExternal {
+				continue
+			}
+			if ov, ok := portalCfg.LookupOverride(r.RelPath, r.Path); ok && ov.Hidden {
 				continue
 			}
 			if renderAll || !r.IsRendered {
@@ -509,122 +595,173 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 				_, _ = fmt.Fprintf(stdout, "Discovered %d %s repositories. Rendering in parallel with %d workers...\n", len(targets), actionDesc, workers)
 			}
 
-			numWorkers := workers
-			if numWorkers > len(targets) {
-				numWorkers = len(targets)
-			}
-
-			jobs := make(chan *portal.DiscoveredRepo, len(targets))
-			for _, repo := range targets {
-				jobs <- repo
-			}
-			close(jobs)
-
-			var wg sync.WaitGroup
 			var errMu sync.Mutex
 			var renderErrors []error
+			safeStdout := &syncWriter{w: stdout}
+			safeStderr := &syncWriter{w: stderr}
 
-			for w := 0; w < numWorkers; w++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for r := range jobs {
-						var repoOut string
-						if effectivePortalHome != "" {
-							if r.RelPath == "." || r.RelPath == "" {
-								repoOut = filepath.Join(finalOutputDir, "repoview")
-							} else {
-								repoOut = filepath.Join(finalOutputDir, r.RelPath)
-							}
+			util.ForEachConcurrent(targets, workers, func(_ int, r *portal.DiscoveredRepo) {
+				var repoOut string
+				if effectivePortalHome != "" {
+					if r.RelPath == "." || r.RelPath == "" {
+						repoOut = filepath.Join(finalOutputDir, "repoview")
+					} else {
+						repoOut = filepath.Join(finalOutputDir, r.RelPath)
+					}
+				} else {
+					repoOut = filepath.Join(r.Path, "repoview")
+				}
+
+				portalLink := "auto"
+				if effectivePortalURL != "" {
+					portalLink = effectivePortalURL
+				} else if rel, err := filepath.Rel(repoOut, filepath.Join(finalOutputDir, "index.html")); err == nil {
+					portalLink = filepath.ToSlash(rel)
+				}
+
+				ov, hasOv := portalCfg.LookupOverride(r.RelPath, r.Path)
+
+				// Compute pkgBaseURL for download links & client configs (.repo/.sources)
+				var pkgBaseURL string
+				switch {
+				case hasOv && ov.BaseURL != "":
+					pkgBaseURL = strings.TrimRight(ov.BaseURL, "/")
+				case effectiveRepoURL != "":
+					baseClean := strings.TrimRight(effectiveRepoURL, "/")
+					if r.Format == models.FormatDEB {
+						archRoot := strings.Trim(r.DebArchiveRoot(), "/")
+						if archRoot == "" || archRoot == "." {
+							pkgBaseURL = baseClean
 						} else {
-							repoOut = filepath.Join(r.Path, "repoview")
+							pkgBaseURL = baseClean + "/" + archRoot
 						}
-
-						portalLink := "auto"
-						if effectivePortalURL != "" {
-							portalLink = effectivePortalURL
-						} else if rel, err := filepath.Rel(repoOut, filepath.Join(finalOutputDir, "index.html")); err == nil {
-							portalLink = filepath.ToSlash(rel)
-						}
-
-						// Compute pkgBaseURL for download links & client configs (.repo/.sources)
-						var pkgBaseURL string
-						if effectiveRepoURL != "" {
-							baseClean := strings.TrimRight(effectiveRepoURL, "/")
-							if r.Format == models.FormatDEB {
-								archRoot := strings.Trim(r.DebArchiveRoot(), "/")
-								if archRoot == "" || archRoot == "." {
-									pkgBaseURL = baseClean
-								} else {
-									pkgBaseURL = baseClean + "/" + archRoot
-								}
-							} else {
-								rel := strings.Trim(filepath.ToSlash(r.RelPath), "/")
-								if rel == "" || rel == "." {
-									pkgBaseURL = baseClean
-								} else {
-									pkgBaseURL = baseClean + "/" + rel
-								}
-							}
-						} else if effectivePortalHome != "" {
-							// Detached with local files: compute relative path from repoOut to raw package files
-							targetRawDir := r.Path
-							if r.Format == models.FormatDEB {
-								debRoot := r.DebArchiveRoot()
-								if debRoot == "" || debRoot == "." {
-									targetRawDir = absTargetDir
-								} else {
-									targetRawDir = filepath.Join(absTargetDir, debRoot)
-								}
-							}
-							if rel, err := filepath.Rel(repoOut, targetRawDir); err == nil {
-								pkgBaseURL = filepath.ToSlash(rel)
-							}
-						}
-
-						// Resolve child repository title from overrides or inferred title
-						repoTitle := r.Title
-						if ov, ok := portalCfg.Overrides[r.RelPath]; ok && ov.Title != "" {
-							repoTitle = ov.Title
-						} else if ov, ok := portalCfg.Overrides[r.Path]; ok && ov.Title != "" {
-							repoTitle = ov.Title
-						}
-
-						repoCfg := app.Config{
-							RepoDir:        r.Path,
-							OutputDir:      repoOut,
-							Format:         r.Format,
-							Title:          repoTitle,
-							Quiet:          true,
-							Force:          force,
-							PortalURL:      portalLink,
-							PackageBaseURL: pkgBaseURL,
-							BaseURL:        pkgBaseURL,
-							Version:        version,
-						}
-						gen := app.NewGenerator(repoCfg)
-						if genErr := gen.Run(); genErr != nil {
-							errMu.Lock()
-							renderErrors = append(renderErrors, fmt.Errorf("failed to render %s: %w", r.Path, genErr))
-							errMu.Unlock()
+					} else {
+						rel := strings.Trim(filepath.ToSlash(r.RelPath), "/")
+						if rel == "" || rel == "." {
+							pkgBaseURL = baseClean
+						} else {
+							pkgBaseURL = baseClean + "/" + rel
 						}
 					}
-				}()
-			}
-			wg.Wait()
+				case effectivePortalHome != "":
+					targetRawDir := r.Path
+					if r.Format == models.FormatDEB {
+						debRoot := r.DebArchiveRoot()
+						if debRoot == "" || debRoot == "." {
+							targetRawDir = absTargetDir
+						} else {
+							targetRawDir = filepath.Join(absTargetDir, debRoot)
+						}
+					}
+					if rel, err := filepath.Rel(repoOut, targetRawDir); err == nil {
+						pkgBaseURL = filepath.ToSlash(rel)
+					}
+				}
+
+				repoTitle := r.Title
+				repoFormat := r.Format
+				repoSuite := r.Suite
+				repoArch := r.Arch
+				if hasOv {
+					if ov.Title != "" {
+						repoTitle = ov.Title
+					}
+					if ov.Format != "" {
+						repoFormat = models.RepoFormat(strings.ToLower(strings.TrimSpace(ov.Format)))
+					}
+					if ov.Suite != "" {
+						repoSuite = ov.Suite
+					}
+					if ov.Arch != "" {
+						repoArch = ov.Arch
+					}
+				}
+
+				repoCfg := app.Config{
+					RepoDir:        r.Path,
+					OutputDir:      repoOut,
+					Format:         repoFormat,
+					Suite:          repoSuite,
+					Arch:           repoArch,
+					Title:          repoTitle,
+					Description:    ov.Description,
+					Distro:         ov.Distro,
+					Channel:        ov.Channel,
+					Badge:          ov.Badge,
+					Icon:           ov.Icon,
+					GPGKey:         ov.GPGKey,
+					CompsFile:      ov.Comps,
+					IgnoreList:     ov.IgnorePackage,
+					ExcludeArch:    ov.ExcludeArch,
+					Quiet:          true,
+					Force:          force,
+					PortalURL:      portalLink,
+					PackageBaseURL: pkgBaseURL,
+					BaseURL:        pkgBaseURL,
+					Version:        version,
+					Stdout:         safeStdout,
+					Stderr:         safeStderr,
+				}
+				gen := app.NewGenerator(repoCfg)
+				if genErr := gen.Run(); genErr != nil {
+					errMu.Lock()
+					renderErrors = append(renderErrors, fmt.Errorf("failed to render %s: %w", r.Path, genErr))
+					errMu.Unlock()
+					return
+				}
+
+				// Refresh catalog node directly in memory from freshly emitted repoview.json
+				descPath := filepath.Join(repoOut, "repoview.json")
+				// #nosec G304 -- reading newly generated descriptor from validated child output dir
+				if descData, readErr := os.ReadFile(filepath.Clean(descPath)); readErr == nil {
+					var desc models.RepoDescriptor
+					if json.Unmarshal(descData, &desc) == nil {
+						r.Descriptor = &desc
+						if desc.Title != "" {
+							r.Title = desc.Title
+						}
+						if desc.PackageCount > 0 || r.PackageCount == 0 {
+							r.PackageCount = desc.PackageCount
+						}
+						if !desc.LastBuild.IsZero() {
+							r.LastBuild = desc.LastBuild
+						}
+						if desc.Arch != "" {
+							r.Arch = desc.Arch
+						}
+						if desc.Distro != "" {
+							r.Distro = desc.Distro
+						}
+						if desc.Channel != "" {
+							r.Channel = desc.Channel
+						}
+					}
+				}
+				r.IsRendered = true
+				if relOut, relErr := filepath.Rel(finalOutputDir, filepath.Join(repoOut, "index.html")); relErr == nil && !strings.HasPrefix(relOut, "..") {
+					r.TargetURL = filepath.ToSlash(relOut)
+				} else if r.RelPath == "." || r.RelPath == "" {
+					r.TargetURL = "repoview/index.html"
+				} else {
+					r.TargetURL = filepath.ToSlash(filepath.Join(r.RelPath, "repoview", "index.html"))
+				}
+			})
 
 			if len(renderErrors) > 0 {
+				renderFailureCount = len(renderErrors)
 				for _, rErr := range renderErrors {
 					_, _ = fmt.Fprintf(stderr, "Warning: %v\n", rErr)
 				}
 			}
 
-			// Re-scan directory with the final RequireRendered setting
-			scanCfg.RequireRendered = portalCfg.AutoDiscovery.RequireRendered
-			repos, err = portal.NewScanner(scanCfg).Scan()
-			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "Re-scan Error: %v\n", err)
-				return app.ExitRepoMetadataError
+			if portalCfg.AutoDiscovery.RequireRendered {
+				filtered := make([]*portal.DiscoveredRepo, 0, len(repos))
+				for _, r := range repos {
+					if r.IsRendered {
+						filtered = append(filtered, r)
+					}
+				}
+				repos = filtered
 			}
 		}
 	}
@@ -662,17 +799,25 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if err := renderer.WritePortal(finalOutputDir, absTargetDir, catalog, force); err != nil {
-		var safetyErr *portal.ErrSafetyOverwrite
-		if errors.As(err, &safetyErr) {
-			_, _ = fmt.Fprintf(stderr, "Safety Violation: %v\n", safetyErr)
-			return app.ExitUsageError
+		switch {
+		case errors.Is(err, app.ErrSafety) || errors.Is(err, app.ErrIntegrity):
+			_, _ = fmt.Fprintf(stderr, "Safety Violation: %v\n", err)
+			return app.ExitSafetyError
+		case errors.Is(err, app.ErrTemplate):
+			_, _ = fmt.Fprintf(stderr, "Template Error: %v\n", err)
+			return app.ExitTemplateError
+		default:
+			_, _ = fmt.Fprintf(stderr, "I/O Error: %v\n", err)
+			return app.ExitIOError
 		}
-		_, _ = fmt.Fprintf(stderr, "I/O Error: %v\n", err)
-		return app.ExitIOError
 	}
 
 	if !quiet {
 		_, _ = fmt.Fprintf(stdout, "Generated repository portal in %s (%d repositories, %d packages)\n", finalOutputDir, catalog.TotalRepos, catalog.TotalPkgs)
+	}
+
+	if renderFailureCount > 0 {
+		return app.ExitPartialFailure
 	}
 
 	return app.ExitSuccess
@@ -680,5 +825,8 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 
 // main is the primary execution entry point.
 func main() {
+	// Enforce standard umask (0022) once at process startup so directories (0755)
+	// and public web files (0644) remain web-accessible under restrictive cron/systemd umasks.
+	util.SetUmask(util.DefaultUmask)
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }

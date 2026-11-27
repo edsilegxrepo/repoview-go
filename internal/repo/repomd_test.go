@@ -1,9 +1,17 @@
 package repo
 
 import (
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/edsilegxrepo/repoview/internal/models"
 )
 
 // TEST STRATEGY:
@@ -123,5 +131,111 @@ func TestParseRepomd_MissingPrimaryOrOther(t *testing.T) {
 	_, err := ParseRepomd(tempRepo)
 	if err == nil {
 		t.Errorf("expected error when primary_db is missing, got nil")
+	}
+}
+
+func TestParseRepomd_SymlinkEscape(t *testing.T) {
+	tempRepo := t.TempDir()
+	outsideDir := t.TempDir()
+	repodataDir := filepath.Join(tempRepo, "repodata")
+	if err := os.MkdirAll(repodataDir, 0o755); err != nil {
+		t.Fatalf("failed to create repodata dir: %v", err)
+	}
+	outsideFile := filepath.Join(outsideDir, "secret.sqlite")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("failed to write outside file: %v", err)
+	}
+
+	linkPath := filepath.Join(repodataDir, "linked.sqlite")
+	if err := os.Symlink(outsideFile, linkPath); err != nil {
+		t.Skipf("skipping symlink escape test (symlinks unsupported): %v", err)
+	}
+
+	xmlContent := `<?xml version="1.0" encoding="UTF-8"?>
+<repomd xmlns="http://linux.duke.edu/metadata/repo">
+  <data type="primary_db">
+    <location href="repodata/linked.sqlite"/>
+  </data>
+</repomd>`
+	if err := os.WriteFile(filepath.Join(repodataDir, "repomd.xml"), []byte(xmlContent), 0o644); err != nil {
+		t.Fatalf("failed to write repomd.xml: %v", err)
+	}
+
+	if _, err := ParseRepomd(tempRepo); err == nil {
+		t.Errorf("expected symlink escape in repomd.xml to be rejected")
+	}
+}
+
+func TestParseRepomd_ChecksumAndSizeVerification(t *testing.T) {
+	tempRepo := t.TempDir()
+	repodataDir := filepath.Join(tempRepo, "repodata")
+	if err := os.MkdirAll(repodataDir, 0o755); err != nil {
+		t.Fatalf("failed to create repodata dir: %v", err)
+	}
+
+	pBytes := []byte("primary-sqlite-payload")
+	oBytes := []byte("other-sqlite-payload")
+	pPath := filepath.Join(repodataDir, "primary.sqlite")
+	oPath := filepath.Join(repodataDir, "other.sqlite")
+	_ = os.WriteFile(pPath, pBytes, 0o644)
+	_ = os.WriteFile(oPath, oBytes, 0o644)
+
+	pSum := sha256.Sum256(pBytes)
+	oSum := sha512.Sum512(oBytes)
+
+	validXML := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<repomd xmlns="http://linux.duke.edu/metadata/repo">
+  <data type="primary_db">
+    <location href="repodata/primary.sqlite"/>
+    <checksum type="sha256">%s</checksum>
+    <size>%d</size>
+  </data>
+  <data type="other_db">
+    <location href="repodata/other.sqlite"/>
+    <checksum type="sha512">%s</checksum>
+    <size>%d</size>
+  </data>
+</repomd>`, hex.EncodeToString(pSum[:]), len(pBytes), hex.EncodeToString(oSum[:]), len(oBytes))
+	_ = os.WriteFile(filepath.Join(repodataDir, "repomd.xml"), []byte(validXML), 0o644)
+
+	if _, err := ParseRepomd(tempRepo); err != nil {
+		t.Fatalf("expected valid SHA256/SHA512 repomd to pass, got: %v", err)
+	}
+
+	// Tampered checksum must fail with models.ErrIntegrity
+	badSumXML := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<repomd xmlns="http://linux.duke.edu/metadata/repo">
+  <data type="primary_db">
+    <location href="repodata/primary.sqlite"/>
+    <checksum type="sha256">%s</checksum>
+    <size>%d</size>
+  </data>
+  <data type="other_db">
+    <location href="repodata/other.sqlite"/>
+  </data>
+</repomd>`, strings.Repeat("0", 64), len(pBytes))
+	_ = os.WriteFile(filepath.Join(repodataDir, "repomd.xml"), []byte(badSumXML), 0o644)
+
+	_, err := ParseRepomd(tempRepo)
+	if !errors.Is(err, models.ErrIntegrity) {
+		t.Errorf("expected ErrIntegrity on checksum mismatch, got: %v", err)
+	}
+
+	// Size mismatch must also fail with models.ErrIntegrity
+	badSizeXML := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<repomd xmlns="http://linux.duke.edu/metadata/repo">
+  <data type="primary_db">
+    <location href="repodata/primary.sqlite"/>
+    <size>%d</size>
+  </data>
+  <data type="other_db">
+    <location href="repodata/other.sqlite"/>
+  </data>
+</repomd>`, len(pBytes)+10)
+	_ = os.WriteFile(filepath.Join(repodataDir, "repomd.xml"), []byte(badSizeXML), 0o644)
+
+	_, err = ParseRepomd(tempRepo)
+	if !errors.Is(err, models.ErrIntegrity) {
+		t.Errorf("expected ErrIntegrity on size mismatch, got: %v", err)
 	}
 }

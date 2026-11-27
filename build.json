@@ -1,23 +1,22 @@
 {
-  "name": "repoview",
-  "version": "0.3.0",
-  "release": "1",
-  "channel": "xg",
-  "entrypoint": ".",
-  "entrypoint": "./cmd/repoview",
-  "version_pkg": "main.version",
-  "summary": "RPM and DEB repository viewer",
-  "description": "Generates a modern, static, searchable web browsing portal for browsing packages.",
-  "maintainer": "Mis Center <support@criticalsys.net>",
-  "license": "MIT",
-  "url": "https://criticalsys.net",
-  "group": "Applications/System",
-  "section": "admin",
-  "priority": "optional",
-  "install_path": "/usr/bin",
-  "cgo": false,
-  "history": [
-    "* Thu Sep 18 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
-    "- Packaged to new code release"
-  ]
+	"name": "repoview",
+	"version": "0.3.0",
+	"release": "1",
+	"channel": "xg",
+	"entrypoint": "./cmd/repoview",
+	"version_pkg": "main.version",
+	"summary": "RPM and DEB repository viewer",
+	"description": "Generates a modern, static, searchable web browsing portal for browsing packages.",
+	"maintainer": "Mis Center <support@criticalsys.net>",
+	"license": "MIT",
+	"url": "https://criticalsys.net",
+	"group": "Applications/System",
+	"section": "admin",
+	"priority": "optional",
+	"install_path": "/usr/bin",
+	"cgo": true,
+	"history": [
+		"* Thu Sep 18 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
+		"- Packaged to new code release"
+	]
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/klauspost/compress/zstd"
 )
 
 // Helper to build an in-memory tar.gz
@@ -177,7 +178,8 @@ func TestReadDebDetails_And_Files(t *testing.T) {
 		t.Errorf("expected ReadDebTimestamp for nonexistent file to be 0, got %d", notFoundTs)
 	}
 
-	debRepo.(*DebRepository).EnrichPackageDetails(tmpDir, []*models.Package{pkg})
+	debRepo.SetRepoDir(tmpDir)
+	debRepo.EnrichPackageDetails([]*models.Package{pkg})
 	if pkg.Details == nil || pkg.Details.Scriptlets == nil {
 		t.Fatalf("EnrichPackageDetails failed to populate pkg.Details")
 	}
@@ -194,5 +196,59 @@ func TestReadDebDetails_And_Files(t *testing.T) {
 	}
 	if pkg.Changelog == nil {
 		t.Errorf("expected pkg.Changelog to be populated on-demand by ReadPackageFiles")
+	}
+}
+
+func TestDebDetails_DEP5LicenseInReleaseAndDiscoverOptions(t *testing.T) {
+	lic := parseDEP5License(bytes.NewReader([]byte("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n\nFiles: *\nCopyright: 2026 Example\nLicense: Apache-2.0\n")))
+	if lic != "Apache-2.0" {
+		t.Errorf("expected DEP-5 License Apache-2.0, got %q", lic)
+	}
+
+	dir := t.TempDir()
+	inRelease := filepath.Join(dir, "InRelease")
+	clearsigned := `-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+- - Origin: TestClearOrigin
+Suite: noble
+Codename: noble
+Architectures: amd64
+Components: main
+
+-----BEGIN PGP SIGNATURE-----
+iQEzBAEBCgAdFiEE
+-----END PGP SIGNATURE-----
+`
+	if err := os.WriteFile(inRelease, []byte(clearsigned), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	relMeta, err := ParseReleaseMetadata(inRelease)
+	if err != nil {
+		t.Fatalf("ParseReleaseMetadata(InRelease) failed: %v", err)
+	}
+	if relMeta.Suite != "noble" || relMeta.Codename != "noble" {
+		t.Errorf("unexpected parsed InRelease metadata: %+v", relMeta)
+	}
+
+	// Test DiscoverWithOptions filtering suite + arch on .zst Packages
+	root := t.TempDir()
+	binAmd := filepath.Join(root, "dists", "noble", "main", "binary-amd64")
+	binArm := filepath.Join(root, "dists", "noble", "main", "binary-arm64")
+	_ = os.MkdirAll(binAmd, 0o755)
+	_ = os.MkdirAll(binArm, 0o755)
+	var zstBuf bytes.Buffer
+	zw, _ := zstd.NewWriter(&zstBuf)
+	_, _ = zw.Write([]byte("Package: hello\nVersion: 1.0\nArchitecture: amd64\n"))
+	_ = zw.Close()
+	_ = os.WriteFile(filepath.Join(binAmd, "Packages.zst"), zstBuf.Bytes(), 0o644)
+	_ = os.WriteFile(filepath.Join(binArm, "Packages"), []byte("Package: hello\nVersion: 1.0\nArchitecture: arm64\n"), 0o644)
+
+	locs, err := DiscoverWithOptions(root, DiscoverOptions{Suite: "noble", Arch: "amd64"})
+	if err != nil {
+		t.Fatalf("DiscoverWithOptions failed: %v", err)
+	}
+	if locs.Arch != "amd64" || len(locs.PackagesFiles) != 1 || !strings.HasSuffix(locs.PackagesFiles[0], "Packages.zst") {
+		t.Errorf("expected noble/amd64 Packages.zst discovery, got %+v", locs)
 	}
 }

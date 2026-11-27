@@ -1,10 +1,13 @@
 package logic
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
 	"github.com/edsilegxrepo/repoview/internal/util"
@@ -37,6 +40,7 @@ import (
 type GroupData struct {
 	ID          string            // Unique identifier (e.g., "group_development")
 	Name        string            // Display name (e.g., "Development Tools")
+	Letter      string            // Single-character letter token when representing an alphabetical bucket
 	Description string            // Optional description
 	Filename    string            // Output filename (e.g., "group_development.html")
 	Packages    []*models.Package // List of packages belonging to this group
@@ -134,8 +138,30 @@ func BuildGroupTree(groups []*GroupData) []*GroupCategory {
 				catMap[catName] = col
 				catOrder = append(catOrder, catName)
 			} else {
+				if col.isLeaf && col.filename != g.Filename {
+					col.subgroups = append(col.subgroups, &GroupSubItem{
+						Name:     col.name,
+						FullName: col.name,
+						Filename: col.filename,
+						Packages: col.packages,
+						Count:    len(col.packages),
+					})
+					col.isLeaf = false
+					col.filename = ""
+					col.packages = nil
+				}
+				if !col.isLeaf {
+					col.subgroups = append(col.subgroups, &GroupSubItem{
+						Name:     catName,
+						FullName: g.Name,
+						Filename: g.Filename,
+						Packages: g.Packages,
+						Count:    len(g.Packages),
+					})
+				} else {
+					col.packages = append(col.packages, g.Packages...)
+				}
 				col.totalPkgs += len(g.Packages)
-				col.packages = append(col.packages, g.Packages...)
 			}
 		}
 	}
@@ -165,8 +191,9 @@ func BuildGroupTree(groups []*GroupData) []*GroupCategory {
 // GroupingService handles the organization of packages into logical groups.
 // It supports grouping by Comps.xml definitions, RPM Header Groups, and First Letter.
 type GroupingService struct {
-	Packages []*models.Package // All available packages in the repository
-	Comps    *models.Comps     // Optional comps metadata
+	Packages    []*models.Package            // All available packages in the repository
+	Comps       *models.Comps                // Optional comps metadata
+	pkgVersions map[string][]*models.Package // Cached Name -> EVR-descending sorted package slices
 }
 
 // NewGroupingService creates a new grouping service instance.
@@ -175,6 +202,22 @@ func NewGroupingService(pkgs []*models.Package, comps *models.Comps) *GroupingSe
 		Packages: pkgs,
 		Comps:    comps,
 	}
+}
+
+// PkgVersions builds (once) and returns the map of package name to EVR-descending sorted versions.
+func (s *GroupingService) PkgVersions() map[string][]*models.Package {
+	if s.pkgVersions != nil {
+		return s.pkgVersions
+	}
+	pkgVersions := make(map[string][]*models.Package)
+	for _, p := range s.Packages {
+		pkgVersions[p.Name] = append(pkgVersions[p.Name], p)
+	}
+	for _, versions := range pkgVersions {
+		SortPackagesByEVR(versions)
+	}
+	s.pkgVersions = pkgVersions
+	return s.pkgVersions
 }
 
 // GetGroups returns the list of groups populated with their packages.
@@ -203,6 +246,7 @@ func (s *GroupingService) GetGroups() ([]*GroupData, error) {
 		}
 	}
 
+	disambiguateGroupFilenames(activeGroups)
 	return activeGroups, nil
 }
 
@@ -213,30 +257,9 @@ func (s *GroupingService) GetGroups() ([]*GroupData, error) {
 // of that package present in the repository is linked.
 func (s *GroupingService) getCompsGroups() []*GroupData {
 	var groups []*GroupData
-
-	// Create a lookup map for packages by name
-	// Note: We might have multiple versions of the same package in s.Packages.
-	// We typically want to associate all versions, or just the latest?
-	// Repoview usually lists the package name once, and the link goes to the package detail page
-	// which lists all versions. So we just need to match by name.
-
-	// However, s.Packages contains all versions. We should distinct them first if we are just checking existence?
-	// Actually, we assign the package object to the group.
-	// But we need to handle duplicates in the packages list passed to this service?
-	// Assuming s.Packages is the raw list from DB (all rows).
-
-	// Let's optimize: Map Name -> List of Packages (versions)
-	pkgVersions := make(map[string][]*models.Package)
-	for _, p := range s.Packages {
-		pkgVersions[p.Name] = append(pkgVersions[p.Name], p)
-	}
+	pkgVersions := s.PkgVersions()
 
 	for _, g := range s.Comps.Groups {
-		// Parity: Python 3 repoview comments out the uservisible check
-		// if !g.Uservisible {
-		// 	continue
-		// }
-
 		groupData := &GroupData{
 			ID:          g.ID,
 			Name:        g.Name,
@@ -247,16 +270,9 @@ func (s *GroupingService) getCompsGroups() []*GroupData {
 		// Add packages belonging to this group
 		seenInGroup := make(map[string]bool)
 		for _, pkgName := range g.Packagelist {
-			if _, exists := pkgVersions[pkgName]; exists {
-				// We found the package in the repo
-				// We add one entry per package name to the group list,
-				// The view will likely just link to the package detail page.
-				// But we need a representative "Package" struct to get Summary/Description.
-				// Ideally the "latest" version.
-
+			if versions, exists := pkgVersions[pkgName]; exists && len(versions) > 0 {
 				if !seenInGroup[pkgName] {
-					latest := getLatestVersion(pkgVersions[pkgName])
-					groupData.Packages = append(groupData.Packages, latest)
+					groupData.Packages = append(groupData.Packages, versions[0])
 					seenInGroup[pkgName] = true
 				}
 			}
@@ -329,14 +345,10 @@ func MapDebianSectionToGroup(section string) string {
 // This is used as a fallback strategy when 'comps.xml' is not present.
 func (s *GroupingService) getRpmGroups() []*GroupData {
 	groupsMap := make(map[string]*GroupData)
-	pkgVersions := make(map[string][]*models.Package)
-
-	for _, p := range s.Packages {
-		pkgVersions[p.Name] = append(pkgVersions[p.Name], p)
-	}
+	pkgVersions := s.PkgVersions()
 
 	// Distinct names
-	var names []string
+	names := make([]string, 0, len(pkgVersions))
 	for n := range pkgVersions {
 		names = append(names, n)
 	}
@@ -344,7 +356,10 @@ func (s *GroupingService) getRpmGroups() []*GroupData {
 
 	for _, name := range names {
 		versions := pkgVersions[name]
-		latest := getLatestVersion(versions)
+		if len(versions) == 0 {
+			continue
+		}
+		latest := versions[0]
 
 		// Determine the group from latest version's group or section.
 		grpName := strings.TrimSpace(latest.RpmGroup)
@@ -395,7 +410,7 @@ func (s *GroupingService) getRpmGroups() []*GroupData {
 	}
 
 	// Convert map to slice
-	var groups []*GroupData
+	groups := make([]*GroupData, 0, len(groupsMap))
 	for _, g := range groupsMap {
 		groups = append(groups, g)
 	}
@@ -412,13 +427,9 @@ func (s *GroupingService) getRpmGroups() []*GroupData {
 // This provides an alternative navigation method (e.g., "Letter A", "Letter B").
 func (s *GroupingService) GetLetterGroups() []*GroupData {
 	groupsMap := make(map[rune]*GroupData)
-	pkgVersions := make(map[string][]*models.Package)
+	pkgVersions := s.PkgVersions()
 
-	for _, p := range s.Packages {
-		pkgVersions[p.Name] = append(pkgVersions[p.Name], p)
-	}
-
-	var names []string
+	names := make([]string, 0, len(pkgVersions))
 	for n := range pkgVersions {
 		names = append(names, n)
 	}
@@ -428,22 +439,30 @@ func (s *GroupingService) GetLetterGroups() []*GroupData {
 		if len(name) == 0 {
 			continue
 		}
-		firstLetter := unicode.ToUpper(rune(name[0]))
+		versions := pkgVersions[name]
+		if len(versions) == 0 {
+			continue
+		}
+		firstRune, _ := utf8.DecodeRuneInString(name)
+		if firstRune == utf8.RuneError {
+			continue
+		}
+		firstLetter := unicode.ToUpper(firstRune)
 
 		if _, exists := groupsMap[firstLetter]; !exists {
 			groupsMap[firstLetter] = &GroupData{
 				ID:          fmt.Sprintf("letter_%c", firstLetter),
 				Name:        fmt.Sprintf("Letter %c", firstLetter),
+				Letter:      string(firstLetter),
 				Description: fmt.Sprintf("Packages beginning with letter \"%c\".", firstLetter),
 				Filename:    fmt.Sprintf("letter_%c.group.html", unicode.ToLower(firstLetter)),
 			}
 		}
 
-		latest := getLatestVersion(pkgVersions[name])
-		groupsMap[firstLetter].Packages = append(groupsMap[firstLetter].Packages, latest)
+		groupsMap[firstLetter].Packages = append(groupsMap[firstLetter].Packages, versions[0])
 	}
 
-	var groups []*GroupData
+	groups := make([]*GroupData, 0, len(groupsMap))
 	for _, g := range groupsMap {
 		groups = append(groups, g)
 	}
@@ -452,21 +471,70 @@ func (s *GroupingService) GetLetterGroups() []*GroupData {
 		return groups[i].Name < groups[j].Name
 	})
 
+	disambiguateGroupFilenames(groups)
 	return groups
 }
 
-// Helpers
-
-// getLatestVersion returns the package with the highest EVR from a slice of versions.
-func getLatestVersion(pkgs []*models.Package) *models.Package {
-	if len(pkgs) == 0 {
-		return nil
+// disambiguateGroupFilenames appends a deterministic short hash suffix when two groups
+// map to identical filenames under case-insensitive comparison (Windows/macOS safety).
+func disambiguateGroupFilenames(groups []*GroupData) {
+	seen := make(map[string]bool, len(groups))
+	for _, g := range groups {
+		lower := strings.ToLower(g.Filename)
+		if !seen[lower] {
+			seen[lower] = true
+			continue
+		}
+		sum := sha256.Sum256([]byte(g.ID + "|" + g.Name))
+		suffix := hex.EncodeToString(sum[:3])
+		stem := strings.TrimSuffix(g.Filename, ".group.html")
+		candidate := fmt.Sprintf("%s_%s.group.html", stem, suffix)
+		for seen[strings.ToLower(candidate)] {
+			sum = sha256.Sum256([]byte(candidate))
+			candidate = fmt.Sprintf("%s_%s.group.html", stem, hex.EncodeToString(sum[:3]))
+		}
+		g.Filename = candidate
+		seen[strings.ToLower(candidate)] = true
 	}
-	// Sort descending
-	SortPackagesByEVR(pkgs)
-	// Return first (newest)
-	return pkgs[0]
 }
+
+// AssignCollisionSafePackageFilenames resolves case-insensitive HTML filename collisions
+// across distinct package names by setting PageFilename with a deterministic short hash suffix.
+func AssignCollisionSafePackageFilenames(pkgVersions map[string][]*models.Package) {
+	names := make([]string, 0, len(pkgVersions))
+	for n := range pkgVersions {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		versions := pkgVersions[name]
+		if len(versions) == 0 {
+			continue
+		}
+		baseName := util.SanitizeFilename(name) + ".html"
+		lower := strings.ToLower(baseName)
+		if !seen[lower] {
+			seen[lower] = true
+			continue
+		}
+		sum := sha256.Sum256([]byte(name))
+		suffix := hex.EncodeToString(sum[:3])
+		stem := strings.TrimSuffix(baseName, ".html")
+		candidate := fmt.Sprintf("%s_%s.html", stem, suffix)
+		for seen[strings.ToLower(candidate)] {
+			sum = sha256.Sum256([]byte(candidate))
+			candidate = fmt.Sprintf("%s_%s.html", stem, hex.EncodeToString(sum[:3]))
+		}
+		seen[strings.ToLower(candidate)] = true
+		for _, p := range versions {
+			p.PageFilename = candidate
+		}
+	}
+}
+
+// Helpers
 
 // cleanID sanitizes a group identifier into a safe filename.
 func cleanID(text string) string {

@@ -1,8 +1,8 @@
 # RepoView-Go
 
-[![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue.svg)](https://golang.org)
-[![Coverage](https://img.shields.io/badge/Coverage-84.9%25-brightgreen.svg)](TESTING.md)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/Go-1.26%2B-blue.svg)](https://golang.org)
+[![Coverage](https://img.shields.io/badge/Coverage-83.1%25-brightgreen.svg)](TESTING.md)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Air--Gap Compliant](https://img.shields.io/badge/Air--Gap-100%25%20Compliant-success.svg)](ARCHITECTURE.md)
 
 **RepoView-Go** is a high-performance replacement for the legacy Python `repoview` utility. It compiles repository metadata and package headers—supporting both **RPM (YUM/DNF)** and **Debian/Ubuntu (APT/dpkg)** repositories—into a modern, static, searchable web browsing portal.
@@ -47,7 +47,7 @@ The primary objective of `repoview-go` is to deliver a blazingly fast, reliable,
 - **Client Configuration Generation**: Generates ready-to-copy client repository configuration files: `.repo` files for YUM/DNF clients and modern Deb822 `.sources` format files for APT clients.
 - **Universal RSS 2.0 Feeds**: Unconditionally produces `latest-feed.xml` containing newly added or updated packages, complete with a persistent RSS feed button in the web interface.
 - **High Concurrency & Multi-Core Scaling**: Implements a bounded goroutine worker pool (`runtime.NumCPU() * 2`) to render thousands of package pages in parallel without exhausting filesystem descriptors or memory.
-- **Content-Hashed Incremental Builds**: Tracks SHA-256 content hashes in `.state.json`. Unmodified packages are skipped during subsequent runs, reducing update times by >90% while automatically pruning deleted (stale) packages.
+- **Content-Hashed Incremental Builds**: Tracks SHA-256 content hashes and repository fingerprints in `state.json`. Unmodified packages are skipped during subsequent runs, reducing update times by >90% while automatically pruning deleted (stale) packages.
 - **Strict Legacy Layout Compatibility**: Preserves canonical URL routing (`index.html`, `*.group.html`, `<name>.html`, `latest-feed.xml`), ensuring drop-in replacement compatibility for existing mirror infrastructures.
 
 ---
@@ -83,7 +83,7 @@ While RepoView-Go produces static files, access control is enforced at the HTTP 
 | **Anonymous Consumer** | Public Read-Only | Browse HTML repository index, search package lists, view RSS feed | Reverse proxy allows `GET /`, `GET /*.html`, `GET /search.json` |
 | **Licensed Developer** | Authenticated Read-Only | Access all HTML pages and download proprietary `.rpm` binaries | Reverse proxy validates HTTP Basic credentials or OIDC JWT |
 | **Automated CI/CD Worker** | Machine Read-Only | Automated DNF package installation and dependency resolution | mTLS client certificate or static Bearer token |
-| **Release Engineer** | Write / Execute | Execute `repoview` CLI, generate pages, manage `.state.json` cache | Local OS file permissions (`chmod 0750`, dedicated service group) |
+| **Release Engineer** | Write / Execute | Execute `repoview` CLI, generate pages, manage `state.json` cache | Local OS file permissions (`chmod 0750`, dedicated service group) |
 | **System Administrator** | Root / Admin | Provision reverse proxy, rotate TLS certs, manage systemd timers | OS `sudo` / privileged administrative access |
 
 ### Current and Non-Vulnerable Libraries Used
@@ -92,12 +92,13 @@ All third-party dependencies are continuously audited using `govulncheck` and pi
 
 | Library | Version | License | Security & Integrity Audit |
 | :--- | :---: | :---: | :--- |
-| `github.com/mattn/go-sqlite3` | `v1.14.52` | MIT | CGo SQLite3 driver. Uses parameterized queries and read-only URI mode (`mode=ro`). Zero known CVEs. |
-| `github.com/klauspost/compress` | `v1.20.0` | BSD-3-Clause | Memory-safe, high-speed multi-threaded Zstandard and Gzip decompression. Zero known CVEs. |
-| `github.com/ulikunitz/xz` | `v0.5.16` | BSD-3-Clause | Pure Go XZ decompression engine. Protected against integer overflows and malicious headers. Zero known CVEs. |
+| `github.com/mattn/go-sqlite3` | `v1.14.53` | MIT | CGo SQLite3 driver. Uses parameterized queries and read-only URI mode (`mode=ro`). Zero known CVEs. |
+| `github.com/klauspost/compress` | `v1.20.5` | BSD-3-Clause | Memory-safe, high-speed multi-threaded Zstandard and Gzip decompression. Zero known CVEs. |
+| `github.com/ulikunitz/xz` | `v0.5.17` | BSD-3-Clause | Pure Go XZ decompression engine. Protected against integer overflows and malicious headers. Zero known CVEs. |
 | `github.com/knqyf263/go-rpm-version` | Latest | MIT | Upstream RPM EVR comparison engine. Pure Go, allocation-free comparison logic. Zero known CVEs. |
 | `github.com/sassoftware/go-rpmutils` | `v0.4.0` | Apache-2.0 | RPM payload reader for lead, header, scriptlet, and file extraction. Protected against malformed headers. Zero known CVEs. |
-| `pault.ag/go/debian` | `v0.21.0` | MIT | Debian control, Deb822 index parsing, and Debian EVR version comparisons. Zero known CVEs. |
+| `pault.ag/go/debian` | `v0.21.4` | MIT | Debian control, Deb822 index parsing, and Debian EVR version comparisons. Zero known CVEs. |
+| `go.yaml.in/yaml/v3` | `v3.0.6` | MIT / Apache-2.0 | YAML configuration parser for `repoview.yaml`, `portal.yaml`, and `--dump-config`. Zero known CVEs. |
 
 ### Unprivileged Context Enforcement
 
@@ -125,17 +126,18 @@ The RepoView-Go codebase has been engineered to meet rigorous enterprise softwar
   Synchronized access to shared data structures is guaranteed via `sync.RWMutex`, `sync.Mutex`, and `sync/atomic` counters.
 - **Memory Optimization (On-Demand Loading)**: For repositories with 50,000+ packages, package file lists are loaded into memory on-demand only during package page rendering and immediately freed via `defer` pointer nulling, keeping resident RAM below 200 MB.
 - **Batch Database Processing**: SQLite changelogs and dependencies are fetched using dynamic SQL parameter blocks in chunks of 500 packages, eliminating per-package round-trips.
-- **Comprehensive Test Coverage**: Tested to **84.9% statement coverage** across the entire codebase, with every individual package independently exceeding 80%:
-  - `cmd/repoview`: **88.8%**
-  - `internal/app`: **85.4%**
-  - `internal/logic`: **80.4%**
-  - `internal/models`: **94.0%**
-  - `internal/portal`: **82.3%**
-  - `internal/render`: **81.4%**
-  - `internal/repo`: **82.8%**
-  - `internal/repo/deb`: **89.7%**
+- **Comprehensive Test Coverage**: Tested to **83.1% statement coverage** across the entire codebase, with every individual package independently exceeding 80%:
+  - `cmd/repoview`: **82.5%**
+  - `internal/app`: **82.5%**
+  - `internal/logic`: **81.8%**
+  - `internal/models`: **90.6%**
+  - `internal/portal`: **81.1%**
+  - `internal/render`: **86.2%**
+  - `internal/repo`: **82.9%**
+  - `internal/repo/deb`: **84.2%**
   - `internal/state`: **87.1%**
-  - `internal/util`: **94.6%**
+  - `internal/taxonomy`: **88.6%**
+  - `internal/util`: **82.0%**
 - **Zero Repository Pollution**: All unit and integration test fixtures execute exclusively within `t.TempDir()` sandboxes.
 
 ---
@@ -151,19 +153,25 @@ Usage: repoview [options] <repodir>
 | Flag | Type | Default | Description |
 | :--- | :---: | :---: | :--- |
 | `--output-dir` | `string` | `repoview` | Target directory where static HTML, CSS, JSON, and RSS files are written. |
-| `--state-dir` | `string` | *(Output Dir)* | Directory where `.state.json` is stored for incremental builds. |
+| `--state-dir` | `string` | *(Output Dir)* | Directory where `state.json` is stored for incremental builds. |
 | `--title` | `string` | `Repoview` | Repository title displayed prominently in the web interface header and RSS feed. |
 | `--url` | `string` | *(Empty)* | Public HTTP(S) URL of the repository (required for generating `latest-feed.xml`). |
 | `--baseurl` | `string` | *(Auto-detected)* | Base URL injected into client `.repo` and `.sources` configuration snippets. |
 | `--format` | `string` | `auto` | Repository format: `auto` (auto-detects format), `rpm` (YUM/DNF), or `deb` (APT/dpkg). |
+| `--suite` | `string` | *(Auto)* | Target Debian suite/codename selector for multi-suite roots. |
+| `--arch` | `string` | *(Auto)* | Target architecture selector for multi-arch Debian roots. |
 | `--template-dir` | `string` | *(Embedded)* | Path to an external directory containing custom `.html` templates and `layout/` assets. |
 | `--comps` | `string` | *(repodata)* | Path to an alternative `comps.xml` package group definition file (RPM). |
 | `--portal-url` | `string` | `auto` | URL or relative path to parent multi-repo catalog portal (`auto`, `none`, or custom path). |
+| `--gpgkey` | `string` | *(Empty)* | GPG public key URL or path for client snippets (enables `gpgcheck=1`). |
+| `--workers` | `int` | *(Auto)* | Parallel worker count (1–16). |
 | `--ignore-package` | `string list` | *(None)* | Glob pattern to exclude packages by name or NVRA (e.g. `*debuginfo*`). Can be repeated. |
 | `--exclude-arch` | `string list` | *(None)* | Hardware architecture to exclude (e.g. `src`, `i686`). Can be repeated. |
 | `--force` | `bool` | `false` | Force complete regeneration of all HTML pages, bypassing incremental state cache. |
 | `--quiet` | `bool` | `false` | Suppress non-essential informational console output. |
 | `--version` | `bool` | `false` | Print application version and build metadata, then exit. |
+
+*(Optional per-repository defaults can also be declared in a `repoview.yaml` file placed inside `<repodir>`).*
 
 ### Multi-Repository Portal Options (`repoview portal`)
 
@@ -213,7 +221,7 @@ Filtered down to 2036 packages
 Enriching packages with changelogs...done
 Inspecting RPM package headers...done
 Parsing comps.xml...done
- organizing groups...done (42 groups, 26 letters)
+Organizing groups...done (42 groups, 26 letters)
 Generating pages...
 Writing group web-servers.group.html
 Writing group development-tools.group.html
@@ -247,7 +255,7 @@ Discovered Debian repository: suite=bookworm, component=main, arch=amd64
 Reading packages...found 1420 packages
 Filtered down to 1420 packages
 Inspecting Debian package headers...done
- organizing groups...done (18 groups, 26 letters)
+Organizing groups...done (18 groups, 26 letters)
 Generating pages...
 Writing group web.group.html
 Writing group admin.group.html
@@ -266,7 +274,7 @@ Complete.
 
 ### Incremental Build & Cache Utilization
 
-When running subsequent builds against an existing repository, RepoView-Go checks `.state.json` content hashes and only writes files that have changed:
+When running subsequent builds against an existing repository, RepoView-Go checks `state.json` content hashes and only writes files that have changed:
 
 ```bash
 repoview /var/www/html/repo/el9/base/x86_64
@@ -281,7 +289,7 @@ Filtered down to 2036 packages
 Enriching packages with changelogs...done
 Inspecting RPM package headers...done
 Parsing comps.xml...done
- organizing groups...done (42 groups, 26 letters)
+Organizing groups...done (42 groups, 26 letters)
 Generating pages...
 Cleaning up stale files...
 Complete.
@@ -383,7 +391,7 @@ Generated repository portal in /var/www/html/portal (3 repositories, 2104 packag
 ```
 
 The generated portal provides:
-- **Zero Pollution / Read-Only Mirror Friendly**: All visual artifacts, state stores (`repoview.state.json.gz`), and descriptors are generated into `--portal-home`. Raw mirror directories can be mounted strictly read-only (`0555`) or managed via `rsync --delete` without losing UI files.
+- **Zero Pollution / Read-Only Mirror Friendly**: All visual artifacts, state stores (`state.json`), and descriptors are generated into `--portal-home`. Raw mirror directories can be mounted strictly read-only (`0555`) or managed via `rsync --delete` without losing UI files.
 - **Decoupled URL Topologies**: `--portal-url` manages UI browsing and RSS links, while `--repo-url` powers package download links and client `.repo`/`.sources` setup snippets.
 - **Instant Client-Side Filtering**: Interactive text search (`/` shortcut), format pills (`RPM`, `DEB`), distro pills (`el9`, `ubu24`), and architecture filters (`x86_64`, `amd64`).
 - **Two-Way Navigation**: Each child repository view automatically includes a **`← All Repositories`** breadcrumb link back to the portal home page.
@@ -409,7 +417,7 @@ When using detached mode, Nginx can host the portal UI and package repositories 
 │   ├── index.html                      <- Child Repo Web View
 │   ├── search.json                     <- Package Search Index
 │   ├── repoview.json                   <- Self-Describing Metadata Descriptor
-│   └── repoview.state.json.gz          <- Incremental Cache
+│   └── state.json                      <- Incremental Cache
 └── ubu24/custom/
     ├── index.html                      <- Child Repo Web View
     └── search.json                     <- Package Search Index
@@ -613,5 +621,5 @@ For deep technical insights into RepoView-Go's architectural design, operational
   - Positive and negative test category matrices with Mermaid logical execution flowcharts.
   - Comprehensive inventory table of all 64 test functions and subtests with success criteria.
   - Live E2E integration test specifications using real RPM repositories (2,036 packages) and live `net/http` loopback servers.
-  - Detailed code coverage report verifying **83.5% total statement coverage** (>80% across all packages).
+  - Detailed code coverage report verifying **83.1% total statement coverage** (>80% across all packages).
   - Step-by-step test execution scripts for both **Bash** and **PowerShell**.

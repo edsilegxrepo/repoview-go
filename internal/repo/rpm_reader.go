@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/util"
 
 	"github.com/sassoftware/go-rpmutils"
 )
@@ -55,20 +54,35 @@ func ReadRPMDetails(rpmPath string) (*models.PackageDetails, error) {
 
 	details := &models.PackageDetails{}
 
-	// 1. Basic Metadata
+	// 1. Basic & Extended Header Metadata
 	details.BuildHost, _ = header.GetString(rpmutils.BUILDHOST)
 	details.SourcePackage, _ = header.GetString(rpmutils.SOURCERPM)
 	details.InstalledSize, _ = header.InstalledSize()
+	if packager, err := header.GetString(rpmutils.PACKAGER); err == nil {
+		details.Packager = strings.TrimSpace(packager)
+	}
+	if bugURL, err := header.GetString(rpmutils.BUGURL); err == nil {
+		details.BugURL = strings.TrimSpace(bugURL)
+	}
+	if vcs, err := header.GetString(rpmutils.VCS); err == nil {
+		details.VCS = strings.TrimSpace(vcs)
+	}
 
-	// 2. Signature
+	// 2. Digital Signatures (preserve primary details and summarize multiple signatures if present)
 	if len(sigs) > 0 {
-		sig := sigs[0]
-		hashName := strings.ReplaceAll(sig.Hash.String(), "-", "")
-		timeStr := sig.CreationTime.Format("Mon 02 Jan 2006 03:04:05 PM MST")
-		details.Signature = fmt.Sprintf("RSA/%s, %s, Key ID %x", hashName, timeStr, sig.KeyId)
-		details.KeyID = fmt.Sprintf("%x", sig.KeyId)
-		details.SigType = fmt.Sprintf("RSA/%s", hashName)
-		details.SigDate = timeStr
+		sigSummaries := make([]string, 0, len(sigs))
+		for i, sig := range sigs {
+			hashName := strings.ReplaceAll(sig.Hash.String(), "-", "")
+			timeStr := sig.CreationTime.Format("Mon 02 Jan 2006 03:04:05 PM MST")
+			summary := fmt.Sprintf("RSA/%s, %s, Key ID %x", hashName, timeStr, sig.KeyId)
+			sigSummaries = append(sigSummaries, summary)
+			if i == 0 {
+				details.KeyID = fmt.Sprintf("%x", sig.KeyId)
+				details.SigType = fmt.Sprintf("RSA/%s", hashName)
+				details.SigDate = timeStr
+			}
+		}
+		details.Signature = strings.Join(sigSummaries, " | ")
 	}
 
 	// 3. Scriptlets
@@ -96,22 +110,8 @@ func ReadRPMDetails(rpmPath string) (*models.PackageDetails, error) {
 		details.Scriptlets = scriptlets
 	}
 
-	// 4. File List with attributes
-	files, err := header.GetFiles()
-	if err == nil && len(files) > 0 {
-		details.Files = make([]models.PackageFile, 0, len(files))
-		for _, fi := range files {
-			modeStr := formatFileMode(fi.Mode())
-			details.Files = append(details.Files, models.PackageFile{
-				Mode:  modeStr,
-				User:  fi.UserName(),
-				Group: fi.GroupName(),
-				Size:  fi.Size(),
-				Name:  fi.Name(),
-			})
-		}
-	}
-
+	// File lists are loaded strictly on-demand via ReadRPMFiles during package page rendering
+	// to prevent holding millions of PackageFile entries in heap memory simultaneously.
 	return details, nil
 }
 
@@ -125,14 +125,9 @@ func ReadRPMFiles(rpmPath string) ([]models.PackageFile, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	header, _, err := rpmutils.Verify(f, nil)
-	if err != nil && header == nil {
-		if _, seekErr := f.Seek(0, 0); seekErr == nil {
-			header, err = rpmutils.ReadHeader(f)
-		}
-		if err != nil {
-			return nil, err
-		}
+	header, err := rpmutils.ReadHeader(f)
+	if err != nil {
+		return nil, err
 	}
 
 	files, err := header.GetFiles()
@@ -143,14 +138,36 @@ func ReadRPMFiles(rpmPath string) ([]models.PackageFile, error) {
 	res := make([]models.PackageFile, 0, len(files))
 	for _, fi := range files {
 		res = append(res, models.PackageFile{
-			Mode:  formatFileMode(fi.Mode()),
-			User:  fi.UserName(),
-			Group: fi.GroupName(),
-			Size:  fi.Size(),
-			Name:  fi.Name(),
+			Mode:       formatFileMode(fi.Mode()),
+			User:       fi.UserName(),
+			Group:      fi.GroupName(),
+			Size:       fi.Size(),
+			Name:       fi.Name(),
+			LinkTarget: fi.Linkname(),
+			Flags:      rpmFileFlags(fi.Flags()),
 		})
 	}
 	return res, nil
+}
+
+func rpmFileFlags(flagMask int) []string {
+	if flagMask <= 0 {
+		return nil
+	}
+	var flags []string
+	if flagMask&rpmutils.RPMFILE_CONFIG != 0 {
+		flags = append(flags, "config")
+	}
+	if flagMask&rpmutils.RPMFILE_DOC != 0 {
+		flags = append(flags, "doc")
+	}
+	if flagMask&rpmutils.RPMFILE_LICENSE != 0 {
+		flags = append(flags, "license")
+	}
+	if flagMask&rpmutils.RPMFILE_GHOST != 0 {
+		flags = append(flags, "ghost")
+	}
+	return flags
 }
 
 // formatFileMode safely converts an integer file mode to an os.FileMode string representation.
@@ -165,62 +182,45 @@ func formatFileMode(mode int) string {
 // EnrichPackagesWithRPMDetails concurrently parses the local RPM files for all packages
 // and populates deep inspection details (scriptlets, signatures, files).
 func EnrichPackagesWithRPMDetails(repoDir string, pkgs []*models.Package) {
-	numWorkers := runtime.NumCPU() * 2
-	if numWorkers < 4 {
-		numWorkers = 4
-	}
+	util.ForEachConcurrent(pkgs, 0, func(_ int, p *models.Package) {
+		if p == nil || p.LocationHref == "" {
+			return
+		}
+		rpmPath, err := util.ResolveContainedPath(repoDir, p.LocationHref)
+		if err != nil {
+			return
+		}
 
-	pkgChan := make(chan *models.Package, len(pkgs))
-	for _, p := range pkgs {
-		pkgChan <- p
-	}
-	close(pkgChan)
+		if _, err := os.Stat(rpmPath); os.IsNotExist(err) {
+			return
+		}
 
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for p := range pkgChan {
-				if p.LocationHref == "" {
-					continue
-				}
-				rpmPath := filepath.Join(repoDir, p.LocationHref)
+		details, err := ReadRPMDetails(rpmPath)
+		if err != nil {
+			return
+		}
 
-				// Security: Prevent path traversal from untrusted metadata href
-				rel, err := filepath.Rel(repoDir, rpmPath)
-				if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-					continue
-				}
-
-				if _, err := os.Stat(rpmPath); os.IsNotExist(err) {
-					continue
-				}
-
-				details, err := ReadRPMDetails(rpmPath)
-				if err != nil {
-					continue
-				}
-
-				p.Details = details
-				if p.BuildHost == "" && details.BuildHost != "" {
-					p.BuildHost = details.BuildHost
-				}
-				if p.InstalledSize == 0 && details.InstalledSize > 0 {
-					p.InstalledSize = details.InstalledSize
-				}
-				if p.SourcePackage == "" && details.SourcePackage != "" {
-					p.SourcePackage = details.SourcePackage
-				}
-				if p.SourceRPM == "" && details.SourcePackage != "" {
-					p.SourceRPM = details.SourcePackage
-				}
-				if p.Format == "" {
-					p.Format = models.FormatRPM
-				}
-			}
-		}()
-	}
-
-	wg.Wait()
+		p.Details = details
+		if p.BuildHost == "" && details.BuildHost != "" {
+			p.BuildHost = details.BuildHost
+		}
+		if p.InstalledSize == 0 && details.InstalledSize > 0 {
+			p.InstalledSize = details.InstalledSize
+		}
+		if p.Packager == "" && details.Packager != "" {
+			p.Packager = details.Packager
+		}
+		if p.Bugs == "" && details.BugURL != "" {
+			p.Bugs = details.BugURL
+		}
+		if p.SourcePackage == "" && details.SourcePackage != "" {
+			p.SourcePackage = details.SourcePackage
+		}
+		if p.SourceRPM == "" && details.SourcePackage != "" {
+			p.SourceRPM = details.SourcePackage
+		}
+		if p.Format == "" {
+			p.Format = models.FormatRPM
+		}
+	})
 }

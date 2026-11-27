@@ -89,8 +89,8 @@ func TestRun_SafetyViolation(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	repoDir := t.TempDir()
 	code := run([]string{"--force", "--output-dir", repoDir, repoDir}, &stdout, &stderr)
-	if code != app.ExitUsageError {
-		t.Errorf("expected ExitUsageError (2) for safety violation, got %d", code)
+	if code != app.ExitSafetyError {
+		t.Errorf("expected ExitSafetyError (%d) for safety violation, got %d", app.ExitSafetyError, code)
 	}
 	if !strings.Contains(stderr.String(), "Safety Violation") {
 		t.Errorf("expected stderr to contain 'Safety Violation', got: %s", stderr.String())
@@ -424,11 +424,11 @@ auto_discovery:
 		t.Errorf("expected index.html to contain overridden title 'CLI Supreme Title'")
 	}
 
-	// 3. Invalid config path returns ExitUsageError
+	// 3. Invalid config path returns ExitConfigError
 	stderr.Reset()
 	codeInvalid := run([]string{"portal", "--config", "/nonexistent/portal.yaml", tempDir}, &stdout, &stderr)
-	if codeInvalid != app.ExitUsageError {
-		t.Errorf("expected ExitUsageError (2) on invalid config path, got %d", codeInvalid)
+	if codeInvalid != app.ExitConfigError {
+		t.Errorf("expected ExitConfigError (%d) on invalid config path, got %d", app.ExitConfigError, codeInvalid)
 	}
 }
 
@@ -442,10 +442,10 @@ func TestRunPortal_SafetyOverwriteGuard(t *testing.T) {
 		t.Fatalf("failed to create foreign index.html: %v", err)
 	}
 
-	// 1. Without --force: must fail with ExitUsageError and report Safety Violation
+	// 1. Without --force: must fail with ExitSafetyError and report Safety Violation
 	code := run([]string{"portal", "--in-place", tempDir}, &stdout, &stderr)
-	if code != app.ExitUsageError {
-		t.Errorf("expected ExitUsageError (2) for safety violation, got %d", code)
+	if code != app.ExitSafetyError {
+		t.Errorf("expected ExitSafetyError (%d) for safety violation, got %d", app.ExitSafetyError, code)
 	}
 	if !strings.Contains(stderr.String(), "Safety Violation") {
 		t.Errorf("expected stderr to report Safety Violation, got: %s", stderr.String())
@@ -797,6 +797,118 @@ func TestRunPortal_RepoURL_And_PortalURL(t *testing.T) {
 	wantChildLink := `href="el9/base/x86_64/index.html"`
 	if !strings.Contains(portalContent, wantChildLink) {
 		t.Errorf("expected portal catalog to link to child repo with %q", wantChildLink)
+	}
+}
+
+func TestRun_HelpAndGranularExitCodes(t *testing.T) {
+	// 1. --help and portal --help must return ExitSuccess (0)
+	for _, helpArgs := range [][]string{{"--help"}, {"portal", "--help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := run(helpArgs, &stdout, &stderr); code != app.ExitSuccess {
+			t.Errorf("run(%v) returned %d; want ExitSuccess (%d)", helpArgs, code, app.ExitSuccess)
+		}
+	}
+
+	// 2. Broken custom template returns ExitTemplateError (4)
+	repoDir := t.TempDir()
+	createMockRPMRepo(t, repoDir)
+	badTmpl := t.TempDir()
+	_ = os.WriteFile(filepath.Join(badTmpl, "index.html"), []byte("{{ .Broken "), 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--template-dir", badTmpl, "--output-dir", t.TempDir(), repoDir}, &stdout, &stderr); code != app.ExitTemplateError {
+		t.Errorf("expected ExitTemplateError (%d) on broken template, got %d, stderr=%s", app.ExitTemplateError, code, stderr.String())
+	}
+
+	// 3. Portal partial child failure returns ExitPartialFailure (6)
+	portalRoot := t.TempDir()
+	portalHome := t.TempDir()
+	// Healthy child repo
+	goodRepo := filepath.Join(portalRoot, "el9", "base", "x86_64")
+	createMockRPMRepo(t, goodRepo)
+	// Broken child repo (missing SQLite DBs)
+	badRepo := filepath.Join(portalRoot, "el9", "broken", "x86_64")
+	_ = os.MkdirAll(filepath.Join(badRepo, "repodata"), 0o755)
+	_ = os.WriteFile(filepath.Join(badRepo, "repodata", "repomd.xml"), []byte("<repomd/>"), 0o644)
+
+	stdout.Reset()
+	stderr.Reset()
+	codePartial := run([]string{"portal", "--portal-home", portalHome, "--render-all", portalRoot}, &stdout, &stderr)
+	if codePartial != app.ExitPartialFailure {
+		t.Errorf("expected ExitPartialFailure (%d) on portal partial child failure, got %d, stderr=%s", app.ExitPartialFailure, codePartial, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(portalHome, "index.html")); err != nil {
+		t.Errorf("expected portal index.html to still be generated for healthy repos: %v", err)
+	}
+}
+
+func TestRun_RepoYAMLAndSuiteArchFlags(t *testing.T) {
+	repoDir := t.TempDir()
+	outDir := t.TempDir()
+	createMockRPMRepo(t, repoDir)
+
+	// repoview.yaml supplies default title & description; CLI --title overrides repoview.yaml
+	yamlCfg := "title: From Repo YAML\ndescription: Custom Repo Description\n"
+	if err := os.WriteFile(filepath.Join(repoDir, "repoview.yaml"), []byte(yamlCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--output-dir", outDir, "--title", "CLI Override Title", "--suite", "custom-suite", "--arch", "x86_64", repoDir}, &stdout, &stderr)
+	if code != app.ExitSuccess {
+		t.Fatalf("run returned %d; stderr=%s", code, stderr.String())
+	}
+
+	indexHTML, err := os.ReadFile(filepath.Join(outDir, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(indexHTML), "CLI Override Title") {
+		t.Errorf("expected CLI --title to override repoview.yaml title")
+	}
+	if !strings.Contains(string(indexHTML), "Custom Repo Description") {
+		t.Errorf("expected repoview.yaml description in index.html")
+	}
+}
+
+func TestRun_ExitCodeMatrix(t *testing.T) {
+	if app.ExitSuccess != 0 || app.ExitGeneralError != 1 || app.ExitUsageError != 2 ||
+		app.ExitRepoMetadataError != 3 || app.ExitTemplateError != 4 || app.ExitIOError != 5 ||
+		app.ExitPartialFailure != 6 || app.ExitConfigError != 7 || app.ExitSafetyError != 8 {
+		t.Fatalf("unexpected exit code constant values")
+	}
+
+	var stdout, stderr bytes.Buffer
+
+	// 0: ExitSuccess
+	if code := run([]string{"--version"}, &stdout, &stderr); code != app.ExitSuccess {
+		t.Errorf("expected ExitSuccess (0), got %d", code)
+	}
+	// 2: ExitUsageError (missing args & invalid format)
+	if code := run([]string{"--format", "invalid", t.TempDir()}, &stdout, &stderr); code != app.ExitUsageError {
+		t.Errorf("expected ExitUsageError (2), got %d", code)
+	}
+	// 3: ExitRepoMetadataError (non-existent repo dir)
+	if code := run([]string{filepath.Join(t.TempDir(), "missing-repo")}, &stdout, &stderr); code != app.ExitRepoMetadataError {
+		t.Errorf("expected ExitRepoMetadataError (3), got %d", code)
+	}
+	// 5: ExitIOError (--state-dir pointing to regular file)
+	rpmDir := t.TempDir()
+	createMockRPMRepo(t, rpmDir)
+	blockerFile := filepath.Join(t.TempDir(), "not-a-dir")
+	_ = os.WriteFile(blockerFile, []byte("x"), 0o644)
+	if code := run([]string{"--state-dir", blockerFile, "--output-dir", t.TempDir(), rpmDir}, &stdout, &stderr); code != app.ExitIOError {
+		t.Errorf("expected ExitIOError (5), got %d", code)
+	}
+	// 7: ExitSafetyError (--output-dir same as repoDir)
+	if code := run([]string{"--output-dir", rpmDir, rpmDir}, &stdout, &stderr); code != app.ExitSafetyError {
+		t.Errorf("expected ExitSafetyError (7), got %d", code)
+	}
+	// 8: ExitConfigError (invalid repoview.yaml syntax)
+	badCfgRepo := t.TempDir()
+	createMockRPMRepo(t, badCfgRepo)
+	_ = os.WriteFile(filepath.Join(badCfgRepo, "repoview.yaml"), []byte("title: [unclosed"), 0o644)
+	if code := run([]string{"--output-dir", t.TempDir(), badCfgRepo}, &stdout, &stderr); code != app.ExitConfigError {
+		t.Errorf("expected ExitConfigError (8), got %d", code)
 	}
 }
 

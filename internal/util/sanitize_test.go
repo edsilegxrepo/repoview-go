@@ -29,6 +29,8 @@ func TestSanitizeFilename(t *testing.T) {
 		{"aux", "_aux_"},
 		{"com1", "_com1_"},
 		{"lpt9", "_lpt9_"},
+		{"CON.pkg", "_CON.pkg_"},
+		{"lpt1.tar.gz", "_lpt1.tar.gz_"},
 		{"", "unnamed"},
 		{"...", "unnamed"},
 	}
@@ -38,5 +40,27 @@ func TestSanitizeFilename(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("SanitizeFilename(%q) = %q; want %q", tt.input, got, tt.expected)
 		}
+	}
+}
+
+func TestSanitizeSingleLine_And_ShellQuote(t *testing.T) {
+	if got := SanitizeSingleLine("My\nRepo\r\ngpgcheck=0\tTitle\x00"); got != "MyRepogpgcheck=0 Title" {
+		t.Errorf("SanitizeSingleLine unexpected: %q", got)
+	}
+
+	if got := ShellQuote("nginx"); got != "nginx" {
+		t.Errorf("expected safe arg unquoted, got %q", got)
+	}
+	if got := ShellQuote("pkg;rm -rf /"); got != "'pkg;rm -rf /'" {
+		t.Errorf("expected single-quoted dangerous arg, got %q", got)
+	}
+	if got := ShellQuote("it's$(id)\nevil"); got != `'it'\''s$(id)evil'` {
+		t.Errorf("expected escaped single quote and stripped newline, got %q", got)
+	}
+	if got := ShellQuote("-leading-dash"); got != "'-leading-dash'" {
+		t.Errorf("expected leading dash quoted, got %q", got)
+	}
+	if got := ShellQuote(""); got != "''" {
+		t.Errorf("expected empty string quoted as '', got %q", got)
 	}
 }

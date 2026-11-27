@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -152,7 +153,11 @@ func TestLive_Portal_TopologiesAndLiveServer(t *testing.T) {
 
 	// Build binary
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "repoview")
+	binName := "repoview"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	binPath := filepath.Join(binDir, binName)
 	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/edsilegxrepo/repoview/cmd/repoview")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to build repoview binary: %v\nOutput: %s", err, string(out))
@@ -284,7 +289,11 @@ func TestLive_Portal_RealRepository_TestDirectory(t *testing.T) {
 
 	// 1. Build fresh repoview binary
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "repoview")
+	binName := "repoview"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	binPath := filepath.Join(binDir, binName)
 	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/edsilegxrepo/repoview/cmd/repoview")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to build repoview binary: %v\nOutput: %s", err, string(out))
@@ -447,7 +456,11 @@ func TestPortal_RenderAll_E2E(t *testing.T) {
 
 	// Pre-render repo1 with an old title
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "repoview")
+	binName := "repoview"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	binPath := filepath.Join(binDir, binName)
 	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/edsilegxrepo/repoview/cmd/repoview")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to build repoview binary: %v\nOutput: %s", err, string(out))
@@ -516,7 +529,11 @@ overrides:
 func TestPortal_Detached_ReadOnlySource_E2E(t *testing.T) {
 	// 1. Build repoview binary
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "repoview")
+	binName := "repoview"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	binPath := filepath.Join(binDir, binName)
 	buildCmd := exec.Command("go", "build", "-o", binPath, "github.com/edsilegxrepo/repoview/cmd/repoview")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to build repoview binary: %v\nOutput: %s", err, string(out))

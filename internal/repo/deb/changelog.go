@@ -11,9 +11,11 @@ import (
 	pdeb "pault.ag/go/debian/deb"
 )
 
+const maxChangelogBytes = 2 * 1024 * 1024 // 2 MiB ceiling for changelog files
+
 // ParseChangelog parses Debian changelog formatted text from an io.Reader.
 func ParseChangelog(r io.Reader) (*models.ChangelogEntry, error) {
-	entries, err := debchangelog.Parse(r)
+	entries, err := debchangelog.Parse(io.LimitReader(r, maxChangelogBytes))
 	if err != nil || len(entries) == 0 {
 		return nil, err
 	}
@@ -49,10 +51,9 @@ func ExtractChangelogFromDeb(debPath string) (*models.ChangelogEntry, error) {
 				if err != nil {
 					continue
 				}
-				defer func() {
-					_ = gzr.Close()
-				}()
-				reader = gzr
+				entry, parseErr := ParseChangelog(gzr)
+				_ = gzr.Close()
+				return entry, parseErr
 			}
 			return ParseChangelog(reader)
 		}

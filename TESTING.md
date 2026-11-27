@@ -98,7 +98,7 @@ flowchart TB
 ### Core Testing Principles
 
 1. **Defect Discovery Over Convenience**: Tests are deliberately written to uncover hard-to-find defects, boundary edge cases, format variations (e.g., XML element vs. attribute revisions in `repomd.xml`), path traversals, and corrupt payload recovery. Tests never bypass or mask genuine code flaws.
-2. **Strict Zero Repository Pollution**: Every test generating disk artifacts MUST allocate directories exclusively via `t.TempDir()`. No test leaves behind `.state.json`, temporary databases, or stray HTML pages in the working tree.
+2. **Strict Zero Repository Pollution**: Every test generating disk artifacts MUST allocate directories exclusively via `t.TempDir()`. No test leaves behind `state.json`, temporary databases, or stray HTML pages in the working tree.
 3. **Isolation and Dual-Speed Execution**:
    - **Fast Tier (Default)**: Unit tests execute the complete generator pipeline on synthetic in-memory mock repositories in under **50ms**, making continuous TDD fast and friction-free.
    - **Live Integration Tier (`-tags=integration`)**: Validates real-life production repositories containing thousands of RPMs without mocking underlying SQLite or decompression operations.
@@ -159,7 +159,7 @@ sequenceDiagram
 | **SQLite Engines (`sqlite.go`)** | Bulk package querying, multi-table batch changelog enrichment, dependency queries | Missing SQLite tables, corrupt database files, orphaned foreign keys |
 | **EVR Version Sorting (`logic`)** | Upstream RPM EVR comparisons, multi-segment numeric/alphabetic versions | Missing epoch (treated as 0), tilde (`~`) pre-release ordering, caret (`^`) post-release ordering |
 | **Filtering (`filter.go`)** | Glob inclusion, glob exclusion, arch filtering (`x86_64`, `noarch`) | Invalid glob patterns (e.g. malformed syntax handling) |
-| **State Cache (`state.go`)** | Atomic JSON swap, content hashing, stale file tracking | Corrupted `.state.json` recovery, concurrent writes across 50 goroutines |
+| **State Cache (`state.go`)** | Atomic JSON swap, content hashing, stale file tracking | Corrupted `state.json` recovery, concurrent writes across 50 goroutines |
 | **HTML/RSS/Search Rendering (`render`)** | Full template rendering, custom template overrides, static asset delivery | Invalid template syntax, missing assets, empty package collections |
 
 ---
@@ -360,7 +360,7 @@ repoview-go/
 | Package Model | `TestFormattedRelation` | Formats RPM relation entries (flags `<ge>`, `<eq>`, versions). | **PASS**: Formats string representation cleanly (e.g., `libfoo >= 1.2.0`). |
 | Package Model | `TestPackageDependencies_HasAny` | Tests `HasAny()` on package requires, provides, conflicts, obsoletes. | **PASS**: Returns `true` if any slice contains items; `false` when all empty. |
 | Package Model | `TestRPMScriptlets_HasAny` | Tests `HasAny()` on pre/post install and uninstall shell scriptlets. | **PASS**: Returns `true` if any scriptlet string is non-empty. |
-| Package Model | `TestPackage_EVR_And_Filenames` | Validates `EVR()`, `Filename()`, and `RPMFilename()` helpers. | **PASS**: Produces canonical NVRA strings and standardized `.html` filenames. |
+| Package Model | `TestPackage_EVR_And_Filenames` | Validates `EVR()`, `ArchiveFilename()`, and `Filename()` helpers. | **PASS**: Produces canonical NVRA strings and standardized `.html` filenames. |
 | Repomd Model | `TestRepomdUnmarshaling` | Parses `repomd.xml` containing revision as element and as attribute. | **PASS**: Unmarshals both styles successfully into the `Revision` field. |
 | Search Model | `TestSearchIndexSerialization` | Tests search document creation and JSON marshaling. | **PASS**: Produces valid JSON structure containing name, summary, and URL. |
 | Descriptor Model | `TestRepoDescriptor_JSONSerialization` | Tests `RepoDescriptor` JSON marshaling/unmarshaling and schema compliance. | **PASS**: Serializes format, package count, distros, arch, and URLs matching schema. |
@@ -449,7 +449,7 @@ repoview-go/
 | State Cache | `TestStateStoreAtomicSave` | Validates hash comparison, dirty tracking, and atomic file replacement. | **PASS**: HasChanged returns true for new/altered files, false for identical; saves atomically via temp file. |
 | Concurrency | `TestStateStoreConcurrency` | Launches 50 concurrent goroutines querying and modifying state cache. | **PASS**: Zero data races detected under `go test -race`; all writes synchronized. |
 | Cache Pruning | `TestStateStore_StaleFiles_And_Remove` | Detects stale files present in state cache but absent from current run. | **PASS**: Accurately reports stale filenames and removes unreferenced entries. |
-| Fault Recovery | `TestStateStore_CorruptJSON_Recovery` | Tests loading an empty or malformed `.state.json` file. | **PASS**: Gracefully recovers by initializing empty state store; does not fail execution. |
+| Fault Recovery | `TestStateStore_CorruptJSON_Recovery` | Tests loading an empty or malformed `state.json` file. | **PASS**: Gracefully recovers by initializing empty state store; does not fail execution. |
 
 ### Formatting & Sanitization Utilities (`internal/util`)
 
@@ -487,19 +487,20 @@ repoview-go/
 
 RepoView-Go enforces an architectural quality standard where **every package must exceed 80% statement coverage**.
 
-| Package | Purpose | Statements Covered | Percentage | Status |
-| :--- | :--- | :---: | :---: | :---: |
-| `cmd/repoview` | CLI Entrypoint, flags, portal subcommands, exit codes | 355 / 400 | **88.8%** | ✅ PASS (>80%) |
-| `internal/app` | Core generator, pipeline workflow, parent discovery, safety | 593 / 694 | **85.4%** | ✅ PASS (>80%) |
-| `internal/logic` | EVR sorting, filtering, comps & RPM grouping | 356 / 443 | **80.4%** | ✅ PASS (>80%) |
-| `internal/models` | Domain models, XML unmarshaling, search & descriptors | 140 / 149 | **94.0%** | ✅ PASS (>80%) |
-| `internal/portal` | Multi-repo crawler, taxonomy, config, portal renderer | 822 / 999 | **82.3%** | ✅ PASS (>80%) |
-| `internal/render` | HTML/RSS template rendering, asset delivery | 136 / 167 | **81.4%** | ✅ PASS (>80%) |
-| `internal/repo` | Repomd, comps, RPM headers, SQLite access | 399 / 482 | **82.8%** | ✅ PASS (>80%) |
-| `internal/repo/deb` | Debian discovery, RFC 822 parser, ar/tar inspection | 418 / 466 | **89.7%** | ✅ PASS (>80%) |
-| `internal/state` | Persistent state cache, dirty tracking, pruning | 81 / 93 | **87.1%** | ✅ PASS (>80%) |
-| `internal/util` | Human formatting, date conversions, sanitization | 53 / 56 | **94.6%** | ✅ PASS (>80%) |
-| **Total Codebase** | **Complete Project Statement Coverage** | **3353 / 3949** | **84.9%** | **✅ PASS (>80%)** |
+| Package | Purpose | Percentage | Status |
+| :--- | :--- | :---: | :---: |
+| `cmd/repoview` | CLI Entrypoint, flags, portal subcommands, exit codes | **82.5%** | ✅ PASS (>80%) |
+| `internal/app` | Core generator, pipeline workflow, parent discovery, safety | **82.5%** | ✅ PASS (>80%) |
+| `internal/logic` | EVR sorting, filtering, comps & RPM grouping | **81.8%** | ✅ PASS (>80%) |
+| `internal/models` | Domain models, XML unmarshaling, search & descriptors | **90.6%** | ✅ PASS (>80%) |
+| `internal/portal` | Multi-repo crawler, taxonomy, config, portal renderer | **81.1%** | ✅ PASS (>80%) |
+| `internal/render` | HTML/RSS template rendering, asset delivery | **86.2%** | ✅ PASS (>80%) |
+| `internal/repo` | Repomd, comps, RPM headers, XML fallback, updateinfo, SQLite | **82.9%** | ✅ PASS (>80%) |
+| `internal/repo/deb` | Debian discovery, RFC 822 parser, ar/tar inspection | **84.2%** | ✅ PASS (>80%) |
+| `internal/state` | Persistent state cache, fingerprint short-circuit, pruning | **87.1%** | ✅ PASS (>80%) |
+| `internal/taxonomy` | Shared distro/channel/arch rules & icon classification | **88.6%** | ✅ PASS (>80%) |
+| `internal/util` | Atomic I/O, bounded worker pool, decompression, sanitization | **82.0%** | ✅ PASS (>80%) |
+| **Total Codebase** | **Complete Project Statement Coverage** | **83.1%** | **✅ PASS (>80%)** |
 
 > [!NOTE]
 > All unit tests execute in under **0.3 seconds** aggregate time, ensuring developer productivity remains unhindered.
@@ -669,7 +670,7 @@ go test -v ./...
 | `Binary 'gcc' not found in $PATH` / `CGO_ENABLED=0` | SQLite3 driver requires CGo compilation. | Ensure `gcc` or `clang` is installed (`apt install build-essential` or install MinGW-w64 on Windows). Ensure `CGO_ENABLED=1`. |
 | `Integration test skipped: repo path does not exist` | Default test repository `/u01/wwwroot/test/el9/base/x86_64` is absent. | Set `export REPOVIEW_TEST_REPO="/path/to/any/valid/rpm/repo"` before executing `go test -tags=integration`. |
 | `bind: address already in use` in integration tests | Fixed port collisions when starting test HTTP servers. | Tests must bind to `127.0.0.1:0` to allow the kernel to allocate an ephemeral free port. |
-| Test leaves stray `.state.json` or files | Test wrote to working tree instead of temp dir. | Strictly use `t.TempDir()`. Never hardcode relative output paths like `"./output"` in tests. |
+| Test leaves stray `state.json` or files | Test wrote to working tree instead of temp dir. | Strictly use `t.TempDir()`. Never hardcode relative output paths like `"./output"` in tests. |
 | Package coverage drops below 80% | New code added without accompanying unit tests. | Run `go tool cover -html=/tmp/coverage.out` to view red (uncovered) blocks. Add targeted unit tests for error branches and edge cases. |
 
 ### Rule for Code Modifications

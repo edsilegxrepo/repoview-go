@@ -200,9 +200,6 @@ func TestPackage_VersionRelease(t *testing.T) {
 	if got := p1.VersionRelease(); got != "6.20.2" {
 		t.Errorf("expected '6.20.2', got %q", got)
 	}
-	if got := p1.VR(); got != "6.20.2" {
-		t.Errorf("expected '6.20.2', got %q", got)
-	}
 
 	// 2. Debian package with release/revision
 	p2 := &Package{

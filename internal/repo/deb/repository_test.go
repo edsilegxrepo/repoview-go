@@ -2,6 +2,10 @@ package deb
 
 import (
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,11 +102,16 @@ func TestDebRepository_GetAllPackages(t *testing.T) {
 	if nginx.Section != "httpd" {
 		t.Errorf("expected section httpd, got %s", nginx.Section)
 	}
-	if nginx.TimeBuild != 1786060748 {
-		t.Errorf("expected TimeBuild 1786060748, got %d", nginx.TimeBuild)
+	if nginx.TimeBuild != 0 {
+		t.Errorf("expected GetAllPackages to defer binary .deb timestamp reads (TimeBuild=0), got %d", nginx.TimeBuild)
 	}
 
-	// Verify dependencies
+	repoReader.EnrichPackageDetails(pkgs)
+	if nginx.TimeBuild != 1786060748 {
+		t.Errorf("expected TimeBuild 1786060748 after EnrichPackageDetails, got %d", nginx.TimeBuild)
+	}
+
+	// Verify dependencies directly on parsed package
 	if nginx.Dependencies == nil {
 		t.Fatalf("expected nginx dependencies to be populated")
 	}
@@ -121,15 +130,6 @@ func TestDebRepository_GetAllPackages(t *testing.T) {
 	}
 	if len(nginx.Dependencies.Obsoletes) != 1 {
 		t.Errorf("expected 1 obsoletes (Replaces), got %d", len(nginx.Dependencies.Obsoletes))
-	}
-
-	// Test GetPackageDependencies via reader
-	deps, err := repoReader.GetPackageDependencies(nginx.PkgKey)
-	if err != nil {
-		t.Fatalf("GetPackageDependencies failed: %v", err)
-	}
-	if deps == nil || len(deps.Requires) != 2 {
-		t.Errorf("expected cached dependencies via GetPackageDependencies")
 	}
 }
 
@@ -186,16 +186,8 @@ func TestDebRepository_EdgeCasesAndErrors(t *testing.T) {
 		t.Errorf("expected cleanup closure to be executed on Close()")
 	}
 
-	// 4. EnrichPackagesWithChangelogs & GetChangelogForPackage
-	debRepo := r3.(*DebRepository)
-	if err := debRepo.EnrichPackagesWithChangelogs(nil); err != nil {
-		t.Errorf("expected nil from EnrichPackagesWithChangelogs")
-	}
-	if cl, err := debRepo.GetChangelogForPackage(123); err != nil || cl != nil {
-		t.Errorf("expected nil changelog and nil error, got cl=%v err=%v", cl, err)
-	}
-
-	// 5. ReadPackageFiles with empty location href
+	// 4. ReadPackageFiles with empty location href
+	debRepo := r3
 	emptyHrefPkg := &models.Package{LocationHref: ""}
 	files, err := debRepo.ReadPackageFiles(t.TempDir(), emptyHrefPkg)
 	if err != nil || len(files) != 0 {
@@ -280,5 +272,60 @@ Description: app in main component duplicate
 	}
 	if pkgs[1].Name != "app-universe" || pkgs[1].PkgKey != 2 {
 		t.Errorf("expected second package app-universe with key 2, got name=%s key=%d", pkgs[1].Name, pkgs[1].PkgKey)
+	}
+}
+
+func TestDebRepository_ResolvePathSymlinkEscape(t *testing.T) {
+	baseDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideDeb := filepath.Join(outsideDir, "secret.deb")
+	if err := os.WriteFile(outsideDeb, []byte("not-a-deb"), 0o600); err != nil {
+		t.Fatalf("failed to create outside deb: %v", err)
+	}
+
+	linkDeb := filepath.Join(baseDir, "linked.deb")
+	if err := os.Symlink(outsideDeb, linkDeb); err != nil {
+		t.Skipf("skipping symlink escape test (symlinks unsupported): %v", err)
+	}
+
+	debRepo := NewDebRepository(&DebRepoLocations{BaseDir: baseDir}, nil)
+	if _, err := debRepo.ReadPackageFiles(baseDir, &models.Package{LocationHref: "linked.deb"}); err == nil {
+		t.Errorf("expected symlink escape in DebRepository.ReadPackageFiles to be rejected")
+	}
+}
+
+func TestDebRepository_ReleaseSHA256Verification(t *testing.T) {
+	tmpDir := t.TempDir()
+	suiteDir := filepath.Join(tmpDir, "dists", "noble")
+	binDir := filepath.Join(suiteDir, "main", "binary-amd64")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pkgPath := filepath.Join(binDir, "Packages")
+	_ = os.WriteFile(pkgPath, []byte(samplePackagesContent), 0o644)
+
+	sum := sha256.Sum256([]byte(samplePackagesContent))
+	releasePath := filepath.Join(suiteDir, "Release")
+	validRelease := fmt.Sprintf("Suite: noble\nSHA256:\n %s %d main/binary-amd64/Packages\n", hex.EncodeToString(sum[:]), len(samplePackagesContent))
+	_ = os.WriteFile(releasePath, []byte(validRelease), 0o644)
+
+	locs := &DebRepoLocations{
+		BaseDir:       tmpDir,
+		PackagesFile:  pkgPath,
+		PackagesFiles: []string{pkgPath},
+		ReleaseFile:   releasePath,
+	}
+	repoReader := NewDebRepository(locs, nil)
+	defer func() { _ = repoReader.Close() }()
+
+	if _, err := repoReader.GetAllPackages(); err != nil {
+		t.Fatalf("expected valid Release SHA256 to succeed, got: %v", err)
+	}
+
+	// Tamper Packages without updating Release -> must return ErrIntegrity
+	_ = os.WriteFile(pkgPath, []byte(samplePackagesContent+"\n# tampered\n"), 0o644)
+	if _, err := repoReader.GetAllPackages(); !errors.Is(err, models.ErrIntegrity) {
+		t.Errorf("expected ErrIntegrity on tampered Packages file, got: %v", err)
 	}
 }

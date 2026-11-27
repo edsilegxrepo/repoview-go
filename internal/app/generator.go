@@ -30,12 +30,12 @@ package app
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -46,19 +46,33 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/models"
 	"github.com/edsilegxrepo/repoview/internal/render"
 	"github.com/edsilegxrepo/repoview/internal/repo"
-	"github.com/edsilegxrepo/repoview/internal/repo/deb"
 	"github.com/edsilegxrepo/repoview/internal/state"
+	"github.com/edsilegxrepo/repoview/internal/taxonomy"
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
 
 // Diagnostic exit codes for automated tooling and scripting
 const (
 	ExitSuccess           = 0 // View generated successfully without error
-	ExitUsageError        = 2 // Invalid flags, missing arguments, or safety violations
-	ExitRepoMetadataError = 3 // Missing or corrupt repomd.xml, primary.sqlite, comps.xml
+	ExitGeneralError      = 1 // Unexpected/unclassified internal error
+	ExitUsageError        = 2 // Invalid flags or CLI arguments
+	ExitRepoMetadataError = 3 // Missing or corrupt repomd.xml, SQLite DBs, comps.xml
 	ExitTemplateError     = 4 // Error loading or parsing HTML/XML templates
 	ExitIOError           = 5 // Disk full, permission denied, filesystem error
-	ExitPartialFailure    = 6 // Finished with package generation errors
+	ExitPartialFailure    = 6 // Finished with package or child repository errors
+	ExitConfigError       = 7 // Invalid or unreadable configuration file or filter glob
+	ExitSafetyError       = 8 // Safety guard or security/integrity violation
+)
+
+// Domain sentinel error aliases exposed by app for callers and tests.
+var (
+	ErrUsage        = models.ErrUsage
+	ErrRepoMetadata = models.ErrRepoMetadata
+	ErrTemplate     = models.ErrTemplate
+	ErrIO           = models.ErrIO
+	ErrConfig       = models.ErrConfig
+	ErrSafety       = models.ErrSafety
+	ErrIntegrity    = models.ErrIntegrity
 )
 
 // SafetyError indicates a safety violation such as outputDir pointing to repoDir
@@ -67,6 +81,7 @@ type SafetyError struct {
 }
 
 func (e *SafetyError) Error() string { return e.Msg }
+func (e *SafetyError) Unwrap() error { return models.ErrSafety }
 
 // PartialFailureError indicates generation completed but some packages had errors
 type PartialFailureError struct {
@@ -79,22 +94,34 @@ func (e *PartialFailureError) Error() string {
 
 // Config holds the configuration for the Generator
 type Config struct {
-	RepoDir     string            // Root directory of the source RPM repository
-	OutputDir   string            // Target directory for generated HTML and assets
-	StateDir    string            // Directory for saving incremental state JSON files
-	CompsFile   string            // Path to an alternative comps.xml file
-	TemplateDir string            // Path to custom templates (embedded templates used if empty)
-	Title       string            // Display title for the repository view
-	URL         string            // Public base URL of the repository (for RSS feed)
-	BaseURL     string            // Explicit base URL for client repository configuration (.repo)
-	Format      models.RepoFormat // Repository format: auto, rpm, or deb
-	Force       bool              // If true, forces complete regeneration ignoring state cache
-	Quiet       bool              // If true, suppresses standard informational output
-	IgnoreList  []string          // Glob patterns of package names/NVRAs to ignore
-	ExcludeArch []string          // Hardware architectures to exclude from generation
+	RepoDir        string            // Root directory of the source RPM/DEB repository
+	OutputDir      string            // Target directory for generated HTML and assets
+	StateDir       string            // Directory for saving incremental state JSON files
+	CompsFile      string            // Path to an alternative comps.xml file
+	TemplateDir    string            // Path to custom templates (embedded templates used if empty)
+	Title          string            // Display title for the repository view
+	Description    string            // Optional repository description
+	URL            string            // Public base URL of the repository (for RSS feed)
+	BaseURL        string            // Explicit base URL for client repository configuration (.repo)
+	Format         models.RepoFormat // Repository format: auto, rpm, or deb
+	Suite          string            // Optional Debian suite/codename selector
+	Arch           string            // Optional Debian architecture selector
+	Distro         string            // Optional explicit distro label
+	Channel        string            // Optional explicit channel label
+	Badge          string            // Optional UI badge
+	Icon           string            // Optional distro icon override
+	Force          bool              // If true, forces complete regeneration ignoring state cache
+	Quiet          bool              // If true, suppresses standard informational output
+	IgnoreList     []string          // Glob patterns of package names/NVRAs to ignore
+	ExcludeArch    []string          // Hardware architectures to exclude from generation
 	PortalURL      string            // Explicit or auto-detected URL to parent catalog portal ("auto", "none", or path/URL)
 	PackageBaseURL string            // Base URL or relative path prefix for package file downloads
+	GPGKey         string            // Optional GPG public key URL/path for .repo / .sources snippets
+	Workers        int               // Optional explicit worker pool limit (clamped 1..16)
 	Version        string            // Repoview tool version string
+	Stdout         io.Writer         // Optional output stream (defaults to os.Stdout when nil)
+	Stderr         io.Writer         // Optional warning/error stream (defaults to os.Stderr when nil)
+	OutputSink     render.OutputSink // Optional custom storage sink for generated files
 }
 
 // Generator orchestrates the repository view generation process.
@@ -102,6 +129,7 @@ type Config struct {
 // and rendering the static HTML output.
 type Generator struct {
 	config Config
+	logMu  sync.Mutex
 }
 
 // NewGenerator creates a new Generator instance with the provided configuration.
@@ -109,11 +137,105 @@ func NewGenerator(cfg Config) *Generator {
 	return &Generator{config: cfg}
 }
 
-// say prints a formatted message to standard output unless quiet mode is active.
+func (g *Generator) stdout() io.Writer {
+	if g.config.Stdout != nil {
+		return g.config.Stdout
+	}
+	return os.Stdout
+}
+
+func (g *Generator) stderr() io.Writer {
+	if g.config.Stderr != nil {
+		return g.config.Stderr
+	}
+	return os.Stderr
+}
+
+// say prints a formatted message to the configured Stdout writer unless quiet mode is active.
 func (g *Generator) say(format string, args ...interface{}) {
 	if !g.config.Quiet {
-		fmt.Printf(format, args...)
+		g.logMu.Lock()
+		_, _ = fmt.Fprintf(g.stdout(), format, args...)
+		g.logMu.Unlock()
 	}
+}
+
+// warn prints a non-fatal warning message to the configured Stderr writer unless quiet mode is active.
+func (g *Generator) warn(format string, args ...interface{}) {
+	if !g.config.Quiet {
+		g.logMu.Lock()
+		_, _ = fmt.Fprintf(g.stderr(), format, args...)
+		g.logMu.Unlock()
+	}
+}
+
+func (g *Generator) applyRepoYAMLIfPresent() (string, error) {
+	cfgPath, found := FindRepoConfig(g.config.RepoDir)
+	if !found {
+		return "", nil
+	}
+	rc, err := LoadRepoConfig(cfgPath)
+	if err != nil {
+		return "", err
+	}
+	if (g.config.Title == "" || g.config.Title == "Repoview") && rc.Title != "" {
+		g.config.Title = rc.Title
+	}
+	if g.config.Description == "" && rc.Description != "" {
+		g.config.Description = rc.Description
+	}
+	if g.config.CompsFile == "" && rc.Comps != "" {
+		g.config.CompsFile = rc.Comps
+	}
+	if g.config.TemplateDir == "" && rc.TemplateDir != "" {
+		g.config.TemplateDir = rc.TemplateDir
+	}
+	if g.config.URL == "" && rc.URL != "" {
+		g.config.URL = rc.URL
+	}
+	if g.config.BaseURL == "" && rc.BaseURL != "" {
+		g.config.BaseURL = rc.BaseURL
+	}
+	if g.config.PackageBaseURL == "" && rc.PackageBaseURL != "" {
+		g.config.PackageBaseURL = rc.PackageBaseURL
+	}
+	if (g.config.PortalURL == "" || g.config.PortalURL == "auto") && rc.PortalURL != "" {
+		g.config.PortalURL = rc.PortalURL
+	}
+	if g.config.GPGKey == "" && rc.GPGKey != "" {
+		g.config.GPGKey = rc.GPGKey
+	}
+	if g.config.Format == "" && rc.Format != "" {
+		g.config.Format = models.RepoFormat(strings.ToLower(strings.TrimSpace(rc.Format)))
+	}
+	if g.config.Suite == "" && rc.Suite != "" {
+		g.config.Suite = rc.Suite
+	}
+	if g.config.Arch == "" && rc.Arch != "" {
+		g.config.Arch = rc.Arch
+	}
+	if g.config.Workers == 0 && rc.Workers > 0 {
+		g.config.Workers = rc.Workers
+	}
+	if g.config.Distro == "" && rc.Distro != "" {
+		g.config.Distro = rc.Distro
+	}
+	if g.config.Channel == "" && rc.Channel != "" {
+		g.config.Channel = rc.Channel
+	}
+	if g.config.Badge == "" && rc.Badge != "" {
+		g.config.Badge = rc.Badge
+	}
+	if g.config.Icon == "" && rc.Icon != "" {
+		g.config.Icon = rc.Icon
+	}
+	if len(g.config.IgnoreList) == 0 && len(rc.IgnorePackage) > 0 {
+		g.config.IgnoreList = rc.IgnorePackage
+	}
+	if len(g.config.ExcludeArch) == 0 && len(rc.ExcludeArch) > 0 {
+		g.config.ExcludeArch = rc.ExcludeArch
+	}
+	return cfgPath, nil
 }
 
 // Run executes the full repository view generation pipeline.
@@ -123,8 +245,22 @@ func (g *Generator) Run() error {
 		return err
 	}
 
+	repoCfgPath, err := g.applyRepoYAMLIfPresent()
+	if err != nil {
+		return err
+	}
+
+	// Fast incremental short-circuit check when Force is disabled and using local filesystem output
+	repoFP := g.computeRepoFingerprint(repoCfgPath)
+	if !g.config.Force && repoFP != "" && g.config.OutputSink == nil {
+		if unchanged, err := g.canShortCircuitIncremental(repoFP); err == nil && unchanged {
+			g.say("Repository metadata unchanged; skipping regeneration (use --force to rebuild).\n")
+			return nil
+		}
+	}
+
 	// 1. Setup Repo Access
-	reader, locs, cleanup, err := g.prepareRepository()
+	reader, meta, cleanup, err := g.prepareRepository()
 	if err != nil {
 		return err
 	}
@@ -136,27 +272,43 @@ func (g *Generator) Run() error {
 		return err
 	}
 
-	// Enrich all packages with changelogs in bulk (Performance Optimization)
-	g.say("Enriching packages with changelogs...")
-	if err := reader.EnrichPackagesWithChangelogs(allPkgs); err != nil {
-		log.Printf("Warning: failed to enrich packages: %v", err)
+	// Enrich all packages with changelogs in bulk when supported by backend (RPM)
+	if ce, ok := reader.(repo.ChangelogEnricher); ok {
+		g.say("Enriching packages with changelogs...")
+		if err := ce.EnrichPackagesWithChangelogs(allPkgs); err != nil {
+			g.warn("Warning: failed to enrich packages: %v\n", err)
+		}
+		g.say("done\n")
 	}
-	g.say("done\n")
 
-	// Enrich packages with package details (Scriptlets, Signatures, File Lists)
+	// Attach security/errata advisories when updateinfo.xml* is available
+	if ae, ok := reader.(repo.AdvisoryEnricher); ok {
+		if err := ae.EnrichPackagesWithAdvisories(allPkgs); err != nil {
+			g.warn("Warning: failed to load advisories: %v\n", err)
+		}
+	}
+
+	// Enrich packages with package details (Scriptlets, Signatures, Conffiles, Build Timestamps)
 	g.say("Inspecting package metadata on disk...")
-	reader.EnrichPackageDetails(g.config.RepoDir, allPkgs)
+	reader.EnrichPackageDetails(allPkgs)
 	g.say("done\n")
 
 	// 3. Process Groups
-	groups, letterGroups, letters, err := g.processGroups(locs, allPkgs)
+	var locs *repo.RepoLocations
+	if meta != nil {
+		locs = meta.Locations
+	}
+	groups, letterGroups, letters, pkgVersions, err := g.processGroups(locs, allPkgs)
 	if err != nil {
 		return err
 	}
-	allGroups := append(groups, letterGroups...)
+	logic.AssignCollisionSafePackageFilenames(pkgVersions)
+	allGroups := make([]*logic.GroupData, 0, len(groups)+len(letterGroups))
+	allGroups = append(allGroups, groups...)
+	allGroups = append(allGroups, letterGroups...)
 
 	// 4. Setup Output & Renderer
-	renderer, stateStore, err := g.setupRenderer(letters)
+	renderer, stateStore, assetKeys, err := g.setupRenderer(letters, meta, len(pkgVersions))
 	if err != nil {
 		return err
 	}
@@ -184,12 +336,15 @@ func (g *Generator) Run() error {
 	if g.config.PackageBaseURL != "" {
 		renderer.SetPackageBaseURL(g.config.PackageBaseURL)
 	}
+	if g.config.GPGKey != "" {
+		renderer.SetGPGKey(g.config.GPGKey)
+	}
 
 	// Helper data structures
-	pkgVersions := organizePackages(allPkgs)
 	pkgPrimaryGroup := mapPrimaryGroups(allGroups)
 
 	var generatedFiles []string
+	generatedFiles = append(generatedFiles, assetKeys...)
 
 	// 5. Render Groups (renders all groups including letter groups)
 	g.say("Generating pages...\n")
@@ -200,10 +355,7 @@ func (g *Generator) Run() error {
 	generatedFiles = append(generatedFiles, groupFiles...)
 
 	// 6. Render Packages
-	pkgFiles, errorCount, err := g.renderPackages(reader, renderer, stateStore, pkgVersions, pkgPrimaryGroup)
-	if err != nil {
-		return err
-	}
+	pkgFiles, errorCount := g.renderPackages(reader, renderer, stateStore, pkgVersions, pkgPrimaryGroup)
 	generatedFiles = append(generatedFiles, pkgFiles...)
 
 	// 7. Render Indices (pass only real groups to index page, letter groups are in letter bar)
@@ -214,22 +366,27 @@ func (g *Generator) Run() error {
 	generatedFiles = append(generatedFiles, indexFiles...)
 
 	// 7b. Render repoview.json descriptor
-	descFiles, err := g.renderDescriptor(renderer, stateStore, portalURL, allPkgs)
+	descFiles, err := g.renderDescriptor(renderer, stateStore, portalURL, meta, allPkgs)
 	if err != nil {
-		log.Printf("Failed to render repoview.json: %v", err)
-	} else {
-		generatedFiles = append(generatedFiles, descFiles...)
+		return fmt.Errorf("failed to write repoview.json: %w", err)
+	}
+	generatedFiles = append(generatedFiles, descFiles...)
+
+	// Persist repository fingerprint only after clean zero-error run
+	if errorCount == 0 && repoFP != "" {
+		stateStore.Set(state.MetadataKeyRepoFingerprint, repoFP)
+		generatedFiles = append(generatedFiles, state.MetadataKeyRepoFingerprint)
 	}
 
 	// 8. Cleanup (only if no package generation errors to prevent deleting valid pages)
 	if errorCount > 0 {
 		g.say("Warning: %d packages encountered errors during generation, skipping stale cleanup\n", errorCount)
 	} else {
-		g.cleanupStale(stateStore, generatedFiles)
+		g.cleanupStale(renderer, stateStore, generatedFiles)
 	}
 
 	if err := stateStore.Save(); err != nil {
-		log.Printf("Error saving state: %v", err)
+		return fmt.Errorf("%w: failed to save state: %w", models.ErrIO, err)
 	}
 
 	g.say("Complete.\n")
@@ -239,60 +396,25 @@ func (g *Generator) Run() error {
 	return nil
 }
 
-// prepareRepository parses repomd.xml or Debian metadata, decompresses databases, and opens reader.
-func (g *Generator) prepareRepository() (repo.RepoReader, *repo.RepoLocations, func(), error) {
+// prepareRepository opens the detected or configured RPM/DEB backend via repo.OpenWithOptions.
+func (g *Generator) prepareRepository() (repo.RepoReader, *repo.RepoMetadata, func(), error) {
 	g.say("Examining repository...")
-	format := g.config.Format
-	if format == "" || format == "auto" {
-		format = detectFormat(g.config.RepoDir)
-		g.config.Format = format
+	reader, meta, cleanup, err := repo.OpenWithOptions(g.config.RepoDir, repo.OpenOptions{
+		Format: g.config.Format,
+		Suite:  g.config.Suite,
+		Arch:   g.config.Arch,
+		Warn:   g.stderr(),
+	})
+	if err != nil {
+		return nil, nil, func() {}, err
 	}
-
-	if format == models.FormatDEB {
+	g.config.Format = meta.Format
+	if meta.Format == models.FormatDEB {
 		g.say("Detected Debian repository format\n")
-		debLocs, err := deb.Discover(g.config.RepoDir)
-		if err != nil {
-			return nil, nil, func() {}, fmt.Errorf("failed to discover Debian repository: %w", err)
-		}
-		reader := deb.NewDebRepository(debLocs, nil)
-		return reader, nil, func() { _ = reader.Close() }, nil
+	} else {
+		g.say("Detected RPM repository format\n")
 	}
-
-	g.say("Detected RPM repository format\n")
-	locs, err := repo.ParseRepomd(g.config.RepoDir)
-	if err != nil {
-		return nil, nil, func() {}, fmt.Errorf("failed to parse repomd.xml: %w", err)
-	}
-
-	// Decompress DBs
-	primaryPath, cleanupP, err := repo.DecompressFile(locs.Primary)
-	if err != nil {
-		return nil, nil, func() {}, fmt.Errorf("failed to decompress primary db: %w", err)
-	}
-
-	otherPath, cleanupO, err := repo.DecompressFile(locs.Other)
-	if err != nil {
-		cleanupP()
-		return nil, nil, func() {}, fmt.Errorf("failed to decompress other db: %w", err)
-	}
-	g.say("done\n")
-
-	g.say("Opening databases...")
-	db, err := repo.NewRepositoryAccess(primaryPath, otherPath)
-	if err != nil {
-		cleanupP()
-		cleanupO()
-		return nil, nil, func() {}, fmt.Errorf("failed to open databases: %w", err)
-	}
-	g.say("done\n")
-
-	cleanup := func() {
-		_ = db.Close()
-		cleanupO()
-		cleanupP()
-	}
-
-	return db, locs, cleanup, nil
+	return reader, meta, cleanup, nil
 }
 
 // loadPackages fetches all packages and filters them based on config.
@@ -315,7 +437,7 @@ func (g *Generator) loadPackages(reader repo.RepoReader) ([]*models.Package, err
 }
 
 // processGroups loads comps.xml (if available or specified) and organizes packages into groups.
-func (g *Generator) processGroups(locs *repo.RepoLocations, allPkgs []*models.Package) ([]*logic.GroupData, []*logic.GroupData, []string, error) {
+func (g *Generator) processGroups(locs *repo.RepoLocations, allPkgs []*models.Package) ([]*logic.GroupData, []*logic.GroupData, []string, map[string][]*models.Package, error) {
 	var comps *models.Comps
 	var compsSrc string
 	if locs != nil {
@@ -332,167 +454,282 @@ func (g *Generator) processGroups(locs *repo.RepoLocations, allPkgs []*models.Pa
 			defer cleanupG()
 			comps, err = repo.ParseComps(groupsPath)
 			if err != nil {
-				log.Printf("Warning: failed to parse comps.xml: %v", err)
+				g.warn("Warning: failed to parse comps.xml: %v\n", err)
 			}
 		} else {
-			log.Printf("Warning: failed to decompress groups: %v", err)
+			g.warn("Warning: failed to decompress groups: %v\n", err)
 		}
 		g.say("done\n")
 	}
 
-	g.say(" organizing groups...")
+	g.say("Organizing groups...")
 	groupService := logic.NewGroupingService(allPkgs, comps)
+	pkgVersions := groupService.PkgVersions()
 	groups, err := groupService.GetGroups()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to organize groups: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to organize groups: %w", err)
 	}
 
 	letterGroups := groupService.GetLetterGroups()
-	var letters []string
+	letters := make([]string, 0, len(letterGroups))
 	for _, lg := range letterGroups {
-		parts := strings.Split(lg.Name, " ")
-		if len(parts) > 1 {
-			letters = append(letters, parts[1])
+		if lg.Letter != "" {
+			letters = append(letters, lg.Letter)
 		}
 	}
 
 	g.say("done (%d groups, %d letters)\n", len(groups), len(letters))
 
-	return groups, letterGroups, letters, nil
+	return groups, letterGroups, letters, pkgVersions, nil
 }
 
-// setupRenderer creates output directories and initializes the renderer.
-func (g *Generator) setupRenderer(letters []string) (*render.Renderer, *state.StateStore, error) {
-	if err := validateOutputDirSafety(g.config.RepoDir, g.config.OutputDir); err != nil {
-		return nil, nil, err
-	}
-
-	if g.config.Force && g.config.OutputDir != "" {
-		if _, err := os.Stat(g.config.OutputDir); err == nil {
-			_ = os.RemoveAll(g.config.OutputDir)
-		}
-	}
-
-	if err := util.EnsureDir(g.config.OutputDir); err != nil {
-		return nil, nil, fmt.Errorf("failed to create output dir: %w", err)
-	}
-
+func (g *Generator) resolveStatePath() string {
 	stateDir := g.config.OutputDir
 	stateFilename := "state.json"
 
 	if g.config.StateDir != "" {
 		stateDir = g.config.StateDir
-		if err := util.EnsureDir(stateDir); err != nil {
-			log.Printf("Warning: failed to create state dir: %v", err)
-		}
 		hash := sha256.Sum256([]byte(g.config.OutputDir))
 		stateFilename = fmt.Sprintf("%x.state.json", hash)
 	}
+	return filepath.Join(stateDir, stateFilename)
+}
 
-	statePath := filepath.Join(stateDir, stateFilename)
-	if g.config.Force {
-		_ = os.Remove(statePath)
+func (g *Generator) computeRepoFingerprint(repoCfgPath string) string {
+	h := sha256.New()
+	writeField := func(k, v string) {
+		_, _ = fmt.Fprintf(h, "%s=%s\x00", k, v)
+	}
+	writeField("title", g.config.Title)
+	writeField("desc", g.config.Description)
+	writeField("url", g.config.URL)
+	writeField("baseurl", g.config.BaseURL)
+	writeField("pkgbase", g.config.PackageBaseURL)
+	writeField("portal", g.config.PortalURL)
+	writeField("gpgkey", g.config.GPGKey)
+	writeField("tmpl", g.config.TemplateDir)
+	writeField("comps", g.config.CompsFile)
+	writeField("format", string(g.config.Format))
+	writeField("suite", g.config.Suite)
+	writeField("arch", g.config.Arch)
+	writeField("version", g.config.Version)
+	writeField("ignore", strings.Join(g.config.IgnoreList, ","))
+	writeField("exarch", strings.Join(g.config.ExcludeArch, ","))
+
+	hashFile := func(label, p string) bool {
+		if p == "" {
+			return false
+		}
+		// #nosec G304 -- hashing validated metadata inputs for fingerprint comparison
+		f, err := os.Open(filepath.Clean(p))
+		if err != nil {
+			return false
+		}
+		defer func() { _ = f.Close() }()
+		_, _ = fmt.Fprintf(h, "file:%s\x00", label)
+		if _, err := io.Copy(h, io.LimitReader(f, 32*1024*1024)); err != nil {
+			return false
+		}
+		return true
+	}
+
+	hasMeta := hashFile("repomd", filepath.Join(g.config.RepoDir, "repodata", "repomd.xml"))
+	if g.config.CompsFile != "" {
+		_ = hashFile("comps_override", g.config.CompsFile)
+	}
+	if !hasMeta {
+		for _, cand := range []string{"Release", "InRelease", "Packages", "Packages.gz", "Packages.bz2", "Packages.xz", "Packages.zst"} {
+			if hashFile(cand, filepath.Join(g.config.RepoDir, cand)) {
+				hasMeta = true
+			}
+		}
+		// Multi-suite Debian roots: include Release / InRelease timestamps under dists/*/
+		if matches, _ := filepath.Glob(filepath.Join(g.config.RepoDir, "dists", "*", "Release")); len(matches) > 0 {
+			sort.Strings(matches)
+			for _, m := range matches {
+				if hashFile(m, m) {
+					hasMeta = true
+				}
+			}
+		}
+	}
+	if !hasMeta {
+		return ""
+	}
+	if repoCfgPath != "" {
+		_ = hashFile("repoview_yaml", repoCfgPath)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (g *Generator) canShortCircuitIncremental(fp string) (bool, error) {
+	statePath := g.resolveStatePath()
+	if _, err := os.Stat(statePath); err != nil {
+		return false, err
+	}
+	st, err := state.NewStateStore(statePath)
+	if err != nil {
+		return false, err
+	}
+	prevFP, ok := st.Get(state.MetadataKeyRepoFingerprint)
+	if !ok || prevFP != fp {
+		return false, nil
+	}
+	for _, req := range []string{"index.html", "search.json", "repoview.json", "latest-feed.xml"} {
+		if fi, err := os.Stat(filepath.Join(g.config.OutputDir, req)); err != nil || fi.IsDir() {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// setupRenderer creates output directories and initializes the renderer.
+func (g *Generator) setupRenderer(letters []string, meta *repo.RepoMetadata, totalPackages int) (*render.Renderer, *state.StateStore, []string, error) {
+	if err := validateOutputDirSafety(g.config.RepoDir, g.config.OutputDir); err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Parse and validate templates BEFORE touching outputDir or state files so invalid
+	// custom templates never leave an existing published site corrupted or wiped.
+	renderer, err := render.NewRenderer(g.config.OutputDir, g.config.TemplateDir, g.config.Title, g.config.Version, letters)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to initialize renderer: %w", err)
+	}
+	if g.config.OutputSink != nil {
+		renderer.SetSink(g.config.OutputSink)
+	}
+	renderer.SetTotalPackages(totalPackages)
+	if meta != nil {
+		renderer.SetRevision(meta.Revision)
+		if g.config.Description != "" {
+			renderer.SetDescription(g.config.Description)
+		} else if meta.Description != "" {
+			renderer.SetDescription(meta.Description)
+		}
+	} else if g.config.Description != "" {
+		renderer.SetDescription(g.config.Description)
+	}
+
+	if g.config.OutputSink == nil {
+		if err := util.EnsureDir(g.config.OutputDir); err != nil {
+			return nil, nil, nil, fmt.Errorf("%w: failed to create output dir: %w", models.ErrIO, err)
+		}
+	}
+
+	statePath := g.resolveStatePath()
+	if err := util.EnsureDir(filepath.Dir(statePath)); err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: failed to create state dir: %w", models.ErrIO, err)
 	}
 
 	stateStore, err := state.NewStateStore(statePath)
 	if err != nil {
-		log.Printf("Warning: failed to load state: %v", err)
+		return nil, nil, nil, fmt.Errorf("%w: failed to initialize state store: %w", models.ErrIO, err)
 	}
 
-	renderer, err := render.NewRenderer(g.config.OutputDir, g.config.TemplateDir, g.config.Title, g.config.Version, letters)
+	assetKeys, err := renderer.WriteAssetsWithState(stateStore, g.config.Force)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to initialize renderer: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to write assets: %w", err)
 	}
 
-	if err := renderer.WriteAssets(); err != nil {
-		return nil, nil, fmt.Errorf("failed to write assets: %w", err)
-	}
-
-	return renderer, stateStore, nil
+	return renderer, stateStore, assetKeys, nil
 }
 
-// renderGroups renders all group pages.
+func (g *Generator) effectiveWorkers(itemCount int) int {
+	return util.ClampWorkers(g.config.Workers, itemCount)
+}
+
+// renderGroups renders all group pages concurrently using a bounded worker pool.
 func (g *Generator) renderGroups(renderer *render.Renderer, stateStore *state.StateStore, allGroups []*logic.GroupData) ([]string, error) {
-	var generatedFiles []string
+	if len(allGroups) == 0 {
+		return nil, nil
+	}
 
-	for _, grp := range allGroups {
-		content, err := renderer.RenderGroup(grp)
-		if err != nil {
-			return nil, fmt.Errorf("failed to render group %s: %w", grp.Name, err)
-		}
+	generatedFiles := make([]string, len(allGroups))
+	numWorkers := g.effectiveWorkers(len(allGroups))
+	jobs := make(chan int, len(allGroups))
+	for i := range allGroups {
+		jobs <- i
+	}
+	close(jobs)
 
-		hasChanged := stateStore.HasChanged(grp.Filename, content)
-		if g.config.Force || hasChanged {
-			g.say("Writing group %s\n", grp.Filename)
-			if err := renderer.WriteToFile(grp.Filename, content); err != nil {
-				log.Printf("Error writing %s: %v", grp.Filename, err)
+	var (
+		wg       sync.WaitGroup
+		errMu    sync.Mutex
+		firstErr error
+	)
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				grp := allGroups[idx]
+				content, err := renderer.RenderGroup(grp)
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("%w: failed to render group %s: %w", models.ErrTemplate, grp.Name, err)
+					}
+					errMu.Unlock()
+					continue
+				}
+
+				hash, hasChanged := stateStore.CheckChanged(grp.Filename, content)
+				if g.config.Force || hasChanged {
+					g.say("Writing group %s\n", grp.Filename)
+					if err := renderer.WriteToFile(grp.Filename, content); err != nil {
+						errMu.Lock()
+						if firstErr == nil {
+							firstErr = fmt.Errorf("failed to write group %s: %w", grp.Filename, err)
+						}
+						errMu.Unlock()
+						continue
+					}
+					stateStore.MarkWritten(grp.Filename, hash)
+				}
+				generatedFiles[idx] = grp.Filename
 			}
-		}
-		generatedFiles = append(generatedFiles, grp.Filename)
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return generatedFiles, nil
 }
 
 // renderPackages renders all package pages in parallel using a bounded worker pool.
-func (g *Generator) renderPackages(db repo.RepoReader, renderer *render.Renderer, stateStore *state.StateStore, pkgVersions map[string][]*models.Package, pkgPrimaryGroup map[string]*logic.GroupData) ([]string, int64, error) {
+func (g *Generator) renderPackages(db repo.RepoReader, renderer *render.Renderer, stateStore *state.StateStore, pkgVersions map[string][]*models.Package, pkgPrimaryGroup map[string]*logic.GroupData) ([]string, int64) {
 	var generatedFiles []string
 	var mu sync.Mutex
 	var errorCount int64
 
-	// Unique names
-	var uniqueNames []string
+	uniqueNames := make([]string, 0, len(pkgVersions))
 	for name := range pkgVersions {
 		uniqueNames = append(uniqueNames, name)
 	}
+	sort.Strings(uniqueNames)
 
-	numWorkers := runtime.NumCPU() * 2
-	if numWorkers < 1 {
-		numWorkers = 1
-	}
-	if numWorkers > len(uniqueNames) {
-		numWorkers = len(uniqueNames)
-	}
+	util.ForEachConcurrent(uniqueNames, g.config.Workers, func(_ int, pkgName string) {
+		versions := pkgVersions[pkgName]
+		primaryGroup := pkgPrimaryGroup[pkgName]
 
-	jobs := make(chan string, len(uniqueNames))
-	for _, name := range uniqueNames {
-		jobs <- name
-	}
-	close(jobs)
+		filename, err := g.renderSinglePackage(db, renderer, stateStore, versions, primaryGroup, pkgName)
+		if err != nil {
+			g.warn("Error rendering package %s: %v\n", pkgName, err)
+			atomic.AddInt64(&errorCount, 1)
+			return
+		}
 
-	var wg sync.WaitGroup
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			var localGenerated []string
-			for pkgName := range jobs {
-				versions := pkgVersions[pkgName]
-				primaryGroup := pkgPrimaryGroup[pkgName]
-
-				filename, err := g.renderSinglePackage(db, renderer, stateStore, versions, primaryGroup, pkgName)
-				if err != nil {
-					log.Printf("Error rendering package %s: %v", pkgName, err)
-					atomic.AddInt64(&errorCount, 1)
-					continue
-				}
-
-				localGenerated = append(localGenerated, filename)
-			}
-
-			if len(localGenerated) > 0 {
-				mu.Lock()
-				generatedFiles = append(generatedFiles, localGenerated...)
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
+		mu.Lock()
+		generatedFiles = append(generatedFiles, filename)
+		mu.Unlock()
+	})
 
 	if errorCount > 0 {
 		g.say("Finished with %d errors during package generation.\n", errorCount)
 	}
 
-	return generatedFiles, errorCount, nil
+	return generatedFiles, errorCount
 }
 
 // renderSinglePackage renders an individual package page and ensures heap cleanup of file manifests.
@@ -504,12 +741,13 @@ func (g *Generator) renderSinglePackage(db repo.RepoReader, renderer *render.Ren
 	latest := versions[0]
 	latest.AllVersions = versions
 
-	// Populate package dependencies from reader
-	if db != nil && latest.Dependencies == nil {
-		deps, err := db.GetPackageDependencies(latest.PkgKey)
-		if err == nil {
-			latest.Dependencies = deps
+	// Populate package dependencies on-demand if backend implements DependencyReader (RPM)
+	if dr, ok := db.(repo.DependencyReader); ok && latest.Dependencies == nil {
+		deps, err := dr.GetPackageDependencies(latest.PkgKey)
+		if err != nil {
+			return "", fmt.Errorf("failed to read dependencies for %s: %w", pkgName, err)
 		}
+		latest.Dependencies = deps
 	}
 
 	// On-demand file list loading: clean up heap memory upon render completion
@@ -521,13 +759,15 @@ func (g *Generator) renderSinglePackage(db repo.RepoReader, renderer *render.Ren
 					latest.Details = &models.PackageDetails{}
 				}
 				latest.Details.Files = files
-				defer func() {
-					if latest.Details != nil {
-						latest.Details.Files = nil
-					}
-				}()
 			}
 		}
+	}
+	if latest.Details != nil {
+		defer func() {
+			if latest.Details != nil {
+				latest.Details.Files = nil
+			}
+		}()
 	}
 
 	if primaryGroup == nil {
@@ -542,17 +782,16 @@ func (g *Generator) renderSinglePackage(db repo.RepoReader, renderer *render.Ren
 
 	content, err := renderer.RenderPackage(latest, primaryGroup)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", models.ErrTemplate, err)
 	}
 
-	hasChanged := stateStore.HasChanged(filename, content)
+	hash, hasChanged := stateStore.CheckChanged(filename, content)
 	if g.config.Force || hasChanged {
-		if !g.config.Quiet {
-			fmt.Printf("Writing package %s\n", filename)
-		}
+		g.say("Writing package %s\n", filename)
 		if err := renderer.WriteToFile(filename, content); err != nil {
 			return "", err
 		}
+		stateStore.MarkWritten(filename, hash)
 	}
 
 	return filename, nil
@@ -581,17 +820,17 @@ func (g *Generator) renderIndices(renderer *render.Renderer, stateStore *state.S
 	// Generate Search Index (using all latest packages)
 	searchContent, err := renderer.RenderSearchIndex(latestPkgs)
 	if err != nil {
-		log.Printf("Failed to render search index: %v", err)
-	} else {
-		hasChanged := stateStore.HasChanged("search.json", searchContent)
-		if g.config.Force || hasChanged {
-			g.say("Writing search.json\n")
-			if err := renderer.WriteToFile("search.json", searchContent); err != nil {
-				log.Printf("Failed to write search index: %v", err)
-			}
-		}
-		generatedFiles = append(generatedFiles, "search.json")
+		return nil, fmt.Errorf("%w: failed to render search index: %w", models.ErrTemplate, err)
 	}
+	searchHash, searchChanged := stateStore.CheckChanged("search.json", searchContent)
+	if g.config.Force || searchChanged {
+		g.say("Writing search.json\n")
+		if err := renderer.WriteToFile("search.json", searchContent); err != nil {
+			return nil, fmt.Errorf("failed to write search.json: %w", err)
+		}
+		stateStore.MarkWritten("search.json", searchHash)
+	}
+	generatedFiles = append(generatedFiles, "search.json")
 
 	limit := 30
 	if len(latestPkgs) > limit {
@@ -605,58 +844,54 @@ func (g *Generator) renderIndices(renderer *render.Renderer, stateStore *state.S
 
 	idxContent, err := renderer.RenderIndex(availableGroups, latestPkgs, effectiveRSSURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to render index: %w", err)
+		return nil, fmt.Errorf("%w: failed to render index: %w", models.ErrTemplate, err)
 	}
-	idxHasChanged := stateStore.HasChanged("index.html", idxContent)
+	idxHash, idxHasChanged := stateStore.CheckChanged("index.html", idxContent)
 	if g.config.Force || idxHasChanged {
 		g.say("Writing index.html\n")
 		if err := renderer.WriteToFile("index.html", idxContent); err != nil {
 			return nil, fmt.Errorf("failed to write index.html: %w", err)
 		}
+		stateStore.MarkWritten("index.html", idxHash)
 	}
 	generatedFiles = append(generatedFiles, "index.html")
 
 	rssContent, err := renderer.RenderRSS(latestPkgs, effectiveRSSURL)
 	if err != nil {
-		log.Printf("Failed to render RSS: %v", err)
-	} else {
-		rssHasChanged := stateStore.HasChanged("latest-feed.xml", rssContent)
-		if g.config.Force || rssHasChanged {
-			g.say("Writing latest-feed.xml\n")
-			if err := renderer.WriteToFile("latest-feed.xml", rssContent); err != nil {
-				log.Printf("Failed to write RSS: %v", err)
-			}
-		}
-		generatedFiles = append(generatedFiles, "latest-feed.xml")
+		return nil, fmt.Errorf("%w: failed to render RSS: %w", models.ErrTemplate, err)
 	}
+	rssHash, rssHasChanged := stateStore.CheckChanged("latest-feed.xml", rssContent)
+	if g.config.Force || rssHasChanged {
+		g.say("Writing latest-feed.xml\n")
+		if err := renderer.WriteToFile("latest-feed.xml", rssContent); err != nil {
+			return nil, fmt.Errorf("failed to write latest-feed.xml: %w", err)
+		}
+		stateStore.MarkWritten("latest-feed.xml", rssHash)
+	}
+	generatedFiles = append(generatedFiles, "latest-feed.xml")
 
 	return generatedFiles, nil
 }
 
 // cleanupStale removes files that were not generated in this run.
-func (g *Generator) cleanupStale(stateStore *state.StateStore, generatedFiles []string) {
+func (g *Generator) cleanupStale(renderer *render.Renderer, stateStore *state.StateStore, generatedFiles []string) {
 	g.say("Cleaning up stale files...\n")
 	staleFiles := stateStore.GetStaleFiles(generatedFiles)
 	for _, f := range staleFiles {
+		if strings.HasPrefix(f, "__") {
+			continue
+		}
 		g.say("Removing stale %s\n", f)
-		_ = os.Remove(filepath.Join(g.config.OutputDir, f))
+		if renderer != nil && renderer.Sink != nil {
+			_ = renderer.Sink.RemoveFile(f)
+		} else {
+			_ = os.Remove(filepath.Join(g.config.OutputDir, f))
+		}
 		stateStore.Remove(f)
 	}
 }
 
 // Helpers
-
-// organizePackages groups package records by their base name and sorts each version list by EVR descending.
-func organizePackages(allPkgs []*models.Package) map[string][]*models.Package {
-	pkgVersions := make(map[string][]*models.Package)
-	for _, p := range allPkgs {
-		pkgVersions[p.Name] = append(pkgVersions[p.Name], p)
-	}
-	for _, list := range pkgVersions {
-		logic.SortPackagesByEVR(list)
-	}
-	return pkgVersions
-}
 
 // mapPrimaryGroups creates a fast lookup map pointing from a package name to its primary GroupData.
 func mapPrimaryGroups(allGroups []*logic.GroupData) map[string]*logic.GroupData {
@@ -785,23 +1020,6 @@ func detectDebianSiblings(repoDir string) []*logic.SiblingRepo {
 	return siblings
 }
 
-// detectFormat sniffs signatures in the root repository folder.
-func detectFormat(repoDir string) models.RepoFormat {
-	if _, err := os.Stat(filepath.Join(repoDir, "repodata", "repomd.xml")); err == nil {
-		return models.FormatRPM
-	}
-	if _, err := os.Stat(filepath.Join(repoDir, "dists")); err == nil {
-		return models.FormatDEB
-	}
-	if matches, _ := filepath.Glob(filepath.Join(repoDir, "Packages*")); len(matches) > 0 {
-		return models.FormatDEB
-	}
-	base := filepath.Base(repoDir)
-	if strings.HasPrefix(base, "binary-") {
-		return models.FormatDEB
-	}
-	return models.FormatRPM // Default fallback
-}
 
 // validateOutputDirSafety ensures that outputDir is safe to write/delete without risking data loss.
 // It verifies that outputDir:
@@ -810,91 +1028,138 @@ func detectFormat(repoDir string) models.RepoFormat {
 // 3. Is not the filesystem root
 // 4. Does not contain a repodata or dists directory
 func validateOutputDirSafety(repoDir, outputDir string) error {
-	absRepo, err := filepath.Abs(repoDir)
+	realRepo, err := util.ResolveRealPath(repoDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve repoDir %s: %w", repoDir, err)
 	}
-	absOut, err := filepath.Abs(outputDir)
+	realOut, err := util.ResolveRealPath(outputDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve outputDir %s: %w", outputDir, err)
 	}
 
-	// 1. Output directory cannot be the repository directory
-	if absRepo == absOut {
-		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir cannot be identical to repository directory (%s)", absOut)}
+	// 1. Output directory cannot be the repository directory (including via symlinks)
+	if util.SamePath(realRepo, realOut) {
+		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir cannot be identical to repository directory (%s)", realOut)}
 	}
 
 	// 2. Output directory cannot be a parent of repoDir
-	rel, err := filepath.Rel(absOut, absRepo)
-	if err == nil && !strings.HasPrefix(rel, "..") {
-		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) contains repository directory (%s)", absOut, absRepo)}
+	if util.IsPathContained(realOut, realRepo) {
+		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) contains repository directory (%s)", realOut, realRepo)}
 	}
 
 	// 3. Output directory cannot be a root directory
-	cleanOut := filepath.Clean(absOut)
+	cleanOut := filepath.Clean(realOut)
 	if cleanOut == "/" || cleanOut == filepath.VolumeName(cleanOut)+"\\" || cleanOut == filepath.VolumeName(cleanOut)+"/" {
-		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir cannot be the filesystem root (%s)", absOut)}
+		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir cannot be the filesystem root (%s)", realOut)}
 	}
 
 	// 4. Output directory cannot contain repodata or dists
-	repodataCheck := filepath.Join(absOut, "repodata")
+	repodataCheck := filepath.Join(realOut, "repodata")
 	if fi, err := os.Stat(repodataCheck); err == nil && fi.IsDir() {
-		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) contains a repodata directory; refusing to delete or overwrite repository contents", absOut)}
+		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) contains a repodata directory; refusing to delete or overwrite repository contents", realOut)}
 	}
-	distsCheck := filepath.Join(absOut, "dists")
+	distsCheck := filepath.Join(realOut, "dists")
 	if fi, err := os.Stat(distsCheck); err == nil && fi.IsDir() {
-		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) contains a dists directory; refusing to delete or overwrite repository contents", absOut)}
+		return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) contains a dists directory; refusing to delete or overwrite repository contents", realOut)}
+	}
+
+	// 5. Output directory cannot be or sit inside protected repository metadata subdirectories (repodata/ or dists/)
+	for _, metaSub := range []string{"repodata", "dists"} {
+		metaDir := filepath.Join(realRepo, metaSub)
+		if util.SamePath(metaDir, realOut) || util.IsPathContained(metaDir, realOut) {
+			return &SafetyError{Msg: fmt.Sprintf("safety violation: output-dir (%s) cannot reside inside metadata directory (%s)", realOut, metaDir)}
+		}
 	}
 
 	return nil
 }
 
 // renderDescriptor generates the repoview.json metadata descriptor.
-func (g *Generator) renderDescriptor(renderer *render.Renderer, stateStore *state.StateStore, portalURL string, allPkgs []*models.Package) ([]string, error) {
-	descBytes, err := g.buildDescriptor(portalURL, allPkgs)
+func (g *Generator) renderDescriptor(renderer *render.Renderer, stateStore *state.StateStore, portalURL string, meta *repo.RepoMetadata, allPkgs []*models.Package) ([]string, error) {
+	descBytes, err := g.buildDescriptor(portalURL, meta, allPkgs)
 	if err != nil {
 		return nil, err
 	}
-	hasChanged := stateStore.HasChanged("repoview.json", descBytes)
+	hash, hasChanged := stateStore.CheckChanged("repoview.json", descBytes)
 	if g.config.Force || hasChanged {
 		g.say("Writing repoview.json\n")
 		if err := renderer.WriteToFile("repoview.json", descBytes); err != nil {
 			return nil, fmt.Errorf("failed to write repoview.json: %w", err)
 		}
+		stateStore.MarkWritten("repoview.json", hash)
 	}
 	return []string{"repoview.json"}, nil
 }
 
 // buildDescriptor constructs the models.RepoDescriptor struct and marshals it to JSON.
-func (g *Generator) buildDescriptor(portalURL string, allPkgs []*models.Package) ([]byte, error) {
-	primaryArch := detectPrimaryArch(allPkgs)
+func (g *Generator) buildDescriptor(portalURL string, meta *repo.RepoMetadata, allPkgs []*models.Package) ([]byte, error) {
+	primaryArch := taxonomy.DetectPrimaryArchFromPackages(allPkgs)
 	if primaryArch == "all" || primaryArch == "unknown" || primaryArch == "" {
-		if pathArch := detectArchFromPath(g.config.RepoDir); pathArch != "" {
+		if pathArch := taxonomy.DetectArchFromPath(g.config.RepoDir); pathArch != "" && pathArch != "unknown" {
 			primaryArch = pathArch
 		}
 	}
-	distro, channel := inferDistroAndChannel(g.config.RepoDir)
+	if g.config.Arch != "" {
+		primaryArch = g.config.Arch
+	}
+
+	distro, channel := taxonomy.InferDistroAndChannel(g.config.RepoDir)
+	if g.config.Distro != "" {
+		distro = g.config.Distro
+	}
+	if g.config.Channel != "" {
+		channel = g.config.Channel
+	}
+
 	title := g.config.Title
 	if title == "" || title == "Repoview" {
-		if distro != "" && channel != "" {
+		switch {
+		case distro != "" && channel != "":
 			title = fmt.Sprintf("%s %s", distro, channel)
-		} else if distro != "" {
+		case distro != "":
 			title = distro
-		} else {
+		default:
 			title = "Repository"
+		}
+	}
+
+	var (
+		suite      string
+		components []string
+		revision   string
+		descText   = g.config.Description
+	)
+	if g.config.Suite != "" {
+		suite = g.config.Suite
+	}
+	if meta != nil {
+		revision = meta.Revision
+		if suite == "" {
+			suite = meta.Suite
+		}
+		components = meta.Components
+		if descText == "" {
+			descText = meta.Description
 		}
 	}
 
 	desc := &models.RepoDescriptor{
 		Title:           title,
+		Description:     descText,
 		Format:          string(g.config.Format),
 		Arch:            primaryArch,
 		Distro:          distro,
 		Channel:         channel,
+		Suite:           suite,
+		Components:      components,
+		Revision:        revision,
 		PackageCount:    len(allPkgs),
 		LastBuild:       time.Now().UTC().Truncate(time.Second),
 		BaseURL:         g.config.BaseURL,
 		PortalURL:       portalURL,
+		GPGKey:          g.config.GPGKey,
+		Badge:           g.config.Badge,
+		Icon:            g.config.Icon,
 		RepoviewVersion: g.config.Version,
 	}
 
@@ -989,197 +1254,4 @@ func isPortalDir(dir string) bool {
 		}
 	}
 	return false
-}
-
-// detectPrimaryArch determines the primary binary architecture from package records.
-func detectPrimaryArch(allPkgs []*models.Package) string {
-	archCounts := make(map[string]int)
-	for _, p := range allPkgs {
-		arch := strings.ToLower(strings.TrimSpace(p.Arch))
-		if arch != "" {
-			archCounts[arch]++
-		}
-	}
-	if len(archCounts) == 0 {
-		return "all"
-	}
-
-	var bestArch string
-	var maxCount int
-	for arch, count := range archCounts {
-		if arch == "noarch" || arch == "all" {
-			continue
-		}
-		if count > maxCount {
-			maxCount = count
-			bestArch = arch
-		}
-	}
-	if bestArch != "" {
-		return bestArch
-	}
-	if archCounts["noarch"] > 0 {
-		return "noarch"
-	}
-	if archCounts["all"] > 0 {
-		return "all"
-	}
-	return "unknown"
-}
-
-var knownArchitectures = map[string]bool{
-	"x86_64":  true,
-	"amd64":   true,
-	"aarch64": true,
-	"arm64":   true,
-	"armhf":   true,
-	"armv7hl": true,
-	"i686":    true,
-	"i386":    true,
-	"s390x":   true,
-	"ppc64le": true,
-	"riscv64": true,
-	"noarch":  true,
-	"all":     true,
-}
-
-func isArchToken(token string) bool {
-	token = strings.TrimPrefix(token, "binary-")
-	return knownArchitectures[token]
-}
-
-// detectArchFromPath extracts a recognized architecture keyword from directory paths.
-func detectArchFromPath(repoDir string) string {
-	abs, err := filepath.Abs(repoDir)
-	if err != nil {
-		abs = repoDir
-	}
-	parts := strings.Split(filepath.ToSlash(abs), "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		part := strings.TrimSpace(parts[i])
-		if part == "" {
-			continue
-		}
-		if strings.HasPrefix(part, "binary-") {
-			candidate := strings.TrimPrefix(part, "binary-")
-			if knownArchitectures[candidate] {
-				return candidate
-			}
-		}
-		if knownArchitectures[part] {
-			return part
-		}
-		if dotIdx := strings.LastIndex(part, "."); dotIdx != -1 {
-			candidate := part[dotIdx+1:]
-			if knownArchitectures[candidate] {
-				return candidate
-			}
-		}
-		if dashIdx := strings.LastIndex(part, "-"); dashIdx != -1 {
-			candidate := part[dashIdx+1:]
-			if knownArchitectures[candidate] {
-				return candidate
-			}
-		}
-	}
-	return ""
-}
-
-// inferDistroAndChannel deduces distribution and channel identifiers from directory layout.
-func inferDistroAndChannel(repoDir string) (string, string) {
-	abs, err := filepath.Abs(repoDir)
-	if err != nil {
-		abs = repoDir
-	}
-	slashPath := filepath.ToSlash(abs)
-	parts := strings.Split(slashPath, "/")
-	var nonClean []string
-	for _, p := range parts {
-		if strings.TrimSpace(p) != "" {
-			nonClean = append(nonClean, p)
-		}
-	}
-	parts = nonClean
-	if len(parts) == 0 {
-		return "generic", "base"
-	}
-
-	// 1. Debian layout check: .../dists/<suite>/<component>/...
-	for i, part := range parts {
-		if part == "dists" {
-			distro := ""
-			if i > 0 {
-				distro = parts[i-1]
-			}
-			suite := ""
-			if i+1 < len(parts) {
-				suite = parts[i+1]
-			}
-			component := "main"
-			if i+2 < len(parts) && !strings.HasPrefix(parts[i+2], "binary-") {
-				component = parts[i+2]
-			}
-			if distro == "" {
-				if suite != "" {
-					distro = suite
-				} else {
-					distro = "debian"
-				}
-			}
-			return distro, component
-		}
-	}
-
-	// 2. Hierarchical RPM tree check: .../<distro>/<channel>/<arch>
-	lastPart := parts[len(parts)-1]
-	if isArchToken(lastPart) && len(parts) >= 3 {
-		channel := parts[len(parts)-2]
-		distro := parts[len(parts)-3]
-		return distro, channel
-	}
-
-	// 3. Hierarchical two-level tree check: .../<distro>/<channel> (e.g. ubu24/custom, deb12/custom)
-	if len(parts) >= 2 {
-		parent := parts[len(parts)-2]
-		if isLikelyDistro(parent) {
-			return parent, parts[len(parts)-1]
-		}
-	}
-
-	// 4. Slug check: e.g. el10-base.x86_64, el-9-x86_64, ubuntu-24.04-x86_64
-	base := filepath.Base(abs)
-	if dotIdx := strings.LastIndex(base, "."); dotIdx != -1 {
-		suffix := base[dotIdx+1:]
-		if knownArchitectures[suffix] {
-			base = base[:dotIdx]
-		}
-	} else if dashIdx := strings.LastIndex(base, "-"); dashIdx != -1 {
-		suffix := base[dashIdx+1:]
-		if knownArchitectures[suffix] {
-			base = base[:dashIdx]
-		}
-	}
-
-	commonChannels := []string{"base", "baseos", "extras", "updates", "appstream", "powertools", "crb", "main", "universe", "multiverse", "restricted"}
-	for _, ch := range commonChannels {
-		if strings.HasSuffix(base, "-"+ch) {
-			distro := strings.TrimSuffix(base, "-"+ch)
-			return distro, ch
-		}
-		if strings.HasSuffix(base, "."+ch) {
-			distro := strings.TrimSuffix(base, "."+ch)
-			return distro, ch
-		}
-	}
-
-	return base, "base"
-}
-
-// isLikelyDistro checks if a directory name looks like a Linux distribution identifier.
-func isLikelyDistro(name string) bool {
-	d := strings.ToLower(name)
-	return strings.HasPrefix(d, "el") || strings.HasPrefix(d, "ubu") || strings.HasPrefix(d, "deb") ||
-		strings.Contains(d, "rhel") || strings.Contains(d, "centos") || strings.Contains(d, "fedora") ||
-		strings.Contains(d, "rocky") || strings.Contains(d, "alma") || strings.Contains(d, "suse") ||
-		strings.Contains(d, "arch") || strings.Contains(d, "alpine")
 }

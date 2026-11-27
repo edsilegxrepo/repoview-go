@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/taxonomy"
 )
 
 func TestFindParentPortal_YAML(t *testing.T) {
@@ -219,9 +220,9 @@ func TestDetectPrimaryArch(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := detectPrimaryArch(tc.pkgs)
+			got := taxonomy.DetectPrimaryArchFromPackages(tc.pkgs)
 			if got != tc.want {
-				t.Errorf("detectPrimaryArch() = %q; want %q", got, tc.want)
+				t.Errorf("DetectPrimaryArchFromPackages() = %q; want %q", got, tc.want)
 			}
 		})
 	}
@@ -239,13 +240,13 @@ func TestDetectArchFromPath(t *testing.T) {
 		{path: "/var/www/repos/el10-base.x86_64", want: "x86_64"},
 		{path: "/var/www/repos/fedora-40-updates.s390x", want: "s390x"},
 		{path: "/var/www/repos/el-9-x86_64", want: "x86_64"},
-		{path: "/var/www/repos/generic-repo", want: ""},
+		{path: "/var/www/repos/generic-repo", want: "unknown"},
 	}
 
 	for _, tc := range tests {
-		got := detectArchFromPath(tc.path)
+		got := taxonomy.DetectArchFromPath(tc.path)
 		if got != tc.want {
-			t.Errorf("detectArchFromPath(%q) = %q; want %q", tc.path, got, tc.want)
+			t.Errorf("DetectArchFromPath(%q) = %q; want %q", tc.path, got, tc.want)
 		}
 	}
 }
@@ -294,9 +295,9 @@ func TestInferDistroAndChannel(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		gotDistro, gotChannel := inferDistroAndChannel(tc.path)
+		gotDistro, gotChannel := taxonomy.InferDistroAndChannel(tc.path)
 		if gotDistro != tc.wantDistro || gotChannel != tc.wantChannel {
-			t.Errorf("inferDistroAndChannel(%q) = (%q, %q); want (%q, %q)",
+			t.Errorf("InferDistroAndChannel(%q) = (%q, %q); want (%q, %q)",
 				tc.path, gotDistro, gotChannel, tc.wantDistro, tc.wantChannel)
 		}
 	}
@@ -317,7 +318,7 @@ func TestBuildDescriptor(t *testing.T) {
 		{Name: "app2", Arch: "noarch"},
 	}
 
-	data, err := g.buildDescriptor("../../../../index.html", pkgs)
+	data, err := g.buildDescriptor("../../../../index.html", nil, pkgs)
 	if err != nil {
 		t.Fatalf("buildDescriptor failed: %v", err)
 	}

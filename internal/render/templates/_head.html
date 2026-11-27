@@ -1,0 +1,16 @@
+{{ define "_head.html" }}
+<head>
+  <meta charset="utf-8">
+  <title>{{ .PageTitle }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+    (function() {
+      var theme = localStorage.getItem("repoview-theme") || "dark";
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+  <link rel="stylesheet" href="layout/repostyle.css" type="text/css">
+  {{ if eq .PageKind "index" }}<link rel="alternate" type="application/rss+xml" title="RSS" href="latest-feed.xml">{{ end }}
+  <meta name="robots" content="{{ .Robots }}">
+</head>
+{{ end }}

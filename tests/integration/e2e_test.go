@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -95,16 +96,20 @@ func TestLive_EndToEndWorkflow(t *testing.T) {
 		if fi.Size() == 0 {
 			t.Errorf("generated file is empty: %s", p)
 		}
-		if perm := fi.Mode().Perm(); perm != util.DefaultFilePerm {
-			t.Errorf("expected %04o file permissions for %s, got %04o", util.DefaultFilePerm, f, perm)
+		if runtime.GOOS != "windows" {
+			if perm := fi.Mode().Perm(); perm != util.DefaultFilePerm {
+				t.Errorf("expected %04o file permissions for %s, got %04o", util.DefaultFilePerm, f, perm)
+			}
 		}
 	}
 
 	layoutDirInfo, err := os.Stat(filepath.Join(outDir, "layout"))
 	if err != nil {
 		t.Errorf("failed to stat layout directory: %v", err)
-	} else if perm := layoutDirInfo.Mode().Perm(); perm != util.DefaultDirPerm {
-		t.Errorf("expected %04o permissions for layout directory, got %04o", util.DefaultDirPerm, perm)
+	} else if runtime.GOOS != "windows" {
+		if perm := layoutDirInfo.Mode().Perm(); perm != util.DefaultDirPerm {
+			t.Errorf("expected %04o permissions for layout directory, got %04o", util.DefaultDirPerm, perm)
+		}
 	}
 
 	// 3. Start live HTTP server on ephemeral port to simulate real production client access
@@ -254,7 +259,11 @@ func TestLive_EndToEndWorkflow(t *testing.T) {
 func TestLive_SubprocessCLI(t *testing.T) {
 	repoDir := getTestRepoPath(t)
 	outDir := t.TempDir()
-	tempBin := filepath.Join(t.TempDir(), "repoview")
+	binName := "repoview"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	tempBin := filepath.Join(t.TempDir(), binName)
 
 	// 1. Compile binary
 	t.Log("Compiling repoview binary...")

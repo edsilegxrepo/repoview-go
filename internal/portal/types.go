@@ -1,7 +1,6 @@
 package portal
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -9,10 +8,8 @@ import (
 	"time"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/util"
 )
-
-// RepoRunner defines the callback signature used by --render-missing to build raw repos.
-type RepoRunner func(ctx context.Context, repoPath, outDir string) error
 
 // DiscoveredRepo represents an indexed RPM, DEB, or aggregated Debian suite repository.
 type DiscoveredRepo struct {
@@ -20,6 +17,7 @@ type DiscoveredRepo struct {
 	RelPath       string                 `json:"rel_path"`                 // Relative directory from portal root
 	TargetURL     string                 `json:"target_url"`               // Strictly relative link from portal index.html
 	Title         string                 `json:"title"`                    // Human display title
+	Description   string                 `json:"description,omitempty"`    // Optional repository description
 	Format        models.RepoFormat      `json:"format"`                   // "rpm" or "deb"
 	Distro        string                 `json:"distro"`                   // Normalized distro slug (e.g. "el9", "ubuntu")
 	Channel       string                 `json:"channel"`                  // Channel / Component (e.g. "base", "main")
@@ -35,6 +33,12 @@ type DiscoveredRepo struct {
 	Descriptor    *models.RepoDescriptor `json:"descriptor,omitempty"`     // Parsed repoview.json if present
 	Aliases       []string               `json:"aliases,omitempty"`        // Symlink aliases pointing here
 	ConfigSnippet string                 `json:"config_snippet,omitempty"` // Ready-to-copy package manager setup snippet
+	BaseURL       string                 `json:"base_url,omitempty"`       // Override base URL
+	GPGKey        string                 `json:"gpg_key,omitempty"`        // Optional GPG public key URL or path
+	IgnorePackage []string               `json:"ignore_package,omitempty"` // Override package ignore patterns
+	ExcludeArch   []string               `json:"exclude_arch,omitempty"`   // Override architecture exclusions
+	Comps         string                 `json:"comps,omitempty"`          // Override comps.xml path
+	Hidden        bool                   `json:"hidden,omitempty"`         // Excluded from portal catalog display
 }
 
 // Catalog holds the aggregated portal state ready for rendering.
@@ -168,8 +172,14 @@ func (r *DiscoveredRepo) DebArchiveURL(baseURL string) string {
 
 // BuildConfigSnippet generates a valid, copyable package manager configuration snippet.
 func (r *DiscoveredRepo) BuildConfigSnippet(baseURL string) string {
+	gpgKey := util.SanitizeSingleLine(r.GPGKey)
+
 	if r.Format == models.FormatDEB {
-		archiveURL := r.DebArchiveURL(baseURL)
+		archiveURL := util.SanitizeSingleLine(r.DebArchiveURL(baseURL))
+		signedSuffix := ""
+		if gpgKey != "" {
+			signedSuffix = fmt.Sprintf("\nSigned-By: %s", gpgKey)
+		}
 		if r.Suite != "" {
 			comps := strings.Join(r.Components, " ")
 			if comps == "" {
@@ -178,16 +188,21 @@ func (r *DiscoveredRepo) BuildConfigSnippet(baseURL string) string {
 			if comps == "" {
 				comps = "main"
 			}
-			return fmt.Sprintf("Types: deb\nURIs: %s\nSuites: %s\nComponents: %s", archiveURL, r.Suite, comps)
+			return fmt.Sprintf("Types: deb\nURIs: %s\nSuites: %s\nComponents: %s%s",
+				archiveURL, util.SanitizeSingleLine(r.Suite), util.SanitizeSingleLine(comps), signedSuffix)
 		}
-		return fmt.Sprintf("Types: deb\nURIs: %s\nSuites: ./", archiveURL)
+		return fmt.Sprintf("Types: deb\nURIs: %s\nSuites: ./%s", archiveURL, signedSuffix)
 	}
 
 	// RPM (.repo format)
-	repoURL := r.RepoDirURL(baseURL)
-	ch := r.Channel
+	repoURL := util.SanitizeSingleLine(r.RepoDirURL(baseURL))
+	ch := util.SanitizeSingleLine(r.Channel)
 	if ch == "" {
 		ch = "repo"
 	}
-	return fmt.Sprintf("[%s]\nname=%s\nbaseurl=%s\nenabled=1\ngpgcheck=0", ch, r.Title, repoURL)
+	title := util.SanitizeSingleLine(r.Title)
+	if gpgKey != "" {
+		return fmt.Sprintf("[%s]\nname=%s\nbaseurl=%s\nenabled=1\ngpgcheck=1\ngpgkey=%s", ch, title, repoURL, gpgKey)
+	}
+	return fmt.Sprintf("[%s]\nname=%s\nbaseurl=%s\nenabled=1\ngpgcheck=0", ch, title, repoURL)
 }

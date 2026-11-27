@@ -2,40 +2,50 @@ package deb
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
-	"github.com/edsilegxrepo/repoview/internal/repo"
+	"github.com/edsilegxrepo/repoview/internal/util"
 	"pault.ag/go/debian/control"
 )
 
 // DebRepository implements repo.RepoReader for Debian package repositories.
 type DebRepository struct {
 	locs    *DebRepoLocations
+	repoDir string
 	cleanup func()
-	depsMu  sync.RWMutex
-	depsMap map[int64]*models.PackageDependencies
 }
 
 // NewDebRepository creates a new DebRepository instance.
-func NewDebRepository(locs *DebRepoLocations, cleanup func()) repo.RepoReader {
+func NewDebRepository(locs *DebRepoLocations, cleanup func()) *DebRepository {
+	var base string
+	if locs != nil {
+		base = locs.BaseDir
+	}
 	return &DebRepository{
 		locs:    locs,
+		repoDir: base,
 		cleanup: cleanup,
-		depsMap: make(map[int64]*models.PackageDependencies),
 	}
+}
+
+// SetRepoDir sets the root directory used for resolving relative .deb paths when overriding locs.BaseDir.
+func (r *DebRepository) SetRepoDir(repoDir string) {
+	r.repoDir = repoDir
 }
 
 // GetAllPackages parses Packages using control.ParseBinaryIndex and maps to models.Package.
 // It supports multi-component aggregation if multiple Packages files were discovered.
 func (r *DebRepository) GetAllPackages() ([]*models.Package, error) {
 	if r.locs == nil || (r.locs.PackagesFile == "" && len(r.locs.PackagesFiles) == 0) {
-		return nil, fmt.Errorf("no Packages file available")
+		return nil, fmt.Errorf("%w: no Packages file available", models.ErrRepoMetadata)
 	}
 
 	filesToParse := r.locs.PackagesFiles
@@ -43,30 +53,51 @@ func (r *DebRepository) GetAllPackages() ([]*models.Package, error) {
 		filesToParse = []string{r.locs.PackagesFile}
 	}
 
+	var releaseHashes map[string]string
+	var releaseDir string
+	if r.locs.ReleaseFile != "" {
+		var err error
+		releaseHashes, err = parseReleaseSHA256(r.locs.ReleaseFile)
+		if err != nil {
+			return nil, err
+		}
+		releaseDir = filepath.Dir(r.locs.ReleaseFile)
+	}
+
 	var packages []*models.Package
 	seen := make(map[string]bool)
 
-	r.depsMu.Lock()
-	defer r.depsMu.Unlock()
-
 	for _, pkgFile := range filesToParse {
+		if len(releaseHashes) > 0 {
+			if rel, err := filepath.Rel(releaseDir, pkgFile); err == nil {
+				relKey := filepath.ToSlash(strings.TrimPrefix(rel, "./"))
+				if expected, ok := releaseHashes[relKey]; ok {
+					if err := verifyFileSHA256(pkgFile, expected); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
 		err := func(fPath string) error {
-			packagesPath, cleanupDecomp, err := repo.DecompressFile(fPath)
+			packagesPath, cleanupDecomp, err := util.DecompressFile(fPath)
 			if err != nil {
-				return fmt.Errorf("failed to decompress packages file %s: %w", fPath, err)
+				if errors.Is(err, util.ErrDecompressBomb) {
+					return fmt.Errorf("%w: %w", models.ErrIntegrity, err)
+				}
+				return fmt.Errorf("%w: failed to decompress packages file %s: %w", models.ErrRepoMetadata, fPath, err)
 			}
 			defer cleanupDecomp()
 
 			// #nosec G304 -- packagesPath is verified decompressed repository index from repo discovery
 			f, err := os.Open(filepath.Clean(packagesPath))
 			if err != nil {
-				return fmt.Errorf("failed to open packages file %s: %w", packagesPath, err)
+				return fmt.Errorf("%w: failed to open packages file %s: %w", models.ErrRepoMetadata, packagesPath, err)
 			}
 			defer func() { _ = f.Close() }()
 
 			indices, err := control.ParseBinaryIndex(bufio.NewReader(f))
 			if err != nil {
-				return fmt.Errorf("failed to parse Debian binary index %s: %w", fPath, err)
+				return fmt.Errorf("%w: failed to parse Debian binary index %s: %w", models.ErrRepoMetadata, fPath, err)
 			}
 
 			for _, idx := range indices {
@@ -82,17 +113,6 @@ func (r *DebRepository) GetAllPackages() ([]*models.Package, error) {
 				seen[dedupKey] = true
 
 				p.PkgKey = int64(len(packages) + 1)
-
-				if p.LocationHref != "" && r.locs != nil {
-					if debPath := r.resolveDebPath(r.locs.BaseDir, p.LocationHref); debPath != "" {
-						p.TimeBuild = ReadDebTimestamp(debPath)
-					}
-				}
-
-				if p.Dependencies != nil {
-					r.depsMap[p.PkgKey] = p.Dependencies
-				}
-
 				packages = append(packages, p)
 			}
 			return nil
@@ -105,72 +125,35 @@ func (r *DebRepository) GetAllPackages() ([]*models.Package, error) {
 	return packages, nil
 }
 
-// GetPackageDependencies returns cached package dependencies for a given package key.
-func (r *DebRepository) GetPackageDependencies(pkgKey int64) (*models.PackageDependencies, error) {
-	r.depsMu.RLock()
-	defer r.depsMu.RUnlock()
-	return r.depsMap[pkgKey], nil
-}
-
-// GetChangelogForPackage retrieves a changelog entry for a specific package key (if cached).
-func (r *DebRepository) GetChangelogForPackage(pkgKey int64) (*models.ChangelogEntry, error) {
-	return nil, nil
-}
-
-// EnrichPackagesWithChangelogs is a no-op at bulk ingestion time for Debian packages
-// because Debian repositories do not store changelogs in the Packages index.
-// Changelogs can be extracted on-demand during package page rendering from the .deb archive.
-func (r *DebRepository) EnrichPackagesWithChangelogs(pkgs []*models.Package) error {
-	return nil
-}
-
 // EnrichPackageDetails concurrently parses the local .deb files for all packages
-// and populates deep inspection details (maintainer scriptlets from control.tar).
-func (r *DebRepository) EnrichPackageDetails(repoDir string, pkgs []*models.Package) {
-	numWorkers := runtime.NumCPU() * 2
-	if numWorkers < 4 {
-		numWorkers = 4
+// and populates deep inspection details (maintainer scriptlets, conffiles, and ar build timestamps) in one pass.
+func (r *DebRepository) EnrichPackageDetails(pkgs []*models.Package) {
+	baseDir := r.repoDir
+	if baseDir == "" && r.locs != nil {
+		baseDir = r.locs.BaseDir
 	}
+	util.ForEachConcurrent(pkgs, 0, func(_ int, p *models.Package) {
+		if p == nil || p.LocationHref == "" {
+			return
+		}
+		debPath := r.resolveDebPath(baseDir, p.LocationHref)
+		if debPath == "" {
+			return
+		}
 
-	pkgChan := make(chan *models.Package, len(pkgs))
-	for _, p := range pkgs {
-		pkgChan <- p
-	}
-	close(pkgChan)
-
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for p := range pkgChan {
-				if p.LocationHref == "" {
-					continue
-				}
-
-				debPath := r.resolveDebPath(repoDir, p.LocationHref)
-				if debPath == "" {
-					continue
-				}
-
-				if p.TimeBuild <= 0 {
-					p.TimeBuild = ReadDebTimestamp(debPath)
-				}
-
-				details, err := ReadDebDetails(debPath)
-				if err != nil {
-					continue
-				}
-
-				p.Details = details
-			}
-		}()
-	}
-
-	wg.Wait()
+		details, ts, err := ReadDebDetailsWithTimestamp(debPath)
+		if p.TimeBuild <= 0 && ts > 0 {
+			p.TimeBuild = ts
+		}
+		if err != nil {
+			return
+		}
+		p.Details = details
+	})
 }
 
-// ReadPackageFiles extracts on-demand file manifests from data.tar inside the .deb archive.
+// ReadPackageFiles extracts on-demand file manifests from data.tar inside the .deb archive
+// and enriches changelog and fallback license fields in a single streaming pass.
 func (r *DebRepository) ReadPackageFiles(repoDir string, pkg *models.Package) ([]models.PackageFile, error) {
 	if pkg.LocationHref == "" {
 		return nil, nil
@@ -181,12 +164,20 @@ func (r *DebRepository) ReadPackageFiles(repoDir string, pkg *models.Package) ([
 		return nil, fmt.Errorf("package file not found for %s", pkg.LocationHref)
 	}
 
-	files, cl, err := ReadDebFilesAndChangelog(debPath)
+	var conffiles map[string]bool
+	if pkg.Details != nil {
+		conffiles = pkg.Details.Conffiles
+	}
+	files, cl, detectedLicense, err := ReadDebFilesMetadata(debPath, conffiles)
 	if err != nil {
 		return nil, err
 	}
 	if pkg.Changelog == nil && cl != nil {
 		pkg.Changelog = cl
+		pkg.Changelogs = []*models.ChangelogEntry{cl}
+	}
+	if pkg.License == "" && detectedLicense != "" {
+		pkg.License = detectedLicense
 	}
 	if pkg.TimeBuild <= 0 && cl != nil && cl.Date > 0 {
 		pkg.TimeBuild = cl.Date
@@ -205,9 +196,8 @@ func (r *DebRepository) resolveDebPath(repoDir, href string) string {
 	cleanHref := filepath.Clean(href)
 
 	for _, base := range candidates {
-		target := filepath.Join(base, cleanHref)
-		rel, err := filepath.Rel(base, target)
-		if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		target, err := util.ResolveContainedPath(base, cleanHref)
+		if err != nil {
 			continue
 		}
 		if _, err := os.Stat(target); err == nil {
@@ -226,4 +216,59 @@ func (r *DebRepository) Close() error {
 	return nil
 }
 
-var _ repo.RepoReader = (*DebRepository)(nil)
+// parseReleaseSHA256 extracts the SHA256 digest map (relative path -> hex digest) from a Debian Release/InRelease file.
+func parseReleaseSHA256(releasePath string) (map[string]string, error) {
+	const maxReleaseBytes = 5 * 1024 * 1024 // 5 MiB ceiling
+	// #nosec G304 -- releasePath was resolved by deb.Discover inside repository root
+	f, err := os.Open(filepath.Clean(releasePath))
+	if err != nil {
+		return nil, fmt.Errorf("%w: failed to open Debian Release file %s: %w", models.ErrRepoMetadata, releasePath, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	hashes := make(map[string]string)
+	scanner := bufio.NewScanner(io.LimitReader(f, maxReleaseBytes))
+	inSHA256 := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if !inSHA256 {
+			if trimmed == "SHA256:" {
+				inSHA256 = true
+			}
+			continue
+		}
+		if line == "" || (line[0] != ' ' && line[0] != '\t') {
+			break
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 3 {
+			relPath := filepath.ToSlash(strings.TrimPrefix(fields[2], "./"))
+			hashes[relPath] = strings.ToLower(fields[0])
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("%w: failed to scan Debian Release file %s: %w", models.ErrRepoMetadata, releasePath, err)
+	}
+	return hashes, nil
+}
+
+// verifyFileSHA256 validates that targetPath matches expectedHex SHA256 digest.
+func verifyFileSHA256(targetPath, expectedHex string) error {
+	// #nosec G304 -- targetPath was resolved inside repository metadata directory
+	f, err := os.Open(filepath.Clean(targetPath))
+	if err != nil {
+		return fmt.Errorf("failed to open %s for SHA256 verification: %w", targetPath, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("%w: failed to hash %s: %w", models.ErrIO, targetPath, err)
+	}
+	actual := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(actual, strings.TrimSpace(expectedHex)) {
+		return fmt.Errorf("%w: SHA256 mismatch for %s: expected %s, got %s", models.ErrIntegrity, targetPath, expectedHex, actual)
+	}
+	return nil
+}

@@ -1,0 +1,131 @@
+{{ define "_sidebar.html" }}
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="brand-row">
+                <a href="index.html" class="brand-title" title="{{ .Repo.Title }}">
+                    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                        <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                        <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                    </svg>
+                    <span>RepoView</span>
+                </a>
+                <div class="header-actions">
+                    <button id="themeToggleBtn" class="icon-btn" title="Switch to light theme">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="5"></circle>
+                            <line x1="12" y1="1" x2="12" y2="3"></line>
+                            <line x1="12" y1="21" x2="12" y2="23"></line>
+                            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                            <line x1="1" y1="12" x2="3" y2="12"></line>
+                            <line x1="21" y1="12" x2="23" y2="12"></line>
+                            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                        </svg>
+                    </button>
+                    {{ if eq .PageKind "index" }}
+                    <button type="button" class="icon-btn btn-open-repo-modal" title="Configure {{ if eq .Repo.Format "deb" }}APT Repository (.sources file){{ else }}DNF/YUM Repository (.repo file){{ end }}" aria-haspopup="dialog" aria-controls="repoConfigModal">
+                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                    </button>
+                    {{ end }}
+                    <a href="latest-feed.xml" class="icon-btn" title="RSS Feed" target="_blank" rel="noopener noreferrer">
+                        <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                            <path d="M4 11a9 9 0 0 1 9 9"></path>
+                            <path d="M4 4a16 16 0 0 1 16 16"></path>
+                            <circle cx="5" cy="19" r="1"></circle>
+                        </svg>
+                    </a>
+                </div>
+            </div>
+            <div class="search-container">
+                <div class="search-input-wrapper">
+                    <svg class="search-icon" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    <input type="text" id="pkgSearchInput" placeholder="Search packages... (arch:, license:, cve:)" autocomplete="off">
+                    <span class="kbd-hint">/</span>
+                </div>
+                <div id="searchResults"></div>
+            </div>
+        </div>
+
+        <nav class="sidebar-tree">
+            <div class="nav-section">
+                <div class="nav-section-title">Navigation</div>
+                <ul class="nav-list">
+                    <li>
+                        <a href="index.html" class="nav-item-link {{ if eq .PageKind "index" }}active{{ end }}">
+                            <span class="nav-item-label">{{ if eq .PageKind "index" }}Repository Home{{ else }}&laquo; Repository Home{{ end }}</span>
+                        </a>
+                    </li>
+                    {{ if and (eq .PageKind "package") .Group }}
+                    <li>
+                        <a href="{{ .Group.Filename }}" class="nav-item-link">
+                            <span class="nav-item-label">&larr; Back to {{ .Group.Name }}</span>
+                        </a>
+                    </li>
+                    {{ end }}
+                </ul>
+            </div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">
+                    <span>Package Groups</span>
+                    <span class="count-badge">{{ len .Repo.Groups }}</span>
+                </div>
+                <div class="nav-tree">
+                    {{ range .Repo.GroupTree }}
+                    {{ if .IsLeaf }}
+                    <div class="nav-tree-leaf">
+                        <a href="{{ .Filename }}" class="nav-item-link {{ if $.Group }}{{ if eq $.Group.Filename .Filename }}active{{ end }}{{ end }}" title="{{ .Name }}">
+                            <span class="nav-item-label">{{ .Name }}</span>
+                            <span class="count-badge">{{ .TotalPackages }}</span>
+                        </a>
+                    </div>
+                    {{ else }}
+                    <details class="nav-tree-category" open>
+                        <summary class="nav-tree-summary" title="{{ .Name }} ({{ .TotalPackages }} packages)">
+                            <span class="nav-tree-title">
+                                <span class="nav-tree-icon">&#9656;</span>
+                                <span class="nav-tree-cat-name">{{ .Name }}</span>
+                            </span>
+                            <span class="count-badge">{{ .TotalPackages }}</span>
+                        </summary>
+                        <ul class="nav-tree-list">
+                            {{ range .Subgroups }}
+                            <li>
+                                <a href="{{ .Filename }}" class="nav-tree-item-link {{ if $.Group }}{{ if eq $.Group.Filename .Filename }}active{{ end }}{{ end }}" title="{{ .FullName }}">
+                                    <span class="nav-tree-branch">&#9500;&#9472;</span>
+                                    <span class="nav-tree-sub-name">{{ .Name }}</span>
+                                    <span class="count-badge">{{ .Count }}</span>
+                                </a>
+                            </li>
+                            {{ end }}
+                        </ul>
+                    </details>
+                    {{ end }}
+                    {{ end }}
+                </div>
+            </div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">By Letter</div>
+                <div class="letter-matrix">
+                    {{ range .Repo.Letters }}
+                    <a href="letter_{{ . | lower }}.group.html" class="letter-matrix-link {{ if $.Group }}{{ if eq $.Group.Filename (printf "letter_%s.group.html" (. | lower)) }}active{{ end }}{{ end }}">{{ . }}</a>
+                    {{ end }}
+                </div>
+            </div>
+        </nav>
+
+        <footer class="sidebar-footer">
+            <span>RepoView-Go</span>
+            <a href="https://github.com/edsilegxrepo/repoview-go" target="_blank" rel="noopener noreferrer">v{{ .Repo.MyVersion }}</a>
+        </footer>
+    </aside>
+{{ end }}

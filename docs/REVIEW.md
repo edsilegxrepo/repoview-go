@@ -487,18 +487,18 @@ Inspection of `internal/models/adapter_deb.go`, `internal/repo/deb/details.go`, 
 **Goal:** Eliminate immediate security vulnerabilities, OOM/heap bloat, nil panics, and destructive data loss risks.  
 **Exit Criteria:** Zero `P0` defects; `rss.xml` safely handles `]]>` and XML metacharacters; RPM file manifests consume memory strictly per active worker; `--force` cannot destroy an existing site on template failure.
 
-- [ ] **1.1** Fix `rss.xml` XML/CDATA injection (`SEC-01`):
+- [x] **1.1** Fix `rss.xml` XML/CDATA injection (`SEC-01`):
   - Add `xmlEscape` and `cdataSafe` (splitting `]]>` as `]]]]><![CDATA[>`) functions to `XMLTmpls`, or migrate `RenderRSS` to `encoding/xml` structs matching `internal/portal/renderer.go`.
   - Add unit tests in `internal/render/renderer_test.go` with adversarial `]]>`, `<script>`, `&`, and quotes in package summary, description, title, and changelog.
-- [ ] **1.2** Fix RPM eager file manifest loading & `defer` memory leak (`LOG-01`):
+- [x] **1.2** Fix RPM eager file manifest loading & `defer` memory leak (`LOG-01`):
   - Remove `header.GetFiles()` from `ReadRPMDetails` in `internal/repo/rpm_reader.go`.
   - Ensure `renderSinglePackage` in `internal/app/generator.go` loads `Files` solely via `db.ReadPackageFiles` and unconditionally clears `latest.Details.Files = nil` via `defer`.
   - Verify `AllVersions[1:]` never hold `Files` slices.
-- [ ] **1.3** Fix `nil` `stateStore` panic & `--force` premature `os.RemoveAll` (`LOG-02`, `LOG-03`):
+- [x] **1.3** Fix `nil` `stateStore` panic & `--force` premature `os.RemoveAll` (`LOG-02`, `LOG-03`):
   - Return error on `state.NewStateStore` open failure (do not continue with `nil`).
   - Remove `os.RemoveAll(g.config.OutputDir)` from `setupRenderer`; rely on `g.config.Force` bypassing `HasChanged` + atomic file writes + `cleanupStale` at the end.
   - Add regression tests in `internal/app/generator_unit_test.go` for invalid `--template-dir` with `--force` preserving existing output.
-- [ ] **1.4** Harden path traversal & symlink containment (`SEC-03`):
+- [x] **1.4** Harden path traversal & symlink containment (`SEC-03`):
   - Create `internal/util/path.go` with `ResolveContainedPath(baseDir, relOrTarget string) (string, error)` and `EvalSymlinks` ancestor checking + `filepath.IsLocal`.
   - Apply in `ParseRepomd`, `EnrichPackagesWithRPMDetails`, `ReadPackageFiles`, `DebRepository.resolveDebPath`, `Renderer.WriteToFile`, `Renderer.WriteAssets`, and `validateOutputDirSafety` (including symlinked `outputDir == repoDir`).
   - Add traversal and symlink-escape tests across `repo`, `deb`, `render`, and `app`.
@@ -507,18 +507,18 @@ Inspection of `internal/models/adapter_deb.go`, `internal/repo/deb/details.go`, 
 **Goal:** Enforce metadata integrity, fix silent error swallowing, standardize granular exit codes, and make the full test suite green on both Linux and Windows.  
 **Exit Criteria:** All unit tests pass on both Windows and Linux; `gosec` reports 0 unaddressed findings; every CLI failure returns a deterministic, documented exit code via `errors.Is`/`errors.As`.
 
-- [ ] **2.1** Harden snippet generation, `deb` archive bounds & metadata checksums (`SEC-02`, `SEC-04`, `SEC-05`):
+- [x] **2.1** Harden snippet generation, `deb` archive bounds & metadata checksums (`SEC-02`, `SEC-04`, `SEC-05`):
   - Sanitize/reject newlines & control chars and shell-escape arguments in `package.html`, `index.html`, `search.js`, and `portal/types.go`; add `--gpgkey` / configurable `gpgcheck` option instead of unconditionally forcing `gpgcheck=0` / `Trusted: yes` where keys are configured.
   - Enforce `io.LimitReader` ceilings on `deb/details.go` (`control.tar` scriptlets), `deb/changelog.go` (`changelog.Debian.gz`), `portal/config.go`, and `portal/renderer.go` (`latest-feed.xml`).
   - Verify `repomd.xml` SHA256/SHA512 checksums in `internal/repo/repomd.go` / `decompress.go`, and Debian `Release` SHA256 hashes when present.
-- [ ] **2.2** Fix `StateStore` commit ordering & SQLite error checking (`LOG-04`, `LOG-05`):
+- [x] **2.2** Fix `StateStore` commit ordering & SQLite error checking (`LOG-04`, `LOG-05`):
   - Split `StateStore.HasChanged` into read-check (`CheckChanged`) + post-write commit (`MarkWritten`) so failed `WriteToFile` calls do not corrupt incremental state; propagate write errors from `renderGroups`, `renderIndices`, `renderDescriptor`, and `stateStore.Save()`.
   - Check `rows.Err()`, scan errors, and query errors in `RepositoryAccess.GetPackageDependencies`; use `defer` statement cleanup in `NewRepositoryAccess`.
-- [ ] **2.3** Implement granular domain errors & deterministic exit codes (`EXIT-01`):
+- [x] **2.3** Implement granular domain errors & deterministic exit codes (`EXIT-01`):
   - Define typed/sentinel errors (`ErrUsage`, `ErrRepoMetadata`, `ErrTemplate`, `ErrIO`, `ErrConfig`, `ErrSafety`, `ErrIntegrity`) and exit constants (`ExitSuccess=0`, `ExitGeneralError=1`, `ExitUsageError=2`, `ExitRepoMetadataError=3`, `ExitTemplateError=4`, `ExitIOError=5`, `ExitPartialFailure=6`, `ExitConfigError=7`, `ExitSafetyError=8`).
   - Replace substring matching in `cmd/repoview/main.go` with `errors.Is`/`errors.As`.
   - Return `ExitSuccess` on `flag.ErrHelp` (`--help`) and `ExitPartialFailure` in `runPortal` when `len(renderErrors) > 0`.
-- [ ] **2.4** Fix Windows test failures & implement Windows file-ID cycle guard (`OS-01`, `OS-02`, `OS-03`):
+- [x] **2.4** Fix Windows test failures & implement Windows file-ID cycle guard (`OS-01`, `OS-02`, `OS-03`):
   - Update `internal/util/perm.go` (`perm_unix.go` / `perm_windows.go`) and gate POSIX permission checks in `perm_test.go`, `renderer_test.go`, `e2e_test.go`, `deb_e2e_test.go` with `runtime.GOOS != "windows"` (plus Windows read-only/writeability checks).
   - Implement `getFileID` in `internal/portal/scanner_windows.go` via `golang.org/x/sys/windows.GetFileInformationByHandle`.
   - Check DOS device name stem before `.` in `SanitizeFilename` and append `.exe` in `tests/integration` binary builds on Windows.
@@ -527,11 +527,11 @@ Inspection of `internal/models/adapter_deb.go`, `internal/repo/deb/details.go`, 
 **Goal:** Eliminate redundant I/O and CPU hot paths across RPM, DEB, and Portal pipelines for both Linux and Windows.  
 **Exit Criteria:** Measurable reduction in disk I/O (1 pass per `.deb`/`.rpm`), memory allocations, and end-to-end runtime on multi-thousand-package repos.
 
-- [ ] **3.1** Optimize RPM & DEB package readers (`PERF-01`, `PERF-02`, `SEC-06`, `OS-04`):
+- [x] **3.1** Optimize RPM & DEB package readers (`PERF-01`, `PERF-02`, `SEC-06`, `OS-04`):
   - Switch `ReadRPMFiles` to `rpmutils.ReadHeader(f)` to avoid hashing entire RPM payloads.
   - Remove sequential `ReadDebTimestamp` loop from `DebRepository.GetAllPackages()`; extract timestamp once inside `EnrichPackageDetails`.
   - Harden `NewRepositoryAccess` with `file:` URI escaping, `ATTACH` `mode=ro`, `PRAGMA query_only = ON`, `PRAGMA trusted_schema = OFF`, and read-only tuning (`PRAGMA mmap_size`, `PRAGMA temp_store = MEMORY`, `PRAGMA cache_size`).
-- [ ] **3.2** Optimize grouping, sorting, concurrency & scanner syscalls (`PERF-03`, `PERF-04`, `PERF-05`, `OS-04`):
+- [x] **3.2** Optimize grouping, sorting, concurrency & scanner syscalls (`PERF-03`, `PERF-04`, `PERF-05`, `OS-04`):
   - Pre-build and sort `pkgVersions` once; pre-parse EVR/Deb version keys prior to `sort.Slice`.
   - Clamp `renderPackages` worker pool (`1..16` or configurable `--workers`), parallelize `renderGroups` and `primary`/`other` decompression.
   - Use `entry.Info()` instead of redundant `os.Stat` in `portal/scanner.go`, and parse `search.json` in a single pass when `repoview.json` is missing.
@@ -541,26 +541,26 @@ Inspection of `internal/models/adapter_deb.go`, `internal/repo/deb/details.go`, 
 **Goal:** Eliminate cross-package duplication, global state leaks, and interface bloat to bring the codebase to long-term production maintainability.  
 **Exit Criteria:** Zero duplicated core algorithms; `Generator` writes exclusively to injected `io.Writer`s; clean `golangci-lint` run across extended linters.
 
-- [ ] **4.1** Unify duplicated subsystems (`MOD-01`, `LOG-06`, `LOG-07`):
+- [x] **4.1** Unify duplicated subsystems (`MOD-01`, `LOG-06`, `LOG-07`):
   - Extract `util.AtomicWriteFile` (replacing 3 copies in `state`, `render`, `portal`).
   - Extract shared taxonomy package (`internal/taxonomy` or `internal/logic/taxonomy.go`) eliminating duplication between `app/generator.go` and `portal/taxonomy.go`.
   - Extract shared concurrent worker pool helper (`util.ForEachConcurrent`).
   - Refactor `sqlite.go` dependency queries into one helper, `deb/discovery.go` component loops into one helper, and `cmd/repoview/main.go` `printOption` into one helper.
   - Inject `Stdout`/`Stderr` (or structured logger) into `app.Config` instead of global `fmt.Printf`/`log.Printf`; keep `util.SetUmask` solely in `main()`.
   - Extract shared Go HTML template partials (`_sidebar.html`, `_head.html`, `_topbar.html`) across `index.html`, `group.html`, `package.html`.
-- [ ] **4.2** Minimize `RepoReader` & remove backend leakage (`MOD-02`):
+- [x] **4.2** Minimize `RepoReader` & remove backend leakage (`MOD-02`):
   - Add `repo.Open(repoDir string, format models.RepoFormat)` factory so `internal/app` does not import `internal/repo/deb`.
   - Remove dead `GetChangelogForPackage` and no-op `EnrichPackagesWithChangelogs` stubs from `DebRepository` (handle optional `ChangelogEnricher` capability interface or perform format-specific enrichment cleanly), and drop redundant `depsMap` caching in `DebRepository`.
-- [ ] **4.3** Fix remaining logic & portal edge cases (`LOG-08`, `LOG-09`, `LOG-10`):
+- [x] **4.3** Fix remaining logic & portal edge cases (`LOG-08`, `LOG-09`, `LOG-10`):
   - Surface `os.ReadDir` warnings in `portal/scanner.go`.
   - Fix `BuildGroupTree` leaf collision, `GetLetterGroups` UTF-8 rune decoding (`utf8.DecodeRuneInString`), `index.html` total package count display, `portal/config.go` `filepath.ToSlash` override key normalization, and `portal/renderer.go` detached `.` `latest-feed.xml` lookup.
   - Address case-insensitive filename collisions on Windows/macOS (e.g., deterministic short hash suffix on collision) and `gosec` CWE-276 `state.json` web-root exposure (`SEC-07`).
-- [ ] **4.4** Workflow, Declarative Repository Structure & Reusability (`WF-01`, `WF-02`, `WF-03`, `DISC-01`, `DISC-02`, `DISC-03`):
+- [x] **4.4** Workflow, Declarative Repository Structure & Reusability (`WF-01`, `WF-02`, `WF-03`, `DISC-01`, `DISC-02`, `DISC-03`):
   - Add repository-level fingerprint short-circuiting in `StateStore` (`repomd.xml` + `comps.xml` / `Release` + `Packages*` + config hash) so unchanged incremental runs skip `.rpm`/`.deb` binary inspection and HTML re-rendering.
   - Introduce `repoview.yaml` (single-repo declarative config) and expand `portal.yaml` (`local_repos`/`repositories`, rich `overrides` for `distro`/`channel`/`arch`/`suite`/`base_url`/`gpgkey`/`ignore_package`/`exclude_arch`/`hidden`, and custom taxonomy `path_patterns`).
   - Propagate all override fields during `runPortal` `--render-missing`/`--render-all` and eliminate the full second `Scanner.Scan()` pass by updating catalog entries in memory from rendered `repoview.json` descriptors.
   - Add `--suite` / `--arch` selectors for multi-suite/multi-arch Debian roots, support `Packages.bz2`/`.zst` consistently across `discovery.go` and `portal/scanner.go`, add `primary.xml`/`other.xml` fallback when SQLite DBs are absent, fix `isExcluded` substring over-matching (`"test"` vs `"latest"`), and abstract `OutputSink` for reusable library/storage-backend integration.
-- [ ] **4.5** Rich RPM/DEB Metadata Extraction, Display & Search (`META-01`, `META-02`, `SRCH-01`):
+- [x] **4.5** Rich RPM/DEB Metadata Extraction, Display & Search (`META-01`, `META-02`, `SRCH-01`):
   - **RPM:** Query `pkgId` (SHA-256), `rpm_packager`, `time_file`, `size_archive`, and weak dependencies (`recommends`, `suggests`, `enhances`, `supplements`) from `primary.sqlite`; surface `repomd.Revision`, multi-entry changelogs, RPM `BUGURL`/`VCS`, file flags (`[config]`, `[doc]`), and `updateinfo` security/CVE advisories.
   - **DEB:** Map `Priority`, `MultiArch`, `Essential`, `Tags` (Debtags), `Enhances`, `BuiltUsing`, `Bugs`, `Origin`, `MD5sum`/`SHA1` via `control.BinaryIndex`; parse `Release` metadata via `control.Unmarshal`; extract `conffiles`, symlink targets, and DEP-5 `copyright` license from `.deb` archives; use `idx.GetRecommends()`/`idx.GetProvides()` directly.
   - **Search:** Expand `search.json` (or lazy `search-ext.json` for large repos) with `group`/`section`, `license`, `provides`, `tags`, and `advisories`; implement relevance ranking, structured query qualifiers (`arch:`, `provides:`, `license:`, `group:`, `tag:`, `cve:`), and keyboard arrow navigation in `search.js` and `portal.html`.
@@ -569,15 +569,15 @@ Inspection of `internal/models/adapter_deb.go`, `internal/repo/deb/details.go`, 
 **Goal:** Achieve 100% clean linter/formatter checks, remove dead code, align docs/build configs, and exceed 80% coverage across every package.  
 **Exit Criteria:** `go test ./...`, `go vet`, `staticcheck`, `golangci-lint`, `gosec`, `govulncheck`, and `biome check .` all exit `0`; all packages >=80% coverage.
 
-- [ ] **5.1** Remove dead code, unused parameters & linter smells (`MOD-03`):
+- [x] **5.1** Remove dead code, unused parameters & linter smells (`MOD-03`):
   - Remove unused `portal.RepoRunner`, `Package.RPMFilename()`, `Package.VR()` (if unused), unused `rootDir` in `inspectDirectory`, unused `error` return in `renderPackages`, unused `idx` in `state_test.go`, and unused return in `createMockDebianRepository`.
   - Fix the 3 `gocritic` `appendAssign` bugs (`generator.go:156`, `config.go:123,203`).
-- [ ] **5.2** Fix build, lint & asset configuration drift (`SEC-09`, `MOD-04`):
+- [x] **5.2** Fix build, lint & asset configuration drift (`SEC-09`, `MOD-04`):
   - Fix `build.json` (remove duplicate `"entrypoint"`, set `"cgo": true` to match `mattn/go-sqlite3`, format with Biome).
   - Keep `github.com/mattn/go-sqlite3` (confirmed by user; RPM/DEB build ecosystem already supports CGo) and plan migration from archived `gopkg.in/yaml.v3` to `go.yaml.in/yaml/v3`.
   - Update `biome.json` schema (`2.6.9`) and format `repostyle.css` (`L670`).
   - Fix console typo (`" organizing groups..."`), standardize repo footer URLs (`edsilegxrepo/repoview-go`), align `README.md` license badge (`MIT`), `state.json` naming, `--max-depth` default (`5`), and dependency versions.
-- [ ] **5.3** Expand test coverage & final verification:
+- [x] **5.3** Expand test coverage & final verification:
   - Raise coverage above 80% in `internal/repo` (currently 64.4% — add synthetic `.rpm` fixture tests so `rpm_reader_test.go` does not skip), `internal/portal` (currently 73.7%), and `internal/logic` (currently 76.0%).
   - Add exit-code matrix tests in `cmd/repoview/main_test.go` covering all 9 exit codes (`0`–`8`).
   - Run full verification suite on both Windows and Linux:

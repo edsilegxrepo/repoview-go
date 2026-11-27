@@ -3,12 +3,14 @@ package repo
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"io"
+	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/edsilegxrepo/repoview/internal/models"
+	"github.com/edsilegxrepo/repoview/internal/util"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -38,109 +40,223 @@ import (
 // It manages connections to both 'primary' (packages) and 'other' (changelogs)
 // databases and provides methods to query them efficiently.
 type RepositoryAccess struct {
-	PrimaryDB     *sql.DB
-	changelogStmt *sql.Stmt // Cached prepared statement for fast changelog lookups
-	reqStmt       *sql.Stmt // Cached prepared statement for package requires
-	provStmt      *sql.Stmt // Cached prepared statement for package provides
-	confStmt      *sql.Stmt // Cached prepared statement for package conflicts
-	obsStmt       *sql.Stmt // Cached prepared statement for package obsoletes
+	PrimaryDB      *sql.DB
+	repoDir        string
+	updateInfoPath string
+	warnWriter     io.Writer
+	changelogStmt  *sql.Stmt // Cached prepared statement for fast changelog lookups
+	reqStmt        *sql.Stmt // Cached prepared statement for package requires
+	provStmt       *sql.Stmt // Cached prepared statement for package provides
+	confStmt       *sql.Stmt // Cached prepared statement for package conflicts
+	obsStmt        *sql.Stmt // Cached prepared statement for package obsoletes
+	recStmt        *sql.Stmt // Optional prepared statement for RPM weak recommends
+	sugStmt        *sql.Stmt // Optional prepared statement for RPM weak suggests
+	enhStmt        *sql.Stmt // Optional prepared statement for RPM weak enhances
+	supStmt        *sql.Stmt // Optional prepared statement for RPM weak supplements
+}
+
+// SetRepoDir configures the base repository path used by EnrichPackageDetails.
+func (r *RepositoryAccess) SetRepoDir(repoDir string) {
+	r.repoDir = repoDir
+}
+
+// SetUpdateInfoPath configures an optional repodata updateinfo.xml* path for CVE/errata enrichment.
+func (r *RepositoryAccess) SetUpdateInfoPath(path string) {
+	r.updateInfoPath = path
+}
+
+// SetWarningWriter injects a diagnostic writer for non-fatal SQLite warnings.
+func (r *RepositoryAccess) SetWarningWriter(w io.Writer) {
+	r.warnWriter = w
+}
+
+func (r *RepositoryAccess) warnf(format string, args ...interface{}) {
+	if r.warnWriter != nil {
+		_, _ = fmt.Fprintf(r.warnWriter, format, args...)
+	}
+}
+
+// sqliteReadOnlyURI builds an escaped file: URI with read-only concurrency and query_only parameters.
+func sqliteReadOnlyURI(dbPath string) (string, error) {
+	absPath, err := filepath.Abs(filepath.Clean(dbPath))
+	if err != nil {
+		return "", err
+	}
+	slashed := filepath.ToSlash(absPath)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	q := url.Values{}
+	q.Set("mode", "ro")
+	q.Set("cache", "shared")
+	q.Set("_busy_timeout", "5000")
+	q.Set("_query_only", "1")
+	u := &url.URL{
+		Scheme:   "file",
+		Path:     slashed,
+		RawQuery: q.Encode(),
+	}
+	return u.String(), nil
 }
 
 // NewRepositoryAccess creates a new accessor for the given database files.
 // It opens connections in read-only mode with connection pooling and prepares statements for high-frequency queries.
 func NewRepositoryAccess(primaryPath, otherPath string) (*RepositoryAccess, error) {
-	dsn := primaryPath
-	if !strings.Contains(dsn, "?") {
-		dsn += "?mode=ro&cache=shared&_busy_timeout=5000"
-	} else {
-		dsn += "&mode=ro&cache=shared&_busy_timeout=5000"
+	dsn, err := sqliteReadOnlyURI(primaryPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid primary db path: %w", models.ErrRepoMetadata, err)
+	}
+	otherURI, err := sqliteReadOnlyURI(otherPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid other db path: %w", models.ErrRepoMetadata, err)
 	}
 
 	pdb, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open primary db: %w", err)
+		return nil, fmt.Errorf("%w: failed to open primary db: %w", models.ErrRepoMetadata, err)
 	}
+
+	var closers []func() error
+	closers = append(closers, pdb.Close)
+	success := false
+	defer func() {
+		if !success {
+			for i := len(closers) - 1; i >= 0; i-- {
+				_ = closers[i]()
+			}
+		}
+	}()
 
 	maxConns := runtime.NumCPU() * 2
 	if maxConns < 4 {
 		maxConns = 4
 	}
+	if maxConns > 16 {
+		maxConns = 16
+	}
 	pdb.SetMaxOpenConns(maxConns)
 	pdb.SetMaxIdleConns(maxConns)
 
-	// Optimization: Attach 'other' DB to 'primary' connection in read-only mode
-	if _, err := pdb.Exec("ATTACH DATABASE ? AS other", otherPath); err != nil {
-		_ = pdb.Close()
-		return nil, fmt.Errorf("failed to attach other db: %w", err)
+	// Optimization: Attach 'other' DB via read-only file URI to primary connection
+	if _, err := pdb.Exec("ATTACH DATABASE ? AS other", otherURI); err != nil {
+		return nil, fmt.Errorf("%w: failed to attach other db: %w", models.ErrRepoMetadata, err)
+	}
+
+	// Enforce read-only safety and read performance pragmas
+	pragmas := []string{
+		"PRAGMA query_only = ON",
+		"PRAGMA trusted_schema = OFF",
+		"PRAGMA temp_store = MEMORY",
+		"PRAGMA cache_size = -65536",
+	}
+	if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
+		pragmas = append(pragmas, "PRAGMA mmap_size = 268435456")
+	}
+	for _, stmtSQL := range pragmas {
+		_, _ = pdb.Exec(stmtSQL)
 	}
 
 	// Prepare statements once for high-frequency queries to avoid recompiling SQL 40k+ times
-	stmt, err := pdb.Prepare(`SELECT author, date, changelog FROM other.changelog WHERE pkgKey = ? ORDER BY date DESC LIMIT 1`)
+	stmt, err := pdb.Prepare(`SELECT author, date, changelog FROM other.changelog WHERE pkgKey = ? ORDER BY date DESC LIMIT 10`)
 	if err != nil {
-		_ = pdb.Close()
-		return nil, fmt.Errorf("failed to prepare changelog statement: %w", err)
+		return nil, fmt.Errorf("%w: failed to prepare changelog statement: %w", models.ErrRepoMetadata, err)
 	}
+	closers = append(closers, stmt.Close)
 
 	reqStmt, err := pdb.Prepare(`SELECT name, flags, epoch, version, release, pre FROM requires WHERE pkgKey = ? ORDER BY name`)
 	if err != nil {
-		_ = stmt.Close()
-		_ = pdb.Close()
-		return nil, fmt.Errorf("failed to prepare requires statement: %w", err)
+		return nil, fmt.Errorf("%w: failed to prepare requires statement: %w", models.ErrRepoMetadata, err)
 	}
+	closers = append(closers, reqStmt.Close)
 
 	provStmt, err := pdb.Prepare(`SELECT name, flags, epoch, version, release FROM provides WHERE pkgKey = ? ORDER BY name`)
 	if err != nil {
-		_ = reqStmt.Close()
-		_ = stmt.Close()
-		_ = pdb.Close()
-		return nil, fmt.Errorf("failed to prepare provides statement: %w", err)
+		return nil, fmt.Errorf("%w: failed to prepare provides statement: %w", models.ErrRepoMetadata, err)
 	}
+	closers = append(closers, provStmt.Close)
 
 	confStmt, err := pdb.Prepare(`SELECT name, flags, epoch, version, release FROM conflicts WHERE pkgKey = ? ORDER BY name`)
 	if err != nil {
-		_ = provStmt.Close()
-		_ = reqStmt.Close()
-		_ = stmt.Close()
-		_ = pdb.Close()
-		return nil, fmt.Errorf("failed to prepare conflicts statement: %w", err)
+		return nil, fmt.Errorf("%w: failed to prepare conflicts statement: %w", models.ErrRepoMetadata, err)
 	}
+	closers = append(closers, confStmt.Close)
 
 	obsStmt, err := pdb.Prepare(`SELECT name, flags, epoch, version, release FROM obsoletes WHERE pkgKey = ? ORDER BY name`)
 	if err != nil {
-		_ = confStmt.Close()
-		_ = provStmt.Close()
-		_ = reqStmt.Close()
-		_ = stmt.Close()
-		_ = pdb.Close()
-		return nil, fmt.Errorf("failed to prepare obsoletes statement: %w", err)
+		return nil, fmt.Errorf("%w: failed to prepare obsoletes statement: %w", models.ErrRepoMetadata, err)
+	}
+	closers = append(closers, obsStmt.Close)
+
+	// Detect optional RPM weak dependency tables cleanly via sqlite_master
+	existingTables := inspectTables(pdb)
+	prepareOptionalDep := func(table string) *sql.Stmt {
+		if !existingTables[table] {
+			return nil
+		}
+		var q string
+		switch table {
+		case "recommends":
+			q = `SELECT name, flags, epoch, version, release FROM recommends WHERE pkgKey = ? ORDER BY name`
+		case "suggests":
+			q = `SELECT name, flags, epoch, version, release FROM suggests WHERE pkgKey = ? ORDER BY name`
+		case "enhances":
+			q = `SELECT name, flags, epoch, version, release FROM enhances WHERE pkgKey = ? ORDER BY name`
+		case "supplements":
+			q = `SELECT name, flags, epoch, version, release FROM supplements WHERE pkgKey = ? ORDER BY name`
+		default:
+			return nil
+		}
+		s, prepErr := pdb.Prepare(q)
+		if prepErr != nil {
+			return nil
+		}
+		closers = append(closers, s.Close)
+		return s
 	}
 
+	recStmt := prepareOptionalDep("recommends")
+	sugStmt := prepareOptionalDep("suggests")
+	enhStmt := prepareOptionalDep("enhances")
+	supStmt := prepareOptionalDep("supplements")
+
+	success = true
 	return &RepositoryAccess{
 		PrimaryDB:     pdb,
+		repoDir:       filepath.Dir(filepath.Dir(primaryPath)),
 		changelogStmt: stmt,
 		reqStmt:       reqStmt,
 		provStmt:      provStmt,
 		confStmt:      confStmt,
 		obsStmt:       obsStmt,
+		recStmt:       recStmt,
+		sugStmt:       sugStmt,
+		enhStmt:       enhStmt,
+		supStmt:       supStmt,
 	}, nil
+}
+
+func inspectTables(db *sql.DB) map[string]bool {
+	tables := make(map[string]bool)
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+	if err != nil {
+		return tables
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			tables[strings.ToLower(name)] = true
+		}
+	}
+	return tables
 }
 
 // Close closes the database connections and all cached prepared statements
 func (r *RepositoryAccess) Close() error {
-	if r.changelogStmt != nil {
-		_ = r.changelogStmt.Close()
-	}
-	if r.reqStmt != nil {
-		_ = r.reqStmt.Close()
-	}
-	if r.provStmt != nil {
-		_ = r.provStmt.Close()
-	}
-	if r.confStmt != nil {
-		_ = r.confStmt.Close()
-	}
-	if r.obsStmt != nil {
-		_ = r.obsStmt.Close()
+	for _, s := range []*sql.Stmt{r.changelogStmt, r.reqStmt, r.provStmt, r.confStmt, r.obsStmt, r.recStmt, r.sugStmt, r.enhStmt, r.supStmt} {
+		if s != nil {
+			_ = s.Close()
+		}
 	}
 	if r.PrimaryDB != nil {
 		return r.PrimaryDB.Close()
@@ -148,15 +264,61 @@ func (r *RepositoryAccess) Close() error {
 	return nil
 }
 
-// GetAllPackages retrieves all packages from the primary database
+func inspectPackagesColumns(db *sql.DB) map[string]bool {
+	cols := make(map[string]bool)
+	rows, err := db.Query(`PRAGMA table_info(packages)`)
+	if err != nil {
+		return cols
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid        int
+			name, ctyp string
+			notnull    int
+			dflt       sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &ctyp, &notnull, &dflt, &pk); err == nil {
+			cols[strings.ToLower(name)] = true
+		}
+	}
+	return cols
+}
+
+// GetAllPackages retrieves all packages from the primary database, including optional extended columns when present.
 func (r *RepositoryAccess) GetAllPackages() ([]*models.Package, error) {
-	// We select all columns needed to populate the models.Package struct
-	query := `
-		SELECT pkgKey, name, epoch, version, release, arch, 
-		       summary, description, url, time_build, rpm_license, 
+	cols := inspectPackagesColumns(r.PrimaryDB)
+
+	pkgIDExpr := "''"
+	if cols["pkgid"] {
+		pkgIDExpr = "pkgId"
+	}
+	checksumTypeExpr := "''"
+	if cols["checksum_type"] {
+		checksumTypeExpr = "checksum_type"
+	}
+	packagerExpr := "''"
+	if cols["rpm_packager"] {
+		packagerExpr = "rpm_packager"
+	}
+	timeFileExpr := "0"
+	if cols["time_file"] {
+		timeFileExpr = "time_file"
+	}
+	sizeArchiveExpr := "0"
+	if cols["size_archive"] {
+		sizeArchiveExpr = "size_archive"
+	}
+
+	// #nosec G201 -- optional expressions strictly select hardcoded literal column names verified via PRAGMA table_info
+	query := fmt.Sprintf(`
+		SELECT pkgKey, name, epoch, version, release, arch,
+		       summary, description, url, time_build, rpm_license,
 		       rpm_sourcerpm, size_package, location_href, rpm_vendor, rpm_group,
-		       rpm_buildhost, size_installed 
-		FROM packages`
+		       rpm_buildhost, size_installed,
+		       %s, %s, %s, %s, %s
+		FROM packages`, pkgIDExpr, checksumTypeExpr, packagerExpr, timeFileExpr, sizeArchiveExpr)
 
 	rows, err := r.PrimaryDB.Query(query)
 	if err != nil {
@@ -170,14 +332,16 @@ func (r *RepositoryAccess) GetAllPackages() ([]*models.Package, error) {
 
 	for rows.Next() {
 		var p models.Package
-		var epoch, summary, description, url, license, sourceRPM, vendor, group, buildHost sql.NullString
-		var installedSize sql.NullInt64
+		var epoch, summary, description, urlStr, license, sourceRPM, vendor, group, buildHost sql.NullString
+		var pkgID, checksumType, packager sql.NullString
+		var installedSize, timeFile, sizeArchive sql.NullInt64
 
 		err := rows.Scan(
 			&p.PkgKey, &p.Name, &epoch, &p.Version, &p.Release, &p.Arch,
-			&summary, &description, &url, &p.TimeBuild, &license,
+			&summary, &description, &urlStr, &p.TimeBuild, &license,
 			&sourceRPM, &p.SizePackage, &p.LocationHref, &vendor, &group,
 			&buildHost, &installedSize,
+			&pkgID, &checksumType, &packager, &timeFile, &sizeArchive,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan package row: %w", err)
@@ -187,7 +351,7 @@ func (r *RepositoryAccess) GetAllPackages() ([]*models.Package, error) {
 		p.Epoch = epoch.String
 		p.Summary = summary.String
 		p.Description = description.String
-		p.URL = url.String
+		p.URL = urlStr.String
 		p.License = license.String
 		p.SourceRPM = sourceRPM.String
 		p.SourcePackage = sourceRPM.String
@@ -195,6 +359,14 @@ func (r *RepositoryAccess) GetAllPackages() ([]*models.Package, error) {
 		p.RpmGroup = group.String
 		p.BuildHost = buildHost.String
 		p.InstalledSize = installedSize.Int64
+		p.Packager = strings.TrimSpace(packager.String)
+		p.TimeFile = timeFile.Int64
+		p.SizeArchive = sizeArchive.Int64
+		p.ChecksumType = strings.TrimSpace(checksumType.String)
+		sum := strings.TrimSpace(pkgID.String)
+		if sum != "" && (strings.EqualFold(p.ChecksumType, "sha256") || p.ChecksumType == "" || len(sum) == 64) {
+			p.SHA256 = sum
+		}
 		p.Format = models.FormatRPM
 
 		packages = append(packages, &p)
@@ -242,8 +414,7 @@ func (r *RepositoryAccess) EnrichPackagesWithChangelogs(pkgs []*models.Package) 
 		}
 		batch := pkgs[i:end]
 		if err := r.enrichBatch(batch); err != nil {
-			// We log and return the error, caller can decide whether to proceed
-			log.Printf("Warning: failed to enrich batch: %v", err)
+			r.warnf("Warning: failed to enrich changelog batch: %v\n", err)
 			return err
 		}
 	}
@@ -252,7 +423,7 @@ func (r *RepositoryAccess) EnrichPackagesWithChangelogs(pkgs []*models.Package) 
 
 func (r *RepositoryAccess) enrichBatch(pkgs []*models.Package) error {
 	ids := make([]interface{}, len(pkgs))
-	pkgMap := make(map[int64]*models.Package)
+	pkgMap := make(map[int64]*models.Package, len(pkgs))
 
 	for i, p := range pkgs {
 		ids[i] = p.PkgKey
@@ -261,22 +432,14 @@ func (r *RepositoryAccess) enrichBatch(pkgs []*models.Package) error {
 
 	placeholders := strings.Repeat("?,", len(ids)-1) + "?"
 
-	// Query to fetch latest changelog for each package in the batch.
-	// PERFORMANCE NOTE:
-	// We use a subquery to find the MAX(date) for each pkgKey to ensure we get the latest entry.
-	// This avoids fetching all changelogs (which can be MBs of text) and filtering in Go.
-	// This turns N queries into N/BatchSize queries, solving the N+1 performance bottleneck.
+	// Fetch changelog history per pkgKey ordered newest first, capping per-package entries at 10 in Go.
 	// #nosec G201 -- placeholders is generated from slice length and contains only '?' tokens; package keys are bound via args
 	// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query
 	query := fmt.Sprintf(`
-		SELECT t1.pkgKey, t1.author, t1.date, t1.changelog 
-		FROM other.changelog t1
-		INNER JOIN (
-			SELECT pkgKey, MAX(date) as max_date 
-			FROM other.changelog 
-			WHERE pkgKey IN (%s) 
-			GROUP BY pkgKey
-		) t2 ON t1.pkgKey = t2.pkgKey AND t1.date = t2.max_date
+		SELECT pkgKey, author, date, changelog
+		FROM other.changelog
+		WHERE pkgKey IN (%s)
+		ORDER BY pkgKey, date DESC
 	`, placeholders)
 
 	rows, err := r.PrimaryDB.Query(query, ids...)
@@ -287,6 +450,7 @@ func (r *RepositoryAccess) enrichBatch(pkgs []*models.Package) error {
 		_ = rows.Close()
 	}()
 
+	const maxChangelogsPerPkg = 10
 	for rows.Next() {
 		var pkgKey int64
 		var author, changelog sql.NullString
@@ -297,15 +461,17 @@ func (r *RepositoryAccess) enrichBatch(pkgs []*models.Package) error {
 		}
 
 		p, ok := pkgMap[pkgKey]
-		// We assign the changelog if not already set.
-		// The query guarantees one row per pkgKey (due to GROUP BY in subquery and join).
-		// Note: In case of duplicate max_date, we might get duplicates, so we check if nil.
-		if ok && p.Changelog == nil {
-			p.Changelog = &models.ChangelogEntry{
-				Author:    cleanAuthor(author.String),
-				Date:      date,
-				Changelog: changelog.String,
-			}
+		if !ok || len(p.Changelogs) >= maxChangelogsPerPkg {
+			continue
+		}
+		entry := &models.ChangelogEntry{
+			Author:    cleanAuthor(author.String),
+			Date:      date,
+			Changelog: changelog.String,
+		}
+		p.Changelogs = append(p.Changelogs, entry)
+		if p.Changelog == nil {
+			p.Changelog = entry
 		}
 	}
 	return rows.Err()
@@ -320,112 +486,103 @@ func cleanAuthor(author string) string {
 	return author
 }
 
-// GetPackageDependencies fetches requires, provides, conflicts, and obsoletes for a given package key.
+// GetPackageDependencies fetches mandatory and optional weak dependency vectors for pkgKey.
 func (r *RepositoryAccess) GetPackageDependencies(pkgKey int64) (*models.PackageDependencies, error) {
 	deps := &models.PackageDependencies{}
-
-	// 1. Requires
-	var reqRows *sql.Rows
-	var err error
-	if r.reqStmt != nil {
-		reqRows, err = r.reqStmt.Query(pkgKey)
-	} else {
-		reqRows, err = r.PrimaryDB.Query(`SELECT name, flags, epoch, version, release, pre FROM requires WHERE pkgKey = ? ORDER BY name`, pkgKey)
-	}
-	if err == nil {
-		defer func() { _ = reqRows.Close() }()
-		for reqRows.Next() {
-			var name, flags, epoch, version, release sql.NullString
-			var pre bool
-			if err := reqRows.Scan(&name, &flags, &epoch, &version, &release, &pre); err == nil {
-				deps.Requires = append(deps.Requires, &models.DependencyEntry{
-					Name:    name.String,
-					Flags:   flags.String,
-					Epoch:   epoch.String,
-					Version: version.String,
-					Release: release.String,
-					Pre:     pre,
-				})
-			}
-		}
+	specs := []struct {
+		kind     string
+		stmt     *sql.Stmt
+		fallback string
+		hasPre   bool
+		required bool
+		target   *[]*models.DependencyEntry
+	}{
+		{"requires", r.reqStmt, `SELECT name, flags, epoch, version, release, pre FROM requires WHERE pkgKey = ? ORDER BY name`, true, true, &deps.Requires},
+		{"provides", r.provStmt, `SELECT name, flags, epoch, version, release FROM provides WHERE pkgKey = ? ORDER BY name`, false, true, &deps.Provides},
+		{"conflicts", r.confStmt, `SELECT name, flags, epoch, version, release FROM conflicts WHERE pkgKey = ? ORDER BY name`, false, true, &deps.Conflicts},
+		{"obsoletes", r.obsStmt, `SELECT name, flags, epoch, version, release FROM obsoletes WHERE pkgKey = ? ORDER BY name`, false, true, &deps.Obsoletes},
+		{"recommends", r.recStmt, "", false, false, &deps.Recommends},
+		{"suggests", r.sugStmt, "", false, false, &deps.Suggests},
+		{"enhances", r.enhStmt, "", false, false, &deps.Enhances},
+		{"supplements", r.supStmt, "", false, false, &deps.Supplements},
 	}
 
-	// 2. Provides
-	var provRows *sql.Rows
-	if r.provStmt != nil {
-		provRows, err = r.provStmt.Query(pkgKey)
-	} else {
-		provRows, err = r.PrimaryDB.Query(`SELECT name, flags, epoch, version, release FROM provides WHERE pkgKey = ? ORDER BY name`, pkgKey)
-	}
-	if err == nil {
-		defer func() { _ = provRows.Close() }()
-		for provRows.Next() {
-			var name, flags, epoch, version, release sql.NullString
-			if err := provRows.Scan(&name, &flags, &epoch, &version, &release); err == nil {
-				deps.Provides = append(deps.Provides, &models.DependencyEntry{
-					Name:    name.String,
-					Flags:   flags.String,
-					Epoch:   epoch.String,
-					Version: version.String,
-					Release: release.String,
-				})
-			}
+	for _, sp := range specs {
+		if !sp.required && sp.stmt == nil {
+			continue
 		}
-	}
-
-	// 3. Conflicts
-	var confRows *sql.Rows
-	if r.confStmt != nil {
-		confRows, err = r.confStmt.Query(pkgKey)
-	} else {
-		confRows, err = r.PrimaryDB.Query(`SELECT name, flags, epoch, version, release FROM conflicts WHERE pkgKey = ? ORDER BY name`, pkgKey)
-	}
-	if err == nil {
-		defer func() { _ = confRows.Close() }()
-		for confRows.Next() {
-			var name, flags, epoch, version, release sql.NullString
-			if err := confRows.Scan(&name, &flags, &epoch, &version, &release); err == nil {
-				deps.Conflicts = append(deps.Conflicts, &models.DependencyEntry{
-					Name:    name.String,
-					Flags:   flags.String,
-					Epoch:   epoch.String,
-					Version: version.String,
-					Release: release.String,
-				})
-			}
+		entries, err := r.queryDepEntries(sp.stmt, sp.fallback, pkgKey, sp.hasPre)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query %s for pkgKey %d: %w", sp.kind, pkgKey, err)
 		}
-	}
-
-	// 4. Obsoletes
-	var obsRows *sql.Rows
-	if r.obsStmt != nil {
-		obsRows, err = r.obsStmt.Query(pkgKey)
-	} else {
-		obsRows, err = r.PrimaryDB.Query(`SELECT name, flags, epoch, version, release FROM obsoletes WHERE pkgKey = ? ORDER BY name`, pkgKey)
-	}
-	if err == nil {
-		defer func() { _ = obsRows.Close() }()
-		for obsRows.Next() {
-			var name, flags, epoch, version, release sql.NullString
-			if err := obsRows.Scan(&name, &flags, &epoch, &version, &release); err == nil {
-				deps.Obsoletes = append(deps.Obsoletes, &models.DependencyEntry{
-					Name:    name.String,
-					Flags:   flags.String,
-					Epoch:   epoch.String,
-					Version: version.String,
-					Release: release.String,
-				})
-			}
-		}
+		*sp.target = entries
 	}
 
 	return deps, nil
 }
 
+func (r *RepositoryAccess) queryDepEntries(stmt *sql.Stmt, fallbackSQL string, pkgKey int64, hasPre bool) ([]*models.DependencyEntry, error) {
+	var rows *sql.Rows
+	var err error
+	if stmt != nil {
+		rows, err = stmt.Query(pkgKey)
+	} else {
+		rows, err = r.PrimaryDB.Query(fallbackSQL, pkgKey)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", models.ErrRepoMetadata, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []*models.DependencyEntry
+	for rows.Next() {
+		var name, flags, epoch, version, release sql.NullString
+		var pre bool
+		if hasPre {
+			err = rows.Scan(&name, &flags, &epoch, &version, &release, &pre)
+		} else {
+			err = rows.Scan(&name, &flags, &epoch, &version, &release)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: scan dependency row: %w", models.ErrRepoMetadata, err)
+		}
+		entries = append(entries, &models.DependencyEntry{
+			Name:    name.String,
+			Flags:   flags.String,
+			Epoch:   epoch.String,
+			Version: version.String,
+			Release: release.String,
+			Pre:     pre,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%w: iterate dependency rows: %w", models.ErrRepoMetadata, err)
+	}
+	return entries, nil
+}
+
+// EnrichPackagesWithAdvisories attaches errata advisories when updateinfo.xml* is present.
+func (r *RepositoryAccess) EnrichPackagesWithAdvisories(pkgs []*models.Package) error {
+	if r.updateInfoPath == "" || len(pkgs) == 0 {
+		return nil
+	}
+	path, cleanup, err := DecompressFile(r.updateInfoPath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	recs, err := ParseUpdateInfo(path)
+	if err != nil {
+		return err
+	}
+	AttachAdvisories(pkgs, recs)
+	return nil
+}
+
 // EnrichPackageDetails concurrently parses the local RPM files for all packages
-// and populates deep inspection details (scriptlets, signatures, files).
-func (r *RepositoryAccess) EnrichPackageDetails(repoDir string, pkgs []*models.Package) {
-	EnrichPackagesWithRPMDetails(repoDir, pkgs)
+// and populates deep inspection details (scriptlets, signatures, bug/vcs links).
+func (r *RepositoryAccess) EnrichPackageDetails(pkgs []*models.Package) {
+	EnrichPackagesWithRPMDetails(r.repoDir, pkgs)
 }
 
 // ReadPackageFiles extracts on-demand file manifests during page render.
@@ -433,12 +590,16 @@ func (r *RepositoryAccess) ReadPackageFiles(repoDir string, pkg *models.Package)
 	if pkg.LocationHref == "" {
 		return nil, nil
 	}
-	rpmPath := filepath.Join(repoDir, pkg.LocationHref)
-	rel, err := filepath.Rel(repoDir, rpmPath)
-	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return nil, fmt.Errorf("invalid package location: %s", pkg.LocationHref)
+	rpmPath, err := util.ResolveContainedPath(repoDir, pkg.LocationHref)
+	if err != nil {
+		return nil, fmt.Errorf("invalid package location %s: %w", pkg.LocationHref, err)
 	}
 	return ReadRPMFiles(rpmPath)
 }
 
-var _ RepoReader = (*RepositoryAccess)(nil)
+var (
+	_ RepoReader        = (*RepositoryAccess)(nil)
+	_ ChangelogEnricher = (*RepositoryAccess)(nil)
+	_ DependencyReader  = (*RepositoryAccess)(nil)
+	_ AdvisoryEnricher  = (*RepositoryAccess)(nil)
+)

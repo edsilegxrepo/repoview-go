@@ -25,6 +25,7 @@
 package state
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +36,9 @@ import (
 
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
+
+// MetadataKeyRepoFingerprint is stored in StateStore to short-circuit unchanged incremental runs.
+const MetadataKeyRepoFingerprint = "__repoview_fingerprint__"
 
 // StateStore manages the incremental build state to optimize subsequent runs.
 // It maps filenames to their SHA256 hashes to detect content changes.
@@ -76,25 +80,57 @@ func NewStateStore(path string) (*StateStore, error) {
 	return s, nil
 }
 
+// CheckChanged computes the SHA-256 digest of content and reports whether it differs
+// from the previously persisted hash without mutating state until persistence succeeds.
+func (s *StateStore) CheckChanged(filename string, content []byte) (string, bool) {
+	sum := sha256.Sum256(content)
+	hash := hex.EncodeToString(sum[:])
+
+	s.mu.RLock()
+	oldHash, exists := s.state[filename]
+	s.mu.RUnlock()
+
+	if !exists || oldHash != hash {
+		return hash, true
+	}
+	return hash, false
+}
+
+// MarkWritten commits the SHA-256 digest for a successfully written file and marks state dirty.
+func (s *StateStore) MarkWritten(filename, hash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if oldHash, exists := s.state[filename]; !exists || oldHash != hash {
+		s.state[filename] = hash
+		s.dirty = true
+	}
+}
+
 // HasChanged checks if the content has changed compared to the stored state.
 // If it has changed, it updates the state and marks dirty.
 // Returns true if changed (or new).
 // Concurrency optimization: SHA256 is computed outside the lock to minimize lock contention.
 func (s *StateStore) HasChanged(filename string, content []byte) bool {
-	sum := sha256.Sum256(content)
-	hash := hex.EncodeToString(sum[:])
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	oldHash, exists := s.state[filename]
-	if !exists || oldHash != hash {
-		s.state[filename] = hash
-		s.dirty = true
+	hash, changed := s.CheckChanged(filename, content)
+	if changed {
+		s.MarkWritten(filename, hash)
 		return true
 	}
-
 	return false
+}
+
+// Get retrieves a tracked hash or metadata value by key.
+func (s *StateStore) Get(key string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	val, ok := s.state[key]
+	return val, ok
+}
+
+// Set stores a metadata value by key and marks the state store dirty when changed.
+func (s *StateStore) Set(key, val string) {
+	s.MarkWritten(key, val)
 }
 
 // Save persists the current state map to the JSON file on disk using atomic write-then-rename.
@@ -108,37 +144,16 @@ func (s *StateStore) Save() error {
 		return nil
 	}
 
-	tmpPath := s.path + ".tmp"
-	// #nosec G304, G306 -- tmpPath is internal state store path; permissions ensure standard readability
-	f, err := os.OpenFile(filepath.Clean(tmpPath), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, util.DefaultFilePerm)
-	if err != nil {
-		return fmt.Errorf("failed to create temporary state file: %w", err)
-	}
-	_ = os.Chmod(tmpPath, util.DefaultFilePerm)
-
-	encoder := json.NewEncoder(f)
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(s.state); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
 		return fmt.Errorf("failed to encode state json: %w", err)
 	}
 
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("failed to sync state file: %w", err)
-	}
-	_ = f.Close()
-
-	// Atomic rename to destination
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		// Fallback for Windows if destination exists and cannot be replaced directly
-		_ = os.Remove(s.path)
-		if err2 := os.Rename(tmpPath, s.path); err2 != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("failed to atomically replace state file: %w", err2)
-		}
+	// #nosec G304 -- internal state cache written atomically with 0600 permissions to protect build metadata
+	if err := util.AtomicWriteFile(s.path, buf.Bytes(), 0o600); err != nil {
+		return fmt.Errorf("failed to persist state file: %w", err)
 	}
 
 	s.dirty = false

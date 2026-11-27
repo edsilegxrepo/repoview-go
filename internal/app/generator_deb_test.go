@@ -46,7 +46,7 @@ Description: lightweight database management command-line utilities
  dump, and restore database clusters.
 `
 
-func createMockDebianRepository(t *testing.T, isPool bool) (string, string) {
+func createMockDebianRepository(t *testing.T, isPool bool) string {
 	repoDir := t.TempDir()
 
 	if isPool {
@@ -82,7 +82,7 @@ Description: Test Debian Repository
 			t.Fatalf("failed to write Release: %v", err)
 		}
 
-		return repoDir, binDir
+		return repoDir
 	}
 
 	// Flat repository
@@ -91,11 +91,11 @@ Description: Test Debian Repository
 		t.Fatalf("failed to write flat Packages: %v", err)
 	}
 
-	return repoDir, repoDir
+	return repoDir
 }
 
 func TestGenerator_DebianPipeline_PoolDists(t *testing.T) {
-	repoDir, _ := createMockDebianRepository(t, true)
+	repoDir := createMockDebianRepository(t, true)
 	outDir := t.TempDir()
 	stateDir := t.TempDir()
 
@@ -195,7 +195,7 @@ func TestGenerator_DebianPipeline_PoolDists(t *testing.T) {
 }
 
 func TestGenerator_DebianPipeline_FlatRepo_AutoDetect(t *testing.T) {
-	repoDir, _ := createMockDebianRepository(t, false)
+	repoDir := createMockDebianRepository(t, false)
 	outDir := t.TempDir()
 
 	cfg := Config{

@@ -558,3 +558,25 @@ func TestDiscoveredRepo_BuildConfigSnippet(t *testing.T) {
 		t.Errorf("flatSnippet = %q; want %q", flatSnippet, expectedFlat)
 	}
 }
+
+func TestScanner_SinglePassSearchJSON(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "custom-repo")
+	rvDir := filepath.Join(repoDir, "repoview")
+	if err := os.MkdirAll(rvDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(rvDir, "index.html"), []byte(`<meta name="generator" content="RepoView"><title>RepoView: Legacy Repo</title>`), 0o644)
+	_ = os.WriteFile(filepath.Join(rvDir, "search.json"), []byte(`{"schema":["n","e","a","s","f"],"data":[["app1","1.0-1","aarch64","s1","app1.html"],["app2","2.0-1","aarch64","s2","app2.html"]]}`), 0o644)
+
+	repos, err := NewScanner(ScanConfig{RootDir: root, MaxDepth: 4}).Scan()
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("expected 1 discovered repo, got %d", len(repos))
+	}
+	if repos[0].PackageCount != 2 || repos[0].Arch != "aarch64" {
+		t.Errorf("expected PackageCount=2 Arch=aarch64 from single-pass search.json parse, got count=%d arch=%q", repos[0].PackageCount, repos[0].Arch)
+	}
+}

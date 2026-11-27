@@ -66,19 +66,45 @@ type Package struct {
 	BuildHost     string `db:"rpm_buildhost"`  // Hostname of the builder system
 	InstalledSize int64  `db:"size_installed"` // Uncompressed disk footprint in bytes
 
-	// Format and cross-platform extensions
+	// Format and cross-platform extensions & rich metadata
 	Format        RepoFormat `json:"format,omitempty"`         // "rpm" or "deb"
 	Maintainer    string     `json:"maintainer,omitempty"`     // Debian maintainer (RFC 822 string)
+	Packager      string     `json:"packager,omitempty"`       // RPM packager contact
 	SourcePackage string     `json:"source_package,omitempty"` // Format-agnostic source package name
 	Section       string     `json:"section,omitempty"`        // Format-agnostic taxonomy / section
 	SHA256        string     `json:"sha256,omitempty"`         // Package SHA256 digest from index
+	ChecksumType  string     `json:"checksum_type,omitempty"`  // Index digest algorithm (e.g. sha256)
+	TimeFile      int64      `json:"time_file,omitempty"`      // Package file mtime on build host
+	SizeArchive   int64      `json:"size_archive,omitempty"`   // Uncompressed cpio archive size (RPM)
+	Priority      string     `json:"priority,omitempty"`       // Debian priority (required, important, standard, optional)
+	MultiArch     string     `json:"multi_arch,omitempty"`     // Debian Multi-Arch classification
+	Essential     bool       `json:"essential,omitempty"`      // Debian Essential package flag
+	Tags          []string   `json:"tags,omitempty"`           // Debtags or keywords
+	BuiltUsing    string     `json:"built_using,omitempty"`    // Debian Built-Using field
+	Bugs          string     `json:"bugs,omitempty"`           // Bug tracker URL (DEB Bugs / RPM BUGURL)
+	Origin        string     `json:"origin,omitempty"`         // Debian Origin
+	MD5sum        string     `json:"md5sum,omitempty"`         // Legacy MD5 checksum (DEB)
+	SHA1          string     `json:"sha1,omitempty"`           // Legacy SHA1 checksum (DEB)
+	PageFilename  string     `json:"page_filename,omitempty"`  // Resolved collision-safe HTML filename override
 
 	// Enriched fields - populated during processing
 	Changelog    *ChangelogEntry      // Latest changelog entry, fetched from other.sqlite or deb changelog
+	Changelogs   []*ChangelogEntry    // Recent changelog history (up to N entries)
 	AllVersions  []*Package           // List of all versions of this package (for detail page history)
 	Group        string               // Resolved functional group name (from Comps, Section, or RPM header)
 	Details      *PackageDetails      // Deep package inspection metadata (scriptlets, signatures, files)
-	Dependencies *PackageDependencies // Package dependencies (requires, provides, conflicts, obsoletes, recommends, suggests)
+	Dependencies *PackageDependencies // Package dependencies (requires, provides, conflicts, obsoletes, recommends, suggests, enhances, supplements)
+	Advisories   []Advisory           // Matching security/bugfix/enhancement advisories (updateinfo.xml)
+}
+
+// Advisory represents an RPM updateinfo errata / security advisory affecting a package.
+type Advisory struct {
+	ID       string   `json:"id"`
+	Type     string   `json:"type"`               // security, bugfix, enhancement
+	Severity string   `json:"severity,omitempty"` // Critical, Important, Moderate, Low
+	Title    string   `json:"title,omitempty"`
+	Issued   string   `json:"issued,omitempty"`
+	CVEs     []string `json:"cves,omitempty"`
 }
 
 // DependencyEntry represents a single RPM dependency requirement, capability, conflict, or obsoletion.
@@ -130,17 +156,19 @@ func (d *DependencyEntry) FormattedRelation() string {
 
 // PackageDependencies aggregates all dependency vectors for a package.
 type PackageDependencies struct {
-	Requires   []*DependencyEntry `json:"requires,omitempty"`   // Mandatory prerequisite capabilities (RPM Requires, DEB Depends & Pre-Depends)
-	Provides   []*DependencyEntry `json:"provides,omitempty"`   // Capabilities offered by this package
-	Conflicts  []*DependencyEntry `json:"conflicts,omitempty"`  // Incompatible conflicting packages (RPM Conflicts, DEB Conflicts & Breaks)
-	Obsoletes  []*DependencyEntry `json:"obsoletes,omitempty"`  // Legacy packages replaced by this one (RPM Obsoletes, DEB Replaces)
-	Recommends []*DependencyEntry `json:"recommends,omitempty"` // Strong suggestions (DEB Recommends)
-	Suggests   []*DependencyEntry `json:"suggests,omitempty"`   // Optional enhancements (DEB Suggests)
+	Requires    []*DependencyEntry `json:"requires,omitempty"`    // Mandatory prerequisite capabilities (RPM Requires, DEB Depends & Pre-Depends)
+	Provides    []*DependencyEntry `json:"provides,omitempty"`    // Capabilities offered by this package
+	Conflicts   []*DependencyEntry `json:"conflicts,omitempty"`   // Incompatible conflicting packages (RPM Conflicts, DEB Conflicts & Breaks)
+	Obsoletes   []*DependencyEntry `json:"obsoletes,omitempty"`   // Legacy packages replaced by this one (RPM Obsoletes, DEB Replaces)
+	Recommends  []*DependencyEntry `json:"recommends,omitempty"`  // Strong suggestions (RPM Recommends, DEB Recommends)
+	Suggests    []*DependencyEntry `json:"suggests,omitempty"`    // Optional enhancements (RPM Suggests, DEB Suggests)
+	Enhances    []*DependencyEntry `json:"enhances,omitempty"`    // Weak reverse enhancement (RPM/DEB Enhances)
+	Supplements []*DependencyEntry `json:"supplements,omitempty"` // Weak reverse dependency (RPM Supplements)
 }
 
 // HasAny returns true if at least one dependency relationship exists across all vectors.
 func (pd *PackageDependencies) HasAny() bool {
-	return pd != nil && (len(pd.Requires) > 0 || len(pd.Provides) > 0 || len(pd.Conflicts) > 0 || len(pd.Obsoletes) > 0 || len(pd.Recommends) > 0 || len(pd.Suggests) > 0)
+	return pd != nil && (len(pd.Requires) > 0 || len(pd.Provides) > 0 || len(pd.Conflicts) > 0 || len(pd.Obsoletes) > 0 || len(pd.Recommends) > 0 || len(pd.Suggests) > 0 || len(pd.Enhances) > 0 || len(pd.Supplements) > 0)
 }
 
 // PackageDetails stores deep inspection information extracted from the package header or archive.
@@ -148,6 +176,12 @@ type PackageDetails struct {
 	BuildHost     string             `json:"build_host,omitempty"`     // Builder host FQDN
 	SourcePackage string             `json:"source_package,omitempty"` // Format-agnostic source package/archive name
 	InstalledSize int64              `json:"installed_size,omitempty"` // Total uncompressed bytes on disk
+	Packager      string             `json:"packager,omitempty"`       // Packager identity extracted from header
+	BugURL        string             `json:"bug_url,omitempty"`        // Issue tracker URL (RPM BUGURL)
+	VCS           string             `json:"vcs,omitempty"`            // Upstream VCS URL (RPM VCS)
+	License       string             `json:"license,omitempty"`        // Extracted fallback license (e.g. DEP-5 copyright)
+	HasTriggers   bool               `json:"has_triggers,omitempty"`   // True when Debian control archive includes triggers
+	Conffiles     map[string]bool    `json:"conffiles,omitempty"`      // Set of Debian conffile paths
 	Signature     string             `json:"signature,omitempty"`      // GPG/PGP signature summary string
 	KeyID         string             `json:"key_id,omitempty"`         // Hexadecimal GPG signing Key ID
 	SigType       string             `json:"sig_type,omitempty"`       // Signature digest type (e.g. RSA/SHA256)
@@ -175,11 +209,13 @@ func (s *PackageScriptlets) HasAny() bool {
 
 // PackageFile represents a single installed file and its metadata extracted from the package archive.
 type PackageFile struct {
-	Mode  string `json:"mode"`  // POSIX permissions (e.g. "-rwxr-xr-x")
-	User  string `json:"user"`  // Owning user name (e.g. "root")
-	Group string `json:"group"` // Owning group name (e.g. "root")
-	Size  int64  `json:"size"`  // Uncompressed file size in bytes
-	Name  string `json:"name"`  // Absolute destination filesystem path
+	Mode       string   `json:"mode"`                  // POSIX permissions (e.g. "-rwxr-xr-x")
+	User       string   `json:"user"`                  // Owning user name (e.g. "root")
+	Group      string   `json:"group"`                 // Owning group name (e.g. "root")
+	Size       int64    `json:"size"`                  // Uncompressed file size in bytes
+	Name       string   `json:"name"`                  // Absolute destination filesystem path
+	LinkTarget string   `json:"link_target,omitempty"` // Symlink target path if applicable
+	Flags      []string `json:"flags,omitempty"`       // File role annotations (e.g. "config", "doc", "ghost")
 }
 
 // ChangelogEntry represents a row from the changelog table in other.sqlite.
@@ -224,15 +260,13 @@ func (p *Package) VersionRelease() string {
 	return ver
 }
 
-// VR is a convenient alias for VersionRelease.
-func (p *Package) VR() string {
-	return p.VersionRelease()
-}
-
 // Filename generates a safe, unique filename for the package's HTML page.
-// It sanitizes the package name to ensure it is valid for the filesystem and URL friendly.
-// Output format: "{sanitized_name}.html" (e.g. "openssl.html", "python-requests.html")
+// It returns PageFilename when collision disambiguation has been assigned,
+// otherwise "{sanitized_name}.html" (e.g. "openssl.html", "python-requests.html").
 func (p *Package) Filename() string {
+	if p.PageFilename != "" {
+		return p.PageFilename
+	}
 	// Logic from repoview.py: _mkid(PKGFILE % pkgname)
 	return util.SanitizeFilename(p.Name) + ".html"
 }
@@ -251,9 +285,4 @@ func (p *Package) ArchiveFilename() string {
 		return fmt.Sprintf("%s_%s_%s.deb", p.Name, ver, p.Arch)
 	}
 	return fmt.Sprintf("%s-%s-%s.%s.rpm", p.Name, p.Version, p.Release, p.Arch)
-}
-
-// RPMFilename returns the base filename of the package (alias for ArchiveFilename).
-func (p *Package) RPMFilename() string {
-	return p.ArchiveFilename()
 }
