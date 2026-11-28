@@ -1,5 +1,13 @@
 package util
 
+// OBJECTIVES:
+// Verify lexical traversal prevention, symlink escape containment across non-existent
+// leaf paths, and OS-aware path containment/equality predicates.
+//
+// TEST STRATEGY:
+// Exercises ResolveContainedPath, IsPathContained, and SamePath against valid nested paths,
+// "../" traversal strings, absolute paths, and temporary symlinks escaping t.TempDir().
+
 import (
 	"os"
 	"path/filepath"

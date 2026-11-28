@@ -1,5 +1,12 @@
 package deb
 
+// OBJECTIVES:
+// Verify Debian changelog stream parsing across multi-entry logs and empty input edges.
+//
+// TEST STRATEGY:
+// Feeds representative RFC 2822 Debian changelog text and empty streams into ParseChangelog
+// to validate author, timestamp, and changelog body extraction without disk fixtures.
+
 import (
 	"strings"
 	"testing"

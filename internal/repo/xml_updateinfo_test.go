@@ -1,5 +1,14 @@
 package repo
 
+// OBJECTIVES:
+// Validate the fallback XML RPM repository reader (primary.xml, other.xml, updateinfo.xml)
+// when createrepo omits SQLite databases.
+//
+// TEST STRATEGY:
+// Builds self-contained gzipped XML metadata in t.TempDir(), executes GetAllPackages,
+// EnrichPackagesWithChangelogs, and EnrichPackagesWithAdvisories, and verifies dependency
+// and CVE extraction without external tools or SQLite DBs.
+
 import (
 	"compress/gzip"
 	"os"

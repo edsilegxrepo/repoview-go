@@ -463,20 +463,20 @@ func TestGetLetterGroups_UTF8RuneAndDisambiguation(t *testing.T) {
 
 func TestLogic_SectionsInferenceAndGroupCollision(t *testing.T) {
 	sections := map[string]string{
-		"editors":   "applications/editors",
-		"graphics":  "applications/multimedia",
-		"science":   "applications/engineering",
-		"sound":     "applications/multimedia",
-		"utils":     "applications/system",
-		"net":       "applications/internet",
-		"perl":      "development/languages",
-		"ruby":      "development/languages",
-		"java":      "development/languages",
-		"mail":      "applications/internet",
-		"doc":       "documentation",
-		"gnome":     "user interface/desktops",
-		"x11":       "user interface/x",
-		"kernel":    "system environment/kernel",
+		"editors":  "applications/editors",
+		"graphics": "applications/multimedia",
+		"science":  "applications/engineering",
+		"sound":    "applications/multimedia",
+		"utils":    "applications/system",
+		"net":      "applications/internet",
+		"perl":     "development/languages",
+		"ruby":     "development/languages",
+		"java":     "development/languages",
+		"mail":     "applications/internet",
+		"doc":      "documentation",
+		"gnome":    "user interface/desktops",
+		"x11":      "user interface/x",
+		"kernel":   "system environment/kernel",
 	}
 	for sec, want := range sections {
 		if got := MapDebianSectionToGroup(sec); got != want {

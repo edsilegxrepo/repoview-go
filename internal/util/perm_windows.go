@@ -2,6 +2,9 @@
 
 package util
 
+// OBJECTIVES: Implement Windows NTFS directory and static file creation helpers
+// relying on ACL inheritance without unnecessary POSIX chmod calls.
+
 import "os"
 
 // EnsureDir creates a directory hierarchy on Windows NTFS where POSIX rwx bits

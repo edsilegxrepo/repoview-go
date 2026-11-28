@@ -1,5 +1,21 @@
 package deb
 
+// OBJECTIVES:
+// Decode APT Release and PGP clearsigned InRelease metadata files into structured
+// repository origin, suite, codename, component, and architecture fields.
+//
+// CORE COMPONENTS:
+//   - ReleaseInfo: control-tagged struct unmarshaling standard APT Release headers.
+//   - ParseReleaseMetadata: Size-bounded reader delegating to pault.ag/go/debian/control.
+//   - extractClearsignedParagraph: Strips OpenPGP clearsign armor headers and dash-escaping.
+//
+// FUNCTIONALITY:
+//   - Enables uniform metadata extraction from signed InRelease and unsigned Release files
+//     up to an 8 MiB ceiling without invoking external gpg binaries.
+//
+// DATA FLOW:
+//   Release / InRelease file -> extractClearsignedParagraph -> control.Unmarshal -> *ReleaseInfo
+
 import (
 	"bufio"
 	"bytes"
@@ -10,6 +26,8 @@ import (
 
 	"pault.ag/go/debian/control"
 )
+
+// --- APT Release & InRelease Decoders ---
 
 // ReleaseInfo captures structured metadata parsed from a Debian Release or InRelease file.
 type ReleaseInfo struct {

@@ -1,5 +1,13 @@
 package models
 
+// OBJECTIVES:
+// Verify conversion of Debian control.BinaryIndex records into models.Package entities,
+// including epoch/revision splitting, KiB->byte sizing, dependency vectors, and descriptions.
+//
+// TEST STRATEGY:
+// Constructs representative Deb822 BinaryIndex fixtures covering standard and pre-depends,
+// breaks/replaces, recommends/suggests, and multi-line descriptions to verify exact field mapping.
+
 import (
 	"testing"
 

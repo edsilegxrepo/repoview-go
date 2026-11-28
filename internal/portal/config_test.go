@@ -1,5 +1,13 @@
 package portal
 
+// OBJECTIVES:
+// Verify portal.yaml loading, override path normalization, hidden/pinned flags,
+// parent directory climbing, and --dump-config non-clobber/merge behavior.
+//
+// TEST STRATEGY:
+// Uses t.TempDir() fixtures covering YAML overrides, cross-platform slash normalization,
+// declared local/external repos, and full round-trip config dumping with and without --force.
+
 import (
 	"os"
 	"path/filepath"
@@ -285,5 +293,121 @@ func TestPortal_CustomTemplateAndMultiRepoDiscoverySort(t *testing.T) {
 	ApplyConfig(catPin, cfgPin)
 	if catPin.Repos[0].Path != "/p/a" {
 		t.Errorf("expected /p/a pinned first by Path, got %+v", catPin.Repos[0])
+	}
+}
+
+func TestDumpConfigWithOptions_FullMetadataNonClobberAndMerge(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "portal.yaml")
+
+	baseCfg := DefaultPortalConfig()
+	baseCfg.PortalURL = "https://portal.corp.local"
+	baseCfg.RepoURL = "https://mirrors.corp.local"
+	baseCfg.PortalHome = "/srv/portal-home"
+	baseCfg.Overrides["el9/base/x86_64"] = RepoOverrideConfig{
+		Title:         "Hand-Tuned EL9",
+		Badge:         "Custom",
+		IgnorePackage: []string{"*-debuginfo"},
+	}
+	baseCfg.Overrides["hidden/channel"] = RepoOverrideConfig{
+		Hidden: true,
+	}
+
+	rawRepos := []*DiscoveredRepo{
+		{
+			RelPath:     "el9/base/x86_64",
+			Path:        "/mirrors/el9/base/x86_64",
+			Title:       "el9 base",
+			Distro:      "el9",
+			Channel:     "base",
+			Arch:        "x86_64",
+			Format:      models.FormatRPM,
+			Description: "Base packages",
+		},
+		{
+			RelPath:    "ubuntu/dists/noble/main/binary-amd64",
+			Path:       "/mirrors/ubuntu/dists/noble/main/binary-amd64",
+			Title:      "ubuntu noble",
+			Distro:     "ubuntu",
+			Channel:    "main",
+			Suite:      "noble",
+			Components: []string{"main", "universe"},
+			Arch:       "amd64",
+			Format:     models.FormatDEB,
+		},
+		{
+			RelPath: "hidden/channel",
+			Path:    "/mirrors/hidden/channel",
+			Distro:  "el8",
+			Channel: "hidden",
+			Arch:    "x86_64",
+			Format:  models.FormatRPM,
+		},
+	}
+
+	cat := BuildCatalog("My Hub", "Hub Desc", baseCfg.PortalURL, rawRepos)
+	if err := DumpConfigWithOptions(outPath, cat, DumpConfigOptions{
+		ExistingConfig: baseCfg,
+		RawRepos:       rawRepos,
+	}); err != nil {
+		t.Fatalf("DumpConfigWithOptions failed: %v", err)
+	}
+
+	// Verify non-clobber guard when Force is false
+	if err := DumpConfigWithOptions(outPath, cat, DumpConfigOptions{
+		ExistingConfig: baseCfg,
+		RawRepos:       rawRepos,
+		Force:          false,
+	}); err == nil {
+		t.Fatalf("expected error overwriting existing file without Force=true")
+	}
+
+	// Verify Force=true reloads & merges safely without losing hand-tuned overrides
+	loaded, err := LoadConfig(outPath)
+	if err != nil {
+		t.Fatalf("LoadConfig on dumped portal.yaml failed: %v", err)
+	}
+	if loaded.PortalURL != "https://portal.corp.local" || loaded.RepoURL != "https://mirrors.corp.local" || loaded.PortalHome != "/srv/portal-home" {
+		t.Errorf("expected preserved portal CLI/config fields, got %+v", loaded)
+	}
+	if len(loaded.Pinned) != 0 {
+		t.Errorf("expected no unconditional auto-pinned entries, got %v", loaded.Pinned)
+	}
+
+	el9Ov, ok := loaded.Overrides["el9/base/x86_64"]
+	if !ok {
+		t.Fatalf("expected el9/base/x86_64 override")
+	}
+	if el9Ov.Title != "Hand-Tuned EL9" || el9Ov.Badge != "Custom" || len(el9Ov.IgnorePackage) != 1 {
+		t.Errorf("expected existing hand-tuned fields preserved on merge, got %+v", el9Ov)
+	}
+	if el9Ov.Distro != "el9" || el9Ov.Channel != "base" || el9Ov.Arch != "x86_64" || el9Ov.Format != "rpm" || el9Ov.Icon != "redhat" {
+		t.Errorf("expected missing inferred metadata populated cleanly, got %+v", el9Ov)
+	}
+
+	ubuOv, ok := loaded.Overrides["ubuntu/dists/noble/main/binary-amd64"]
+	if !ok || ubuOv.Suite != "noble" || len(ubuOv.Components) != 2 || ubuOv.Badge != "" {
+		t.Errorf("expected full inferred DEB metadata without hardcoded Production badge, got %+v", ubuOv)
+	}
+
+	if hidOv, ok := loaded.Overrides["hidden/channel"]; !ok || !hidOv.Hidden {
+		t.Errorf("expected hidden override preserved, got ok=%v ov=%+v", ok, hidOv)
+	}
+
+	// Verify overwrite with Force=true when ExistingConfig is nil merges directly from disk
+	if err := DumpConfigWithOptions(outPath, BuildCatalog("", "", "", []*DiscoveredRepo{
+		{RelPath: "deb13/custom", Distro: "deb13", Channel: "custom", Arch: "amd64", Format: models.FormatDEB},
+	}), DumpConfigOptions{Force: true}); err != nil {
+		t.Fatalf("DumpConfigWithOptions(Force=true) failed: %v", err)
+	}
+	mergedReloaded, err := LoadConfig(outPath)
+	if err != nil {
+		t.Fatalf("LoadConfig after merge failed: %v", err)
+	}
+	if _, ok := mergedReloaded.Overrides["el9/base/x86_64"]; !ok {
+		t.Errorf("expected previous el9 override retained during Force merge")
+	}
+	if debOv, ok := mergedReloaded.Overrides["deb13/custom"]; !ok || debOv.Icon != "debian" {
+		t.Errorf("expected newly discovered deb13/custom merged with debian icon, got %+v", debOv)
 	}
 }

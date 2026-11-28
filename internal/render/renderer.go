@@ -36,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	// nosemgrep: go.lang.security.audit.xss.import-text-template.import-text-template -- text/template is strictly used for XML/RSS generation (rss.xml) with explicit xmlEscape/cdataHTML/safeURL escaping
 	texttmpl "text/template"
 	"time"
@@ -47,6 +48,8 @@ import (
 
 //go:embed templates/*.html templates/*.xml templates/layout/*.css templates/layout/*.js
 var templateFS embed.FS
+
+// --- Configuration Models & Context Setters ---
 
 // RepoContext holds global data available to all templates.
 // This includes the repository title, navigation letters, tool version, and functional groups.
@@ -66,6 +69,9 @@ type RepoContext struct {
 	PortalURL      string                 // Optional or auto-detected relative/absolute link to parent catalog portal
 	PackageBaseURL string                 // Optional base URL or relative path for raw package downloads
 	GPGKey         string                 // Optional GPG public key URL/path for client configuration snippets
+	Suite          string                 // Optional Debian suite name for .sources snippets
+	Components     string                 // Optional space-separated Debian components for .sources snippets
+	BuildDate      string                 // Formatted repository generation timestamp
 }
 
 // PageData unifies the template execution context passed to index, group, and package pages
@@ -91,6 +97,7 @@ type Renderer struct {
 	RepoCtx     RepoContext        // Global repository context shared across all template renders
 	HTMLTmpls   *htmltmpl.Template // Compiled HTML templates with contextual auto-escaping
 	XMLTmpls    *texttmpl.Template // Compiled XML templates for RSS feeds
+	pkgBufPool  sync.Pool          // Reusable *bytes.Buffer pool for concurrent package page rendering
 }
 
 // SetSink injects a custom OutputSink implementation.
@@ -152,6 +159,12 @@ func (r *Renderer) SetGPGKey(gpgKey string) {
 	r.RepoCtx.GPGKey = strings.TrimSpace(gpgKey)
 }
 
+// SetSuiteComponents stores optional Debian suite and space-separated components for .sources snippets.
+func (r *Renderer) SetSuiteComponents(suite, components string) {
+	r.RepoCtx.Suite = strings.TrimSpace(suite)
+	r.RepoCtx.Components = strings.TrimSpace(components)
+}
+
 // NewRenderer initializes a new Renderer instance.
 // It parses the embedded templates or custom templates from a directory.
 func NewRenderer(outDir, templateDir, title, version string, letters []string) (*Renderer, error) {
@@ -195,6 +208,7 @@ func NewRenderer(outDir, templateDir, title, version string, letters []string) (
 			Title:     title,
 			Letters:   letters,
 			MyVersion: version,
+			BuildDate: time.Now().UTC().Format("2006-01-02 15:04 UTC"),
 		},
 	}
 
@@ -283,6 +297,18 @@ func (r *Renderer) RenderGroup(group *logic.GroupData) ([]byte, error) {
 
 // RenderPackage generates a package detail page.
 func (r *Renderer) RenderPackage(pkg *models.Package, group *logic.GroupData) ([]byte, error) {
+	var out []byte
+	err := r.RenderPackageTo(pkg, group, func(content []byte) error {
+		out = make([]byte, len(content))
+		copy(out, content)
+		return nil
+	})
+	return out, err
+}
+
+// RenderPackageTo renders a package detail page using a pooled bytes.Buffer and invokes fn with the rendered slice.
+// Callers must not retain the slice after fn returns.
+func (r *Renderer) RenderPackageTo(pkg *models.Package, group *logic.GroupData, fn func(content []byte) error) error {
 	pkgName := ""
 	if pkg != nil {
 		pkgName = pkg.Name
@@ -296,11 +322,27 @@ func (r *Renderer) RenderPackage(pkg *models.Package, group *logic.GroupData) ([
 		Pkg:       pkg,
 	}
 
-	var buf bytes.Buffer
-	if err := r.HTMLTmpls.ExecuteTemplate(&buf, "package.html", data); err != nil {
-		return nil, err
+	var buf *bytes.Buffer
+	if pooled := r.pkgBufPool.Get(); pooled != nil {
+		buf = pooled.(*bytes.Buffer)
+		buf.Reset()
+	} else {
+		buf = bytes.NewBuffer(make([]byte, 0, 24*1024))
 	}
-	return buf.Bytes(), nil
+
+	execErr := r.HTMLTmpls.ExecuteTemplate(buf, "package.html", data)
+	if execErr != nil {
+		if buf.Cap() <= 512*1024 {
+			r.pkgBufPool.Put(buf)
+		}
+		return execErr
+	}
+
+	cbErr := fn(buf.Bytes())
+	if buf.Cap() <= 512*1024 {
+		r.pkgBufPool.Put(buf)
+	}
+	return cbErr
 }
 
 // RenderRSS generates the RSS feed
@@ -408,6 +450,18 @@ func compactTagsAndCVEs(p *models.Package) string {
 func (r *Renderer) WriteToFile(filename string, content []byte) error {
 	if r.Sink == nil {
 		r.Sink = &AtomicLocalSink{RootDir: r.OutDir}
+	}
+	return r.Sink.WriteFile(filename, content)
+}
+
+// WriteToFileFast delegates fast derived-artifact persistence (omitting per-file fsync when
+// supported by Sink, otherwise falling back to WriteFile).
+func (r *Renderer) WriteToFileFast(filename string, content []byte) error {
+	if r.Sink == nil {
+		r.Sink = &AtomicLocalSink{RootDir: r.OutDir}
+	}
+	if fast, ok := r.Sink.(FastOutputSink); ok {
+		return fast.WriteFileFast(filename, content)
 	}
 	return r.Sink.WriteFile(filename, content)
 }

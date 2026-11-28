@@ -76,6 +76,19 @@ func TestTemplateRendering(t *testing.T) {
 	if len(indexHTML) == 0 {
 		t.Errorf("RenderIndex returned empty content")
 	}
+	indexStr := string(indexHTML)
+	for _, want := range []string{
+		`id="pkgSearchClear"`,
+		`id="searchHints"`,
+		`role="listbox"`,
+		`id="groupTreeFilter"`,
+		`id="sidebarToggleBtn"`,
+		`Last Built:`,
+	} {
+		if !strings.Contains(indexStr, want) {
+			t.Errorf("RenderIndex HTML missing UI enhancement %q", want)
+		}
+	}
 
 	// 2. Test RenderGroup
 	groupHTML, err := r.RenderGroup(group)
@@ -655,6 +668,9 @@ func TestRenderer_SettersSearchAndAtomicLocalSink(t *testing.T) {
 	if err := r.WriteToFile("sub/test.html", []byte("<html>ok</html>")); err != nil {
 		t.Fatalf("WriteToFile via AtomicLocalSink failed: %v", err)
 	}
+	if err := r.WriteToFileFast("sub/fast.html", []byte("<html>fast</html>")); err != nil {
+		t.Fatalf("WriteToFileFast via AtomicLocalSink failed: %v", err)
+	}
 	if !sink.Exists("sub/test.html") {
 		t.Errorf("expected AtomicLocalSink.Exists(\"sub/test.html\") to be true")
 	}
@@ -674,4 +690,3 @@ func TestRenderer_SettersSearchAndAtomicLocalSink(t *testing.T) {
 		t.Errorf("expected Exists false on traversal path")
 	}
 }
-

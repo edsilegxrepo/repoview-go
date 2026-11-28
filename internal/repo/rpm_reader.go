@@ -31,9 +31,20 @@ import (
 // DATA FLOW:
 //   RPM file on disk -> go-rpmutils -> models.RPMDetails -> models.Package.Details
 
+// --- Binary RPM Archive Inspection ---
+
 // ReadRPMDetails parses the RPM file header directly and extracts detailed inspection data
 // including digital signatures, build host, source RPM, scriptlets, and file list.
 func ReadRPMDetails(rpmPath string) (*models.PackageDetails, error) {
+	return readRPMMetadata(rpmPath, false)
+}
+
+// ReadRPMDetailsAndFiles extracts rich RPM header details and the file manifest in one open pass.
+func ReadRPMDetailsAndFiles(rpmPath string) (*models.PackageDetails, error) {
+	return readRPMMetadata(rpmPath, true)
+}
+
+func readRPMMetadata(rpmPath string, includeFiles bool) (*models.PackageDetails, error) {
 	// #nosec G304 -- rpmPath is validated against directory traversal by repository discovery
 	f, err := os.Open(filepath.Clean(rpmPath))
 	if err != nil {
@@ -52,6 +63,15 @@ func ReadRPMDetails(rpmPath string) (*models.PackageDetails, error) {
 		}
 	}
 
+	details := extractRPMHeaderDetails(header, sigs)
+	if includeFiles {
+		files, _ := extractRPMFiles(header)
+		details.Files = files
+	}
+	return details, nil
+}
+
+func extractRPMHeaderDetails(header *rpmutils.RpmHeader, sigs []*rpmutils.Signature) *models.PackageDetails {
 	details := &models.PackageDetails{}
 
 	// 1. Basic & Extended Header Metadata
@@ -110,9 +130,7 @@ func ReadRPMDetails(rpmPath string) (*models.PackageDetails, error) {
 		details.Scriptlets = scriptlets
 	}
 
-	// File lists are loaded strictly on-demand via ReadRPMFiles during package page rendering
-	// to prevent holding millions of PackageFile entries in heap memory simultaneously.
-	return details, nil
+	return details
 }
 
 // ReadRPMFiles extracts only the file list with modes and sizes from an RPM header.
@@ -130,6 +148,10 @@ func ReadRPMFiles(rpmPath string) ([]models.PackageFile, error) {
 		return nil, err
 	}
 
+	return extractRPMFiles(header)
+}
+
+func extractRPMFiles(header *rpmutils.RpmHeader) ([]models.PackageFile, error) {
 	files, err := header.GetFiles()
 	if err != nil || len(files) == 0 {
 		return nil, err
@@ -199,28 +221,61 @@ func EnrichPackagesWithRPMDetails(repoDir string, pkgs []*models.Package) {
 		if err != nil {
 			return
 		}
-
-		p.Details = details
-		if p.BuildHost == "" && details.BuildHost != "" {
-			p.BuildHost = details.BuildHost
-		}
-		if p.InstalledSize == 0 && details.InstalledSize > 0 {
-			p.InstalledSize = details.InstalledSize
-		}
-		if p.Packager == "" && details.Packager != "" {
-			p.Packager = details.Packager
-		}
-		if p.Bugs == "" && details.BugURL != "" {
-			p.Bugs = details.BugURL
-		}
-		if p.SourcePackage == "" && details.SourcePackage != "" {
-			p.SourcePackage = details.SourcePackage
-		}
-		if p.SourceRPM == "" && details.SourcePackage != "" {
-			p.SourceRPM = details.SourcePackage
-		}
-		if p.Format == "" {
-			p.Format = models.FormatRPM
-		}
+		applyRPMDetailsToPackage(p, details)
 	})
+}
+
+// EnrichRPMForRender extracts RPM details and file manifests in a single open pass for package rendering.
+func EnrichRPMForRender(repoDir string, p *models.Package) error {
+	if p == nil || p.LocationHref == "" {
+		return nil
+	}
+	if p.Details != nil && len(p.Details.Files) > 0 {
+		return nil
+	}
+	rpmPath, err := util.ResolveContainedPath(repoDir, p.LocationHref)
+	if err != nil {
+		return fmt.Errorf("invalid package location %s: %w", p.LocationHref, err)
+	}
+	if p.Details == nil {
+		details, err := ReadRPMDetailsAndFiles(rpmPath)
+		if err != nil {
+			return err
+		}
+		applyRPMDetailsToPackage(p, details)
+		return nil
+	}
+	files, err := ReadRPMFiles(rpmPath)
+	if err == nil && len(files) > 0 {
+		p.Details.Files = files
+	}
+	return err
+}
+
+func applyRPMDetailsToPackage(p *models.Package, details *models.PackageDetails) {
+	if p == nil || details == nil {
+		return
+	}
+	p.Details = details
+	if p.BuildHost == "" && details.BuildHost != "" {
+		p.BuildHost = details.BuildHost
+	}
+	if p.InstalledSize == 0 && details.InstalledSize > 0 {
+		p.InstalledSize = details.InstalledSize
+	}
+	if p.Packager == "" && details.Packager != "" {
+		p.Packager = details.Packager
+	}
+	if p.Bugs == "" && details.BugURL != "" {
+		p.Bugs = details.BugURL
+	}
+	if p.SourcePackage == "" && details.SourcePackage != "" {
+		p.SourcePackage = details.SourcePackage
+	}
+	if p.SourceRPM == "" && details.SourcePackage != "" {
+		p.SourceRPM = details.SourcePackage
+	}
+	if p.Format == "" {
+		p.Format = models.FormatRPM
+	}
 }

@@ -5,6 +5,31 @@ All notable changes to the `repoview-go` project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.0] - 2026-11-27
+
+### Auto-Discovery Config UX, Portal Package Search, Generation Performance & Pure-Go E2E Matrix
+
+#### Auto-Discovery & Starter Configuration (`--dump-config`)
+- **Single-Repo Starter Config (`repoview --dump-config`)**: Added `--dump-config <file>` to inspect raw or rendered RPM/DEB repositories and emit an annotated starter `repoview.yaml` (`BuildStarterRepoConfig` / `WriteStarterRepoConfig`) with inferred `title`, `format`, `distro`, `channel`, `suite`, `arch`, `base_url`, `comps`, `ignore_package`, and `exclude_arch`.
+- **Portal Starter Config & Safe Merge (`repoview portal --dump-config`)**: Emits full inferred per-repo metadata (`distro`, `channel`, `suite`, `components`, `arch`, `format`, `description`, `base_url`, `gpgkey`), preserves active `--portal-url`, `--repo-url`, `--portal-home`, `--in-place`, and `taxonomy` rules, removes hardcoded `"Production"` badges and unconditional auto-pinning, refuses clobbering existing YAML files without `--force` (`exit 8`), and safely merges newly discovered repositories into existing hand-edited configs with `--force`.
+- **Per-Override Pinning**: Added `pinned: true` support on per-repository `overrides:` entries alongside top-level `pinned: [...]`.
+
+#### UI Polish & Cross-Repository Search
+- **Cross-Repository Portal Search (`portal-search.json`)**: Added `RenderPortalSearchIndex` generating `portal-search.json` alongside `portal-feed.xml`, powering a `Repositories` vs `Packages & CVEs` mode switch (`#portal-search-mode`) in `portal.html` that jumps directly to `<repo>/<pkg>.html`.
+- **Rich Portal Cards & Smart Filtering**: Separated `.repo-card.pinned` into `#pinned-section`, surfaced card `Description` and `Suite` chips, added `data-icon` markers, live pill counts, sort controls (`#catalog-sort`), filter reset (`#btn-reset-filters`), and a config preview/download modal (`.repo` / `.sources`).
+- **Repository UI & Mobile Navigation**: Replaced `Status: Online` with real `Last Built:` timestamps, added `#pkgSearchClear` + qualifier hint pills (`arch:`, `group:`, `license:`, `provides:`, `tag:`, `cve:`), `80ms` debouncing, ARIA listbox semantics, `Showing top N of M matches` footer, `#groupTreeFilter` sidebar quick filter, responsive mobile drawer (`#sidebarToggleBtn`), and accurate Deb822 `Suites:`/`Components:` `.sources` snippets.
+
+#### Generation Performance (`~2.15×` Speedup in `BenchmarkRenderPackages`)
+- **Lock-Free Work Stealing & Batch State**: Added `util.ForEachWorkers` using `atomic.Int64` work indices, pre-allocated lock-free `rawGenerated[idx]`, per-worker `StateStore.MarkWrittenBatch`, compact `state.json` serialization, and throttled per-package logging above 200 packages.
+- **Zero-Allocation Hot Paths & Fast Disk Writes**: Added `pkgBufPool` (`*bytes.Buffer` pool) in `render.Renderer`, `DependencyEnricher` batched `WHERE pkgKey IN (...)` (500-key chunks) in SQLite/XML readers, single-pass `PackageRenderEnricher` restricting binary disk inspection to `latest` (`versions[0]`), and non-fsynced `AtomicWriteFileFast` for derived HTML pages (`--fsync` opts back into per-file fsync).
+
+#### Debian `.ddeb` Discovery & Multi-Repo Fixes
+- **DDEB APT Tree Support**: Updated `internal/portal/scanner.go` (`isDirExcluded`, default `max_depth: 7`, `AggregateDebianSuites`, `detectArchFromPackageFiles`) and `internal/repo/deb/discovery.go` to discover `dists/<suite>/<component>/debug/binary-<arch>` `.ddeb` debug trees while keeping payload `pool/` and noise `debug/` dirs pruned.
+- **Multi-Repo Portal Consistency**: Supported single root repository cataloging (`RelPath == "."`), prevented `"unknown"` path arch from masking package-detected architectures, fixed relative `BaseURL` leakage in `latest-feed.xml`, parsed Deb822 `Tag:` metadata fallback, and fixed detached vs in-place sibling switcher URLs (suppressing hidden siblings).
+
+#### Testing & Quality Verification
+- **Pure-Go Cross-Platform E2E Suite**: Added shared `TestMain` harness and deterministic RPM/DEB/DDEB fixture builders covering Matrices A–E (`RPM-01`–`05`, `DEB-01`–`03`, `DDEB-01`–`02`, `MIX-01`–`05`, `SEC-01`–`02`, exits `0`–`8`) in `t.TempDir()` sandboxes across native Windows and WSL Linux.
+
 ## [v0.4.0] - 2026-11-26
 
 ### Security Hardening, Rich Metadata, Declarative Workflows & Architecture Refactoring

@@ -1,5 +1,13 @@
 package deb
 
+// OBJECTIVES:
+// Validate Debian repository layout discovery across standard dists/ trees, flat directories,
+// binary-<arch> leaves, multi-component aggregation, and dists/.../debug .ddeb subtrees.
+//
+// TEST STRATEGY:
+// Constructs minimal directory trees with Packages / Packages.gz and Release files in t.TempDir()
+// to test architecture priority (concrete over all), suite/arch filters, and missing-repo errors.
+
 import (
 	"compress/gzip"
 	"os"
@@ -227,5 +235,42 @@ func TestDiscover_MultiComponentAggregation(t *testing.T) {
 	}
 	if len(locsComp.PackagesFiles) != 1 {
 		t.Errorf("expected 1 PackagesFile, got %d", len(locsComp.PackagesFiles))
+	}
+}
+
+func TestDiscover_DebugComponentTree(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	dbgBin := filepath.Join(tmpDir, "dists", "noble", "main", "debug", "binary-arm64")
+	if err := os.MkdirAll(dbgBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pkgFile := filepath.Join(dbgBin, "Packages")
+	if err := os.WriteFile(pkgFile, []byte("Package: nginx-dbgsym\nVersion: 1.24.0\nArchitecture: arm64\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Discover from root (suite without Release)
+	locsRoot, err := DiscoverWithOptions(tmpDir, DiscoverOptions{Suite: "noble", Arch: "arm64"})
+	if err != nil {
+		t.Fatalf("DiscoverWithOptions from root failed: %v", err)
+	}
+	if locsRoot.Arch != "arm64" || locsRoot.Suite != "noble" {
+		t.Errorf("unexpected root locs: suite=%q arch=%q", locsRoot.Suite, locsRoot.Arch)
+	}
+	if locsRoot.Component != "main/debug" || len(locsRoot.Components) != 1 || locsRoot.Components[0] != "main/debug" {
+		t.Errorf("expected component [main/debug], got %v", locsRoot.Components)
+	}
+	if len(locsRoot.PackagesFiles) != 1 || locsRoot.PackagesFiles[0] != pkgFile {
+		t.Errorf("expected [%s], got %v", pkgFile, locsRoot.PackagesFiles)
+	}
+
+	// 2. Discover pointing directly at binary-arm64 debug leaf
+	locsLeaf, err := Discover(dbgBin)
+	if err != nil {
+		t.Fatalf("Discover on debug leaf failed: %v", err)
+	}
+	if locsLeaf.BaseDir != tmpDir || locsLeaf.Suite != "noble" || locsLeaf.Component != "main/debug" || locsLeaf.Arch != "arm64" {
+		t.Errorf("unexpected leaf locs: %+v", locsLeaf)
 	}
 }

@@ -17,7 +17,9 @@ import (
 )
 
 // TEST STRATEGY:
-// Verify deep binary RPM header parsing on real distribution RPM packages when present.
+// Verify binary RPM header, signature, scriptlet, and CPIO file manifest parsing against
+// deterministic synthetic RPM byte fixtures (TestReadRPMDetailsAndFiles_SyntheticRPM) as well
+// as optional real distribution RPM packages when present on disk.
 //
 // Test coverage includes:
 //   - TestReadRPMDetails:
@@ -294,15 +296,28 @@ func TestOpenFactoryAndFormatDetect(t *testing.T) {
 		t.Errorf("expected DEB metadata format, got %q", meta.Format)
 	}
 
-	// Verify XMLRepository.ReadPackageFiles with synthetic RPM + traversal error
+	// Verify XMLRepository.ReadPackageFiles & EnrichForRender with synthetic RPM + traversal error
 	xmlRepo := NewXMLRepository(t.TempDir(), "", "", "", nil)
 	rpmHref := "Packages/d/demo-pkg-1.0.0-1.el9.x86_64.rpm"
-	writeSyntheticRPM(t, filepath.Join(xmlRepo.repoDir, filepath.FromSlash(rpmHref)))
+	rpmFull := filepath.Join(xmlRepo.repoDir, filepath.FromSlash(rpmHref))
+	writeSyntheticRPM(t, rpmFull)
 	if files, err := xmlRepo.ReadPackageFiles(xmlRepo.repoDir, &models.Package{LocationHref: rpmHref}); err != nil || len(files) != 3 {
 		t.Errorf("XMLRepository.ReadPackageFiles failed: len=%d err=%v", len(files), err)
 	}
 	if _, err := xmlRepo.ReadPackageFiles(xmlRepo.repoDir, &models.Package{LocationHref: "../../outside.rpm"}); err == nil {
 		t.Errorf("expected XMLRepository.ReadPackageFiles to block path traversal")
+	}
+	renderPkg := &models.Package{Name: "demo-pkg", LocationHref: rpmHref}
+	if err := xmlRepo.EnrichForRender(xmlRepo.repoDir, renderPkg); err != nil {
+		t.Fatalf("XMLRepository.EnrichForRender failed: %v", err)
+	}
+	if renderPkg.Details == nil || len(renderPkg.Details.Files) != 3 || renderPkg.Details.Scriptlets == nil {
+		t.Errorf("expected EnrichForRender to extract details + 3 files in single pass, got %+v", renderPkg.Details)
+	}
+	// Second call when Details already set without Files exercises ReadRPMFiles fallback branch
+	renderPkg.Details.Files = nil
+	if err := xmlRepo.EnrichForRender(xmlRepo.repoDir, renderPkg); err != nil || len(renderPkg.Details.Files) != 3 {
+		t.Errorf("expected EnrichForRender fallback branch to restore 3 files, got len=%d err=%v", len(renderPkg.Details.Files), err)
 	}
 
 	// Verify SQLite OpenWithOptions + updateinfo + Warn writer

@@ -1,5 +1,21 @@
 package util
 
+// OBJECTIVES:
+// Safely stream-decompress compressed repository metadata files (.gz, .bz2, .xz, .zst)
+// into scratch files while enforcing strict upper bounds against zip/decompression bombs.
+//
+// CORE COMPONENTS:
+//   - MaxDecompressedSize: Hard 4 GiB ceiling per decompressed stream.
+//   - DecompressFile: Extension-based decoder writing temporary scratch output + cleanup closure.
+//   - IsCompressed: Fast extension check for supported archive formats.
+//
+// FUNCTIONALITY:
+//   - Wraps decoders in io.LimitReader(r, MaxDecompressedSize+1) so oversized payloads fail
+//     early with ErrDecompressBomb and remove temporary files before returning.
+//
+// DATA FLOW:
+//   compressed file path -> format decoder -> io.LimitReader -> temp file + cleanup func()
+
 import (
 	"compress/bzip2"
 	"compress/gzip"

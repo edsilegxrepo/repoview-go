@@ -307,10 +307,11 @@ type stubFilesReader struct {
 }
 
 func (s *stubFilesReader) GetAllPackages() ([]*models.Package, error) { return nil, nil }
-func (s *stubFilesReader) EnrichPackageDetails([]*models.Package)    {}
+func (s *stubFilesReader) EnrichPackageDetails([]*models.Package)     {}
 func (s *stubFilesReader) ReadPackageFiles(string, *models.Package) ([]models.PackageFile, error) {
 	return s.files, nil
 }
+
 func (s *stubFilesReader) GetPackageDependencies(int64) (*models.PackageDependencies, error) {
 	return &models.PackageDependencies{}, nil
 }

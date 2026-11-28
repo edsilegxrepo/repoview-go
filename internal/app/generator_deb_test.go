@@ -1,5 +1,14 @@
 package app
 
+// OBJECTIVES:
+// Verify Debian pool/dists and flat repository pipeline orchestration plus Debian
+// sibling architecture and component detection inside package app.
+//
+// TEST STRATEGY:
+// Builds self-contained Deb822 Packages / Packages.gz fixtures in t.TempDir(), executes
+// Generator.Run(), and asserts generated HTML views, Deb822 snippets, JSON search rows,
+// and sibling switcher links without external apt/dpkg binaries.
+
 import (
 	"compress/gzip"
 	"encoding/json"

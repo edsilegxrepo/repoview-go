@@ -1,10 +1,10 @@
 // Package app coordinates the core generation workflow for repoview-go.
 //
 // OBJECTIVES:
-// Orchestrate the end-to-end transformation of an RPM repository into a modern,
-// air-gap compliant static website. Manages repository metadata parsing, package filtering,
-// deep RPM header introspection, taxonomy construction, incremental state persistence,
-// multi-threaded HTML rendering, and automated stale file cleanup.
+// Orchestrate the end-to-end transformation of an RPM or Debian/Ubuntu repository into a
+// modern, air-gap compliant static website. Manages repository metadata parsing, package
+// filtering, deep header/archive introspection, taxonomy construction, incremental state
+// persistence, lock-free parallel rendering, and automated stale file cleanup.
 //
 // CORE COMPONENTS:
 //   - Config: Encapsulates all CLI flags, paths, filtering globs, and runtime settings.
@@ -12,20 +12,21 @@
 //   - ExitCode Constants: Structured UNIX process exit codes for diagnostic automation.
 //   - SafetyError & PartialFailureError: Custom domain error types for safety violations and partial runs.
 //   - validateOutputDirSafety: Guard function preventing accidental repository data destruction.
-//   - detectSiblingRepos: Filesystem crawler discovering neighboring channels and architectures.
+//   - detectSiblingRepos / findParentPortal: Filesystem crawlers linking sibling channels and parent portals.
 //
 // FUNCTIONALITY:
-//   - Safety Pre-validation: Halts immediately if the output directory threatens repository files.
-//   - Repository Ingestion: Parses repomd.xml, decompresses databases, and establishes read-only SQLite connections.
-//   - Bulk Changelog & RPM Enrichment: Uses batched queries and worker pools to inspect packages efficiently.
-//   - On-Demand Memory Management: Loads package file manifests only during HTML page write and frees them immediately via defer.
-//   - Parallel Rendering: Employs bounded goroutine worker pools (NumCPU * 2) for parallel package generation.
-//   - Incremental Persistence: Skips unchanged pages using SHA-256 state tracking and prunes orphaned files.
+//   - Safety Pre-validation & Incremental Short-Circuit: Halts immediately if output threatens
+//     source data, and skips full regeneration when metadata/config SHA-256 fingerprints match.
+//   - Repository Ingestion: Dispatches RPM (SQLite/XML + updateinfo) or DEB/DDEB backends via repo.OpenWithOptions.
+//   - Bulk Enrichment & On-Demand Memory Management: Batches changelog/dependency lookups and opens each
+//     latest archive in a single pass, freeing file lists immediately via defer.
+//   - Lock-Free Parallel Rendering: Distributes group and package rendering via util.ForEachWorkers.
+//   - Incremental Persistence: Tracks SHA-256 hashes in state.StateStore and prunes orphaned HTML files.
 //
 // DATA FLOW:
 //
-//	app.Config -> repo.ParseRepomd() -> repo.RepositoryAccess -> logic.GroupingService ->
-//	render.Renderer (parallel workers) -> state.StateStore -> Output directory
+//	app.Config (+ repoview.yaml) -> repo.OpenWithOptions -> logic.GroupingService ->
+//	render.Renderer (util.ForEachWorkers) -> state.StateStore + repoview.json -> Output dir
 package app
 
 import (
@@ -94,34 +95,38 @@ func (e *PartialFailureError) Error() string {
 
 // Config holds the configuration for the Generator
 type Config struct {
-	RepoDir        string            // Root directory of the source RPM/DEB repository
-	OutputDir      string            // Target directory for generated HTML and assets
-	StateDir       string            // Directory for saving incremental state JSON files
-	CompsFile      string            // Path to an alternative comps.xml file
-	TemplateDir    string            // Path to custom templates (embedded templates used if empty)
-	Title          string            // Display title for the repository view
-	Description    string            // Optional repository description
-	URL            string            // Public base URL of the repository (for RSS feed)
-	BaseURL        string            // Explicit base URL for client repository configuration (.repo)
-	Format         models.RepoFormat // Repository format: auto, rpm, or deb
-	Suite          string            // Optional Debian suite/codename selector
-	Arch           string            // Optional Debian architecture selector
-	Distro         string            // Optional explicit distro label
-	Channel        string            // Optional explicit channel label
-	Badge          string            // Optional UI badge
-	Icon           string            // Optional distro icon override
-	Force          bool              // If true, forces complete regeneration ignoring state cache
-	Quiet          bool              // If true, suppresses standard informational output
-	IgnoreList     []string          // Glob patterns of package names/NVRAs to ignore
-	ExcludeArch    []string          // Hardware architectures to exclude from generation
-	PortalURL      string            // Explicit or auto-detected URL to parent catalog portal ("auto", "none", or path/URL)
-	PackageBaseURL string            // Base URL or relative path prefix for package file downloads
-	GPGKey         string            // Optional GPG public key URL/path for .repo / .sources snippets
-	Workers        int               // Optional explicit worker pool limit (clamped 1..16)
-	Version        string            // Repoview tool version string
-	Stdout         io.Writer         // Optional output stream (defaults to os.Stdout when nil)
-	Stderr         io.Writer         // Optional warning/error stream (defaults to os.Stderr when nil)
-	OutputSink     render.OutputSink // Optional custom storage sink for generated files
+	RepoDir               string            // Root directory of the source RPM/DEB repository
+	OutputDir             string            // Target directory for generated HTML and assets
+	StateDir              string            // Directory for saving incremental state JSON files
+	CompsFile             string            // Path to an alternative comps.xml file
+	TemplateDir           string            // Path to custom templates (embedded templates used if empty)
+	Title                 string            // Display title for the repository view
+	Description           string            // Optional repository description
+	URL                   string            // Public base URL of the repository (for RSS feed)
+	BaseURL               string            // Explicit base URL for client repository configuration (.repo)
+	Format                models.RepoFormat // Repository format: auto, rpm, or deb
+	Suite                 string            // Optional Debian suite/codename selector
+	Arch                  string            // Optional Debian architecture selector
+	Distro                string            // Optional explicit distro label
+	Channel               string            // Optional explicit channel label
+	Badge                 string            // Optional UI badge
+	Icon                  string            // Optional distro icon override
+	Force                 bool              // If true, forces complete regeneration ignoring state cache
+	Quiet                 bool              // If true, suppresses standard informational output
+	IgnoreList            []string          // Glob patterns of package names/NVRAs to ignore
+	ExcludeArch           []string          // Hardware architectures to exclude from generation
+	PortalURL             string            // Explicit or auto-detected URL to parent catalog portal ("auto", "none", or path/URL)
+	PackageBaseURL        string            // Base URL or relative path prefix for package file downloads
+	GPGKey                string            // Optional GPG public key URL/path for .repo / .sources snippets
+	Workers               int               // Optional explicit worker pool limit (clamped 1..16)
+	Fsync                 bool              // Flush derived HTML files with per-file fsync (state/index always fsync)
+	SkipSiblings          bool              // Optional: disables sibling channel/arch switching chips
+	SkipComponentSiblings bool              // Optional: omits Debian component siblings when suite components are aggregated
+	HiddenSiblingDirs     map[string]bool   // Optional normalized clean paths of hidden sibling repos
+	Version               string            // Repoview tool version string
+	Stdout                io.Writer         // Optional output stream (defaults to os.Stdout when nil)
+	Stderr                io.Writer         // Optional warning/error stream (defaults to os.Stderr when nil)
+	OutputSink            render.OutputSink // Optional custom storage sink for generated files
 }
 
 // Generator orchestrates the repository view generation process.
@@ -217,6 +222,9 @@ func (g *Generator) applyRepoYAMLIfPresent() (string, error) {
 	if g.config.Workers == 0 && rc.Workers > 0 {
 		g.config.Workers = rc.Workers
 	}
+	if !g.config.Fsync && rc.Fsync {
+		g.config.Fsync = true
+	}
 	if g.config.Distro == "" && rc.Distro != "" {
 		g.config.Distro = rc.Distro
 	}
@@ -288,11 +296,6 @@ func (g *Generator) Run() error {
 		}
 	}
 
-	// Enrich packages with package details (Scriptlets, Signatures, Conffiles, Build Timestamps)
-	g.say("Inspecting package metadata on disk...")
-	reader.EnrichPackageDetails(allPkgs)
-	g.say("done\n")
-
 	// 3. Process Groups
 	var locs *repo.RepoLocations
 	if meta != nil {
@@ -307,6 +310,27 @@ func (g *Generator) Run() error {
 	allGroups = append(allGroups, groups...)
 	allGroups = append(allGroups, letterGroups...)
 
+	latestPkgs := make([]*models.Package, 0, len(pkgVersions))
+	for _, versions := range pkgVersions {
+		if len(versions) > 0 {
+			latestPkgs = append(latestPkgs, versions[0])
+		}
+	}
+
+	// Bulk-load dependencies in batches for selected latest packages when supported (SQLite RPM).
+	if de, ok := reader.(repo.DependencyEnricher); ok {
+		if err := de.EnrichPackagesWithDependencies(latestPkgs); err != nil {
+			g.warn("Warning: failed to bulk-load dependencies: %v\n", err)
+		}
+	}
+
+	// Enrich package details upfront only when backend does not support single-pass EnrichForRender.
+	if _, isRenderEnricher := reader.(repo.PackageRenderEnricher); !isRenderEnricher {
+		g.say("Inspecting package metadata on disk...")
+		reader.EnrichPackageDetails(latestPkgs)
+		g.say("done\n")
+	}
+
 	// 4. Setup Output & Renderer
 	renderer, stateStore, assetKeys, err := g.setupRenderer(letters, meta, len(pkgVersions))
 	if err != nil {
@@ -316,8 +340,20 @@ func (g *Generator) Run() error {
 	renderer.SetFormat(g.config.Format)
 
 	// Sibling repository detection (architectures and channels)
-	siblings := detectSiblingRepos(g.config.RepoDir)
-	renderer.SetSiblings(siblings)
+	if !g.config.SkipSiblings {
+		siblings := detectSiblingReposForOutput(g.config.RepoDir, g.config.OutputDir, g.config.PortalURL, g.config.HiddenSiblingDirs, g.config.SkipComponentSiblings)
+		renderer.SetSiblings(siblings)
+	}
+
+	if meta != nil {
+		suiteName := g.config.Suite
+		if suiteName == "" {
+			suiteName = meta.Suite
+		}
+		if suiteName != "" {
+			renderer.SetSuiteComponents(suiteName, strings.Join(meta.Components, " "))
+		}
+	}
 
 	repoID := util.SanitizeFilename(g.config.Title)
 	if repoID == "" {
@@ -638,6 +674,13 @@ func (g *Generator) effectiveWorkers(itemCount int) int {
 	return util.ClampWorkers(g.config.Workers, itemCount)
 }
 
+func (g *Generator) writeDerivedFile(renderer *render.Renderer, filename string, content []byte) error {
+	if g.config.Fsync {
+		return renderer.WriteToFile(filename, content)
+	}
+	return renderer.WriteToFileFast(filename, content)
+}
+
 // renderGroups renders all group pages concurrently using a bounded worker pool.
 func (g *Generator) renderGroups(renderer *render.Renderer, stateStore *state.StateStore, allGroups []*logic.GroupData) ([]string, error) {
 	if len(allGroups) == 0 {
@@ -645,52 +688,47 @@ func (g *Generator) renderGroups(renderer *render.Renderer, stateStore *state.St
 	}
 
 	generatedFiles := make([]string, len(allGroups))
-	numWorkers := g.effectiveWorkers(len(allGroups))
-	jobs := make(chan int, len(allGroups))
-	for i := range allGroups {
-		jobs <- i
-	}
-	close(jobs)
-
+	verboseGroupLog := len(allGroups) <= 100
 	var (
-		wg       sync.WaitGroup
 		errMu    sync.Mutex
 		firstErr error
 	)
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for idx := range jobs {
-				grp := allGroups[idx]
-				content, err := renderer.RenderGroup(grp)
-				if err != nil {
+	util.ForEachWorkers(allGroups, g.effectiveWorkers(len(allGroups)), func(next func() (int, *logic.GroupData, bool)) {
+		var pending []state.Entry
+		for {
+			idx, grp, ok := next()
+			if !ok {
+				break
+			}
+			content, err := renderer.RenderGroup(grp)
+			if err != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("%w: failed to render group %s: %w", models.ErrTemplate, grp.Name, err)
+				}
+				errMu.Unlock()
+				continue
+			}
+
+			hash, hasChanged := stateStore.CheckChanged(grp.Filename, content)
+			if g.config.Force || hasChanged {
+				if verboseGroupLog {
+					g.say("Writing group %s\n", grp.Filename)
+				}
+				if err := g.writeDerivedFile(renderer, grp.Filename, content); err != nil {
 					errMu.Lock()
 					if firstErr == nil {
-						firstErr = fmt.Errorf("%w: failed to render group %s: %w", models.ErrTemplate, grp.Name, err)
+						firstErr = fmt.Errorf("failed to write group %s: %w", grp.Filename, err)
 					}
 					errMu.Unlock()
 					continue
 				}
-
-				hash, hasChanged := stateStore.CheckChanged(grp.Filename, content)
-				if g.config.Force || hasChanged {
-					g.say("Writing group %s\n", grp.Filename)
-					if err := renderer.WriteToFile(grp.Filename, content); err != nil {
-						errMu.Lock()
-						if firstErr == nil {
-							firstErr = fmt.Errorf("failed to write group %s: %w", grp.Filename, err)
-						}
-						errMu.Unlock()
-						continue
-					}
-					stateStore.MarkWritten(grp.Filename, hash)
-				}
-				generatedFiles[idx] = grp.Filename
+				pending = append(pending, state.Entry{Filename: grp.Filename, Hash: hash})
 			}
-		}()
-	}
-	wg.Wait()
+			generatedFiles[idx] = grp.Filename
+		}
+		stateStore.MarkWrittenBatch(pending)
+	})
 	if firstErr != nil {
 		return nil, firstErr
 	}
@@ -699,31 +737,52 @@ func (g *Generator) renderGroups(renderer *render.Renderer, stateStore *state.St
 
 // renderPackages renders all package pages in parallel using a bounded worker pool.
 func (g *Generator) renderPackages(db repo.RepoReader, renderer *render.Renderer, stateStore *state.StateStore, pkgVersions map[string][]*models.Package, pkgPrimaryGroup map[string]*logic.GroupData) ([]string, int64) {
-	var generatedFiles []string
-	var mu sync.Mutex
-	var errorCount int64
-
 	uniqueNames := make([]string, 0, len(pkgVersions))
 	for name := range pkgVersions {
 		uniqueNames = append(uniqueNames, name)
 	}
 	sort.Strings(uniqueNames)
 
-	util.ForEachConcurrent(uniqueNames, g.config.Workers, func(_ int, pkgName string) {
-		versions := pkgVersions[pkgName]
-		primaryGroup := pkgPrimaryGroup[pkgName]
+	rawGenerated := make([]string, len(uniqueNames))
+	var errorCount int64
+	var writtenCount int64
+	verbosePkgLog := len(uniqueNames) <= 200
 
-		filename, err := g.renderSinglePackage(db, renderer, stateStore, versions, primaryGroup, pkgName)
-		if err != nil {
-			g.warn("Error rendering package %s: %v\n", pkgName, err)
-			atomic.AddInt64(&errorCount, 1)
-			return
+	util.ForEachWorkers(uniqueNames, g.config.Workers, func(next func() (int, string, bool)) {
+		var pending []state.Entry
+		for {
+			idx, pkgName, ok := next()
+			if !ok {
+				break
+			}
+			versions := pkgVersions[pkgName]
+			primaryGroup := pkgPrimaryGroup[pkgName]
+
+			filename, entry, wrote, err := g.renderSinglePackageWithBatch(db, renderer, stateStore, versions, primaryGroup, pkgName, verbosePkgLog)
+			if err != nil {
+				g.warn("Error rendering package %s: %v\n", pkgName, err)
+				atomic.AddInt64(&errorCount, 1)
+				continue
+			}
+			rawGenerated[idx] = filename
+			if wrote {
+				pending = append(pending, entry)
+				atomic.AddInt64(&writtenCount, 1)
+			}
 		}
-
-		mu.Lock()
-		generatedFiles = append(generatedFiles, filename)
-		mu.Unlock()
+		stateStore.MarkWrittenBatch(pending)
 	})
+
+	if !verbosePkgLog && writtenCount > 0 {
+		g.say("Wrote %d package pages (%d total).\n", writtenCount, len(uniqueNames))
+	}
+
+	generatedFiles := make([]string, 0, len(uniqueNames))
+	for _, f := range rawGenerated {
+		if f != "" {
+			generatedFiles = append(generatedFiles, f)
+		}
+	}
 
 	if errorCount > 0 {
 		g.say("Finished with %d errors during package generation.\n", errorCount)
@@ -732,27 +791,42 @@ func (g *Generator) renderPackages(db repo.RepoReader, renderer *render.Renderer
 	return generatedFiles, errorCount
 }
 
-// renderSinglePackage renders an individual package page and ensures heap cleanup of file manifests.
+// renderSinglePackage renders an individual package page, immediately recording state on write.
 func (g *Generator) renderSinglePackage(db repo.RepoReader, renderer *render.Renderer, stateStore *state.StateStore, versions []*models.Package, primaryGroup *logic.GroupData, pkgName string) (string, error) {
+	filename, entry, wrote, err := g.renderSinglePackageWithBatch(db, renderer, stateStore, versions, primaryGroup, pkgName, true)
+	if err != nil {
+		return "", err
+	}
+	if wrote {
+		stateStore.MarkWritten(entry.Filename, entry.Hash)
+	}
+	return filename, nil
+}
+
+// renderSinglePackageWithBatch renders an individual package page and returns the deferred state entry
+// while ensuring heap cleanup of file manifests.
+func (g *Generator) renderSinglePackageWithBatch(db repo.RepoReader, renderer *render.Renderer, stateStore *state.StateStore, versions []*models.Package, primaryGroup *logic.GroupData, pkgName string, verboseLog bool) (string, state.Entry, bool, error) {
 	if len(versions) == 0 {
-		return "", fmt.Errorf("no versions available for package %s", pkgName)
+		return "", state.Entry{}, false, fmt.Errorf("no versions available for package %s", pkgName)
 	}
 
 	latest := versions[0]
 	latest.AllVersions = versions
 
-	// Populate package dependencies on-demand if backend implements DependencyReader (RPM)
+	// Populate package dependencies on-demand if backend did not bulk-load them
 	if dr, ok := db.(repo.DependencyReader); ok && latest.Dependencies == nil {
 		deps, err := dr.GetPackageDependencies(latest.PkgKey)
 		if err != nil {
-			return "", fmt.Errorf("failed to read dependencies for %s: %w", pkgName, err)
+			return "", state.Entry{}, false, fmt.Errorf("failed to read dependencies for %s: %w", pkgName, err)
 		}
 		latest.Dependencies = deps
 	}
 
-	// On-demand file list loading: clean up heap memory upon render completion
+	// Single-pass archive enrichment + on-demand file list loading, releasing Files heap slice via defer
 	if latest.LocationHref != "" && db != nil {
-		if latest.Details == nil || len(latest.Details.Files) == 0 {
+		if re, ok := db.(repo.PackageRenderEnricher); ok {
+			_ = re.EnrichForRender(g.config.RepoDir, latest)
+		} else if latest.Details == nil || len(latest.Details.Files) == 0 {
 			files, err := db.ReadPackageFiles(g.config.RepoDir, latest)
 			if err == nil && len(files) > 0 {
 				if latest.Details == nil {
@@ -779,22 +853,28 @@ func (g *Generator) renderSinglePackage(db repo.RepoReader, renderer *render.Ren
 	}
 
 	filename := latest.Filename()
+	var writtenEntry state.Entry
+	var wrote bool
 
-	content, err := renderer.RenderPackage(latest, primaryGroup)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", models.ErrTemplate, err)
-	}
-
-	hash, hasChanged := stateStore.CheckChanged(filename, content)
-	if g.config.Force || hasChanged {
-		g.say("Writing package %s\n", filename)
-		if err := renderer.WriteToFile(filename, content); err != nil {
-			return "", err
+	renderErr := renderer.RenderPackageTo(latest, primaryGroup, func(content []byte) error {
+		hash, hasChanged := stateStore.CheckChanged(filename, content)
+		if g.config.Force || hasChanged {
+			if verboseLog {
+				g.say("Writing package %s\n", filename)
+			}
+			if err := g.writeDerivedFile(renderer, filename, content); err != nil {
+				return err
+			}
+			writtenEntry = state.Entry{Filename: filename, Hash: hash}
+			wrote = true
 		}
-		stateStore.MarkWritten(filename, hash)
+		return nil
+	})
+	if renderErr != nil {
+		return "", state.Entry{}, false, fmt.Errorf("%w: %w", models.ErrTemplate, renderErr)
 	}
 
-	return filename, nil
+	return filename, writtenEntry, wrote, nil
 }
 
 // renderIndices generates the index.html, search.json, and RSS feed.
@@ -838,7 +918,7 @@ func (g *Generator) renderIndices(renderer *render.Renderer, stateStore *state.S
 	}
 
 	effectiveRSSURL := g.config.URL
-	if effectiveRSSURL == "" && g.config.BaseURL != "" {
+	if effectiveRSSURL == "" && (strings.HasPrefix(g.config.BaseURL, "http://") || strings.HasPrefix(g.config.BaseURL, "https://")) {
 		effectiveRSSURL = g.config.BaseURL
 	}
 
@@ -907,9 +987,40 @@ func mapPrimaryGroups(allGroups []*logic.GroupData) map[string]*logic.GroupData 
 }
 
 // detectSiblingRepos searches nearby directories for sibling repository channels (e.g. base, extras)
-// or architectures (e.g. x86_64, aarch64) that contain repodata or Debian binary directories.
+// or architectures (e.g. x86_64, aarch64) that contain repodata or Debian binary directories, assuming in-place layout.
 func detectSiblingRepos(repoDir string) []*logic.SiblingRepo {
-	if debSiblings := detectDebianSiblings(repoDir); len(debSiblings) > 0 {
+	return detectSiblingReposForOutput(repoDir, "", "auto", nil, false)
+}
+
+func isHiddenSibling(candidate string, hiddenDirs map[string]bool) bool {
+	if len(hiddenDirs) == 0 {
+		return false
+	}
+	absCand, err := filepath.Abs(candidate)
+	if err != nil {
+		absCand = candidate
+	}
+	return hiddenDirs[filepath.Clean(absCand)]
+}
+
+func detectSiblingReposForOutput(repoDir, outputDir, portalURL string, hiddenDirs map[string]bool, skipDebComponents bool) []*logic.SiblingRepo {
+	inPlace := true
+	if outputDir != "" {
+		absRepo, errR := filepath.Abs(repoDir)
+		absOut, errO := filepath.Abs(outputDir)
+		if errR == nil && errO == nil {
+			inPlace = util.SamePath(absOut, filepath.Join(absRepo, "repoview"))
+		}
+	}
+	if !inPlace {
+		lowerPortal := strings.ToLower(strings.TrimSpace(portalURL))
+		if lowerPortal == "" || lowerPortal == "auto" || lowerPortal == "none" || lowerPortal == "off" || lowerPortal == "false" {
+			// Standalone detached output directory has no portal tree hosting sibling links.
+			return nil
+		}
+	}
+
+	if debSiblings := detectDebianSiblingsWithOpts(repoDir, inPlace, hiddenDirs, skipDebComponents); len(debSiblings) > 0 {
 		return debSiblings
 	}
 
@@ -932,11 +1043,19 @@ func detectSiblingRepos(repoDir string) []*logic.SiblingRepo {
 			if !e.IsDir() {
 				continue
 			}
-			repodataPath := filepath.Join(parentDir, e.Name(), "repodata")
+			candDir := filepath.Join(parentDir, e.Name())
+			if isHiddenSibling(candDir, hiddenDirs) {
+				continue
+			}
+			repodataPath := filepath.Join(candDir, "repodata")
 			if fi, err := os.Stat(repodataPath); err == nil && fi.IsDir() {
+				relURL := fmt.Sprintf("../%s/index.html", e.Name())
+				if inPlace {
+					relURL = fmt.Sprintf("../../%s/repoview/index.html", e.Name())
+				}
 				archSiblings = append(archSiblings, &logic.SiblingRepo{
 					Name:     e.Name(),
-					RelURL:   fmt.Sprintf("../../%s/repoview/index.html", e.Name()),
+					RelURL:   relURL,
 					IsActive: e.Name() == currentArch,
 				})
 			}
@@ -953,11 +1072,19 @@ func detectSiblingRepos(repoDir string) []*logic.SiblingRepo {
 			if !e.IsDir() {
 				continue
 			}
-			repodataPath := filepath.Join(grandParentDir, e.Name(), currentArch, "repodata")
+			candDir := filepath.Join(grandParentDir, e.Name(), currentArch)
+			if isHiddenSibling(candDir, hiddenDirs) {
+				continue
+			}
+			repodataPath := filepath.Join(candDir, "repodata")
 			if fi, err := os.Stat(repodataPath); err == nil && fi.IsDir() {
+				relURL := fmt.Sprintf("../../%s/%s/index.html", e.Name(), currentArch)
+				if inPlace {
+					relURL = fmt.Sprintf("../../../%s/%s/repoview/index.html", e.Name(), currentArch)
+				}
 				channelSiblings = append(channelSiblings, &logic.SiblingRepo{
 					Name:     e.Name(),
-					RelURL:   fmt.Sprintf("../../../%s/%s/repoview/index.html", e.Name(), currentArch),
+					RelURL:   relURL,
 					IsActive: e.Name() == currentChannel,
 				})
 			}
@@ -970,12 +1097,16 @@ func detectSiblingRepos(repoDir string) []*logic.SiblingRepo {
 	return siblings
 }
 
-// detectDebianSiblings inspects adjacent directories in a dists hierarchy.
+// detectDebianSiblings inspects adjacent directories in a dists hierarchy using in-place layout.
 func detectDebianSiblings(repoDir string) []*logic.SiblingRepo {
+	return detectDebianSiblingsWithOpts(repoDir, true, nil, false)
+}
+
+// detectDebianSiblingsWithOpts inspects adjacent directories in a dists hierarchy.
+func detectDebianSiblingsWithOpts(repoDir string, inPlace bool, hiddenDirs map[string]bool, skipComponents bool) []*logic.SiblingRepo {
 	var siblings []*logic.SiblingRepo
 	absDir, _ := filepath.Abs(repoDir)
 
-	// Case 1: Currently inside binary-<arch> leaf (e.g. dists/noble/main/binary-amd64)
 	if strings.HasPrefix(filepath.Base(absDir), "binary-") {
 		currentArch := filepath.Base(absDir)
 		componentDir := filepath.Dir(absDir)
@@ -986,9 +1117,17 @@ func detectDebianSiblings(repoDir string) []*logic.SiblingRepo {
 		if entries, err := os.ReadDir(componentDir); err == nil {
 			for _, e := range entries {
 				if e.IsDir() && strings.HasPrefix(e.Name(), "binary-") {
+					candDir := filepath.Join(componentDir, e.Name())
+					if isHiddenSibling(candDir, hiddenDirs) {
+						continue
+					}
+					relURL := fmt.Sprintf("../%s/index.html", e.Name())
+					if inPlace {
+						relURL = fmt.Sprintf("../../%s/repoview/index.html", e.Name())
+					}
 					archSiblings = append(archSiblings, &logic.SiblingRepo{
 						Name:     strings.TrimPrefix(e.Name(), "binary-"),
-						RelURL:   fmt.Sprintf("../%s/repoview/index.html", e.Name()),
+						RelURL:   relURL,
 						IsActive: e.Name() == currentArch,
 					})
 				}
@@ -998,28 +1137,39 @@ func detectDebianSiblings(repoDir string) []*logic.SiblingRepo {
 			}
 		}
 
-		// 2. Component siblings across the same suite (e.g. main vs universe)
-		if entries, err := os.ReadDir(suiteDir); err == nil && len(siblings) <= 1 {
-			var compSiblings []*logic.SiblingRepo
-			currentComponent := filepath.Base(componentDir)
-			for _, e := range entries {
-				siblingLeaf := filepath.Join(suiteDir, e.Name(), currentArch)
-				if fi, err := os.Stat(siblingLeaf); err == nil && fi.IsDir() {
-					compSiblings = append(compSiblings, &logic.SiblingRepo{
-						Name:     e.Name(),
-						RelURL:   fmt.Sprintf("../../%s/%s/repoview/index.html", e.Name(), currentArch),
-						IsActive: e.Name() == currentComponent,
-					})
+		// 2. Component siblings across the same suite (when not aggregated under portal)
+		if !skipComponents && len(siblings) <= 1 {
+			if entries, err := os.ReadDir(suiteDir); err == nil {
+				var compSiblings []*logic.SiblingRepo
+				currentComponent := filepath.Base(componentDir)
+				for _, e := range entries {
+					siblingLeaf := filepath.Join(suiteDir, e.Name(), currentArch)
+					if isHiddenSibling(siblingLeaf, hiddenDirs) {
+						continue
+					}
+					if fi, err := os.Stat(siblingLeaf); err == nil && fi.IsDir() {
+						relURL := fmt.Sprintf("../../%s/%s/index.html", e.Name(), currentArch)
+						if inPlace {
+							relURL = fmt.Sprintf("../../../%s/%s/repoview/index.html", e.Name(), currentArch)
+						}
+						compSiblings = append(compSiblings, &logic.SiblingRepo{
+							Name:     e.Name(),
+							RelURL:   relURL,
+							IsActive: e.Name() == currentComponent,
+						})
+					}
 				}
-			}
-			if len(compSiblings) > 1 {
-				siblings = append(siblings, compSiblings...)
+				if len(compSiblings) > 1 {
+					siblings = append(siblings, compSiblings...)
+				}
 			}
 		}
 	}
+	if len(siblings) <= 1 {
+		return nil
+	}
 	return siblings
 }
-
 
 // validateOutputDirSafety ensures that outputDir is safe to write/delete without risking data loss.
 // It verifies that outputDir:
@@ -1099,7 +1249,7 @@ func (g *Generator) buildDescriptor(portalURL string, meta *repo.RepoMetadata, a
 			primaryArch = pathArch
 		}
 	}
-	if g.config.Arch != "" {
+	if g.config.Arch != "" && g.config.Arch != "unknown" {
 		primaryArch = g.config.Arch
 	}
 

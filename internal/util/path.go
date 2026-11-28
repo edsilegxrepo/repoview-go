@@ -1,5 +1,21 @@
 package util
 
+// OBJECTIVES:
+// Enforce strict filesystem path containment and symlink escape checks across RPM/DEB
+// ingestion, template/asset writes, and repository safety guards.
+//
+// CORE COMPONENTS:
+//   - ResolveRealPath: Resolves symlinks for existing paths or deepest existing ancestors.
+//   - ResolveContainedPath: Verifies relative paths cannot escape baseDir lexically or via symlinks.
+//   - IsPathContained / SamePath: OS-aware directory boundary and equality predicates.
+//
+// FUNCTIONALITY:
+//   - Defeats "../../" traversal and out-of-tree symlinks even when destination leaf
+//     directories do not yet exist on disk.
+//
+// DATA FLOW:
+//   (baseDir, relPath) -> filepath.IsLocal -> ResolveRealPath -> IsPathContained -> safe path
+
 import (
 	"fmt"
 	"os"

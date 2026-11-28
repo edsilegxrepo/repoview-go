@@ -1,5 +1,21 @@
 package repo
 
+// OBJECTIVES:
+// Expose repository metadata decompression to repoview-go's parser layer while mapping
+// low-level decompression failures onto canonical domain sentinel errors.
+//
+// CORE COMPONENTS:
+//   - MaxDecompressedSize: Shared 4 GiB ceiling inherited from internal/util.
+//   - DecompressFile: Delegates format decoding (.gz, .bz2, .xz, .zst) and maps
+//     ErrDecompressBomb -> models.ErrIntegrity and I/O errors -> models.ErrIO.
+//   - IsCompressed: Checks recognized metadata compression extensions.
+//
+// FUNCTIONALITY:
+//   - Preserves clean process exit code boundaries without duplicating streaming code.
+//
+// DATA FLOW:
+//   metadata file path -> util.DecompressFile -> sentinel-wrapped error or scratch file path
+
 import (
 	"errors"
 	"fmt"

@@ -1,5 +1,22 @@
 package util
 
+// OBJECTIVES:
+// Guarantee crash-safe file writes for HTML pages, JSON search/state indices, and
+// YAML/RSS outputs using write-to-temp-then-rename semantics across POSIX and Windows.
+//
+// CORE COMPONENTS:
+//   - AtomicWriteFile: Durable temp-write + fsync + atomic rename (critical metadata).
+//   - AtomicWriteFileFast: Temp-write + rename without per-file fsync (derived HTML pages).
+//   - writeTempReplace: Shared platform-aware replacement helper.
+//
+// FUNCTIONALITY:
+//   - Creates ephemeral hidden sibling temp files in destPath's parent directory so
+//     renames stay atomic on the same filesystem mount.
+//   - Applies explicit file modes on non-Windows hosts and cleans up orphaned temps on error.
+//
+// DATA FLOW:
+//   content []byte -> os.CreateTemp(dir) -> chmod -> Write -> [Sync] -> Close -> os.Rename
+
 import (
 	"fmt"
 	"os"
@@ -11,6 +28,16 @@ import (
 // sets permissions, flushes via fsync, closes, and atomically renames into place.
 // On Windows, it falls back to remove-and-rename if an existing destination blocks direct replacement.
 func AtomicWriteFile(destPath string, content []byte, perm os.FileMode) error {
+	return writeTempReplace(destPath, content, perm, true)
+}
+
+// AtomicWriteFileFast atomically writes content via temp-file + rename without per-file fsync,
+// trading individual-file durability barriers for high-throughput generation of replaceable build artifacts.
+func AtomicWriteFileFast(destPath string, content []byte, perm os.FileMode) error {
+	return writeTempReplace(destPath, content, perm, false)
+}
+
+func writeTempReplace(destPath string, content []byte, perm os.FileMode, syncFile bool) error {
 	cleanDest := filepath.Clean(destPath)
 	dir := filepath.Dir(cleanDest)
 
@@ -39,9 +66,11 @@ func AtomicWriteFile(destPath string, content []byte, perm os.FileMode) error {
 		return fmt.Errorf("failed to write temp file for %s: %w", cleanDest, err)
 	}
 
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to sync temp file for %s: %w", cleanDest, err)
+	if syncFile {
+		if err := tmpFile.Sync(); err != nil {
+			_ = tmpFile.Close()
+			return fmt.Errorf("failed to sync temp file for %s: %w", cleanDest, err)
+		}
 	}
 
 	if err := tmpFile.Close(); err != nil {

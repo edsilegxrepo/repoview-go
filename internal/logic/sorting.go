@@ -31,6 +31,8 @@ import (
 	debversion "pault.ag/go/debian/version"
 )
 
+// --- High-Throughput EVR & Version Sorting ---
+
 // SortPackagesByEVR sorts a slice of packages by Epoch, Version, Release (descending)
 // and Arch (ascending), supporting both RPM and Debian package formats.
 // CRITICAL: This sort order is used to determine which package version is the "latest"
@@ -117,6 +119,8 @@ func SortPackagesByEVR(pkgs []*models.Package) {
 		pkgs[i] = e.pkg
 	}
 }
+
+// --- Format-Specific Version Comparators ---
 
 // CompareVersions evaluates version precedence according to the package format.
 // For Debian packages (FormatDEB), it delegates to pault.ag/go/debian/version.

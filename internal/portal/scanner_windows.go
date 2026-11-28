@@ -2,6 +2,9 @@
 
 package portal
 
+// OBJECTIVES: Extract Windows (VolumeSerialNumber, FileIndex) identifiers via Win32
+// GetFileInformationByHandle for junction and directory symlink cycle detection.
+
 import (
 	"os"
 	"syscall"

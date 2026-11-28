@@ -1,6 +1,22 @@
 package models
 
+// OBJECTIVES:
+// Provide canonical sentinel errors shared across internal packages so CLI
+// entrypoints can classify domain failures into deterministic exit codes.
+//
+// CORE COMPONENTS:
+//   - ErrUsage, ErrRepoMetadata, ErrTemplate, ErrIO, ErrConfig, ErrSafety, ErrIntegrity
+//
+// FUNCTIONALITY:
+//   - Wrapped with fmt.Errorf("%w: ...", Err...) at error sites and inspected via
+//     errors.Is in cmd/repoview to distinguish user syntax, I/O, safety, and security faults.
+//
+// DATA FLOW:
+//   internal/* (%w sentinel) -> app / portal -> cmd/repoview exitCodeForError() -> OS exit code
+
 import "errors"
+
+// --- Sentinel Process Exit Categories ---
 
 // Domain sentinel errors shared across repoview packages so the CLI can map
 // failures to deterministic process exit codes using errors.Is / errors.As.

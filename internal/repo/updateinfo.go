@@ -1,5 +1,20 @@
 package repo
 
+// OBJECTIVES:
+// Parse YUM/DNF updateinfo.xml security, bugfix, and enhancement errata records
+// and attach CVE advisories onto matching repository packages.
+//
+// CORE COMPONENTS:
+//   - UpdateInfoRecord: Pairs a models.Advisory with the NVRA tuple keys it affects.
+//   - ParseUpdateInfo: Size-bounded XML decoder extracting advisory metadata and unique CVEs.
+//   - AttachAdvisories: Indexes packages by null-delimited NVRA keys and attaches errata once per package.
+//
+// FUNCTIONALITY:
+//   - Surfacing CVE identifiers and severity badges on package pages and in search indices.
+//
+// DATA FLOW:
+//   updateinfo.xml (uncompressed) -> ParseUpdateInfo -> AttachAdvisories -> Package.Advisories
+
 import (
 	"encoding/xml"
 	"fmt"

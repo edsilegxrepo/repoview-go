@@ -1,5 +1,13 @@
 package deb
 
+// OBJECTIVES:
+// Validate DebRepository ingestion, Release SHA-256 verification, symlink containment guards,
+// multi-component deduplication, and single-pass EnrichForRender execution.
+//
+// TEST STRATEGY:
+// Uses synthetic Deb822 Packages indexes, signed/unsigned Release manifests, and in-memory
+// .deb/.ddeb fixtures inside t.TempDir() to assert both normal flows and integrity rejections.
+
 import (
 	"compress/gzip"
 	"crypto/sha256"
@@ -327,5 +335,44 @@ func TestDebRepository_ReleaseSHA256Verification(t *testing.T) {
 	_ = os.WriteFile(pkgPath, []byte(samplePackagesContent+"\n# tampered\n"), 0o644)
 	if _, err := repoReader.GetAllPackages(); !errors.Is(err, models.ErrIntegrity) {
 		t.Errorf("expected ErrIntegrity on tampered Packages file, got: %v", err)
+	}
+}
+
+func TestDebRepository_EnrichForRender_SinglePass(t *testing.T) {
+	tmpDir := t.TempDir()
+	debRel := "pool/main/n/nginx/nginx_1.24.0-2_amd64.deb"
+	debFull := filepath.Join(tmpDir, filepath.FromSlash(debRel))
+	if err := os.MkdirAll(filepath.Dir(debFull), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := buildTarGz(map[string][]byte{
+		"./control":   []byte("Package: nginx\nVersion: 1.24.0-2\nArchitecture: amd64\n"),
+		"./postinst":  []byte("#!/bin/sh\necho hi\n"),
+		"./conffiles": []byte("/etc/nginx/nginx.conf\n"),
+	})
+	data := buildTarGz(map[string][]byte{
+		"./etc/nginx/nginx.conf":          []byte("worker_processes 1;\n"),
+		"./usr/share/doc/nginx/copyright": []byte("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nLicense: BSD-2-clause\n"),
+	})
+	if err := os.WriteFile(debFull, buildDebArchive(ctrl, data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repoReader := NewDebRepository(&DebRepoLocations{BaseDir: tmpDir}, nil)
+	pkg := &models.Package{Name: "nginx", LocationHref: debRel}
+	if err := repoReader.EnrichForRender(tmpDir, pkg); err != nil {
+		t.Fatalf("EnrichForRender failed: %v", err)
+	}
+	if pkg.Details == nil || pkg.Details.Scriptlets == nil || len(pkg.Details.Files) != 2 {
+		t.Fatalf("expected details, scriptlets, and 2 files from single-pass EnrichForRender, got %+v", pkg.Details)
+	}
+	if pkg.License != "BSD-2-clause" || pkg.TimeBuild <= 0 {
+		t.Errorf("expected DEP-5 License BSD-2-clause and TimeBuild > 0, got license=%q time=%d", pkg.License, pkg.TimeBuild)
+	}
+	// Fallback branch when Details already populated without Files
+	pkg.Details.Files = nil
+	if err := repoReader.EnrichForRender(tmpDir, pkg); err != nil || len(pkg.Details.Files) != 2 {
+		t.Errorf("expected EnrichForRender fallback to repopulate 2 files, got len=%d err=%v", len(pkg.Details.Files), err)
 	}
 }

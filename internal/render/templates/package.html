@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+{{/*
+  OBJECTIVE: Rich package inspection detail page rendering quick-install tabs, metadata cards,
+  GPG signature verification modal, CVE advisories, dependency vector tabs, maintainer scriptlets,
+  file manifest tree, version/changelog history, and .rpm/.deb/.ddeb archive download links.
+  SECTIONS: Hero & Install Bar | Metadata Grid | Advisories | Description | Dependencies | Files & History.
+  DATA FLOW: render.PageData (.Pkg, .Pkg.Details, .Pkg.Dependencies, .Pkg.AllVersions) -> <pkg>.html.
+*/}}
 <html lang="en" data-theme="dark">
 {{ template "_head.html" . }}
 <body>

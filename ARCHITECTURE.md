@@ -17,10 +17,10 @@ Architectural specification, technical design choices, concurrency patterns, sec
 2. [Data Flow and Control Logic](#2-data-flow-and-control-logic)
    - [End-to-End Operational Flow](#end-to-end-operational-flow)
    - [Code Relations and Package Interaction](#code-relations-and-package-interaction)
-   - [System Sequence Diagram](#system-sequence-diagram)
+   - [System Sequence Diagrams](#system-sequence-diagrams)
 3. [Performance and Scalability](#3-performance-and-scalability)
-   - [Concurrency Model & Goroutine Worker Pool](#concurrency-model--goroutine-worker-pool)
-   - [Channel Structures & Synchronization Primitives](#channel-structures--synchronization-primitives)
+   - [Concurrency Model & Lock-Free Worker Pool](#concurrency-model--lock-free-worker-pool)
+   - [Synchronization & Allocation Primitives](#synchronization--allocation-primitives)
    - [Memory Footprint & Heap Allocation Optimization](#memory-footprint--heap-allocation-optimization)
    - [SQLite Connection Pooling & Prepared Statement Caching](#sqlite-connection-pooling--prepared-statement-caching)
 4. [Dependencies](#4-dependencies)
@@ -65,15 +65,15 @@ flowchart TB
     end
 
     subgraph CoreEngine["Single Repository Engine (internal/app)"]
-        GEN["Generator (generator.go)\n• Orchestration Pipeline\n• Format Auto-Detection\n• Parent Portal Discovery\n• Descriptor Writer (repoview.json)\n• Stale Cleanup"]
+        GEN["Generator (generator.go, repoconfig.go)\n• Orchestration Pipeline & repoview.yaml\n• Format Auto-Detection & --dump-config\n• Parent Portal Discovery\n• Descriptor Writer (repoview.json)\n• Stale Cleanup"]
         SAFETY["Safety Validator\n• Root Guard\n• Self-Destruct Guard"]
     end
 
     subgraph PortalEngine["Multi-Repository Portal Engine (internal/portal)"]
-        SCANNER["Scanner (scanner.go, scanner_posix.go)\n• Topology Agnostic Crawler\n• Branch Pruning (pool/, SRPMS/)\n• (dev, ino) Inode Cycle Guard\n• Debian Suite Aggregation"]
-        TAXONOMY["Taxonomy Engine (taxonomy.go)\n• Distro & Channel Inference\n• Multi-Arch Detection\n• Distro SVG Icon Matching"]
-        PORTAL_CFG["Config Parser (config.go)\n• portal.yaml Parser & Climber\n• --dump-config Bootstrapper"]
-        PORTAL_RENDER["Portal Renderer (renderer.go)\n• Responsive Glassmorphic HTML\n• Deep-Linkable JS State\n• Aggregated Feed (portal-feed.xml)"]
+        SCANNER["Scanner (scanner.go, scanner_posix.go, scanner_windows.go)\n• Topology Agnostic Crawler & Branch Pruning\n• APT .ddeb Debug Tree Support\n• Cross-Platform File ID Cycle Guard\n• Debian Suite Aggregation"]
+        TAXONOMY["Taxonomy Engine (internal/taxonomy)\n• Distro & Channel Inference\n• Multi-Arch & Custom Path Rules\n• Distro SVG Icon Matching"]
+        PORTAL_CFG["Config Parser (config.go)\n• portal.yaml Parser & Climber\n• pinned: true & Safe --force Merge"]
+        PORTAL_RENDER["Portal Renderer (renderer.go)\n• Responsive Glassmorphic HTML\n• Cross-Repo Index (portal-search.json)\n• Aggregated Feed (portal-feed.xml)"]
     end
 
     subgraph Ingestion["Repository Access Layer (internal/repo)"]
@@ -118,9 +118,10 @@ flowchart TB
         STATIC_FILES["Static CSS / JS / Favicon"]
     end
 
-    subgraph PortalOutput["Generated Catalog Portal (rootDir)"]
+    subgraph PortalOutput["Generated Catalog Portal (portalHome / rootDir)"]
         PORTAL_HTML["index.html (Unified Portal Catalog)"]
         PORTAL_FEED["portal-feed.xml (Aggregated RSS 2.0)"]
+        PORTAL_SEARCH["portal-search.json (Cross-Repo Index)"]
     end
 
     REPOMD & PRIMARY_DB & OTHER_DB & COMPS & RPMS --> RPM_INGEST
@@ -145,27 +146,29 @@ flowchart TB
 The application follows a clean, modular architecture separating concerns between data access, domain business logic, state caching, multi-repository cataloging, and presentation:
 
 - **`cmd/repoview`**: Entry point and CLI frontend. Handles long-only argument parsing, flag accumulation, directory validation, subcommand routing (`repoview [repo]` vs. `repoview portal [root]`), and exit code mapping before invoking the orchestration layer.
-- **`internal/app`**: Single repository core orchestration layer. The `Generator` struct manages the end-to-end workflow: repository safety validation, metadata loading, package filtering, group tree organization, sibling discovery, parent portal auto-discovery (`findParentPortal`), parallel rendering scheduling, self-describing metadata generation (`repoview.json`), and stale file cleanup.
+- **`internal/app`**: Single repository core orchestration layer. `generator.go` orchestrates safety validation, fingerprint short-circuiting, metadata loading, filtering, grouping, sibling discovery, parent portal auto-discovery (`findParentPortal`), lock-free parallel rendering, `repoview.json` emission, and stale cleanup; `repoconfig.go` handles `repoview.yaml` loading and `--dump-config` starter generation/merge.
 - **`internal/portal`**: Multi-Repository Auto-Discovery, Taxonomy Classification & Unified Catalog Portal Engine.
-  - **`scanner.go` / `scanner_posix.go`**: High-speed recursive directory crawler traversing deep hierarchies (`<distro>/<channel>/<arch>`), flat slugs, and raw repositories. Enforces branch pruning (`pool/`, `SRPMS/`, `debug/`), POSIX kernel `(dev, ino)` inode/device cycle protection, self-describing metadata detection (`repoview.json`), fallback metadata sniffing (`search.json`, `Release`), and Debian multi-component suite aggregation (`AggregateDebianSuites`, Option A).
-  - **`taxonomy.go`**: Multi-architecture detection (`DetectPrimaryArch`, `DetectArchFromPath`), two-level `<distro>/<channel>` hierarchy classification, Debian section mapping, and distro icon matching (`MatchDistroIcon`).
-  - **`config.go`**: YAML configuration handling for `portal.yaml`, parent directory config discovery climbing, and `--dump-config` generation.
-  - **`renderer.go`**: Static HTML portal rendering (`portal.html`), deep-linkable URL search/filter synchronization, and parallel multi-repo RSS feed aggregation (`portal-feed.xml`, Option C).
+  - **`scanner.go` / `scanner_posix.go` / `scanner_windows.go`**: High-speed recursive directory crawler traversing deep hierarchies (`<distro>/<channel>/<arch>`), flat slugs, standalone root repos (`RelPath == "."`), and APT `dists/<suite>/<comp>/debug/binary-<arch>` debug trees (`max_depth` default `7`). Enforces context-aware branch pruning (`pool/`, `SRPMS/`, non-APT `debug/`), cross-platform file-ID cycle protection (POSIX `(dev, ino)` and Win32 volume serial + file index), self-describing metadata detection (`repoview.json`), `.deb`/`.ddeb`/`.rpm` sniffing, and Debian suite aggregation (`AggregateDebianSuites`, isolating `<comp>/debug` cards).
+  - **`taxonomy.go`**: Package-local wrappers delegating architecture, distro/channel, slug tokenization, and branding icon matching to `internal/taxonomy`.
+  - **`config.go`**: YAML configuration handling for `portal.yaml`, parent directory config discovery climbing, `pinned: true` overrides, and safe non-clobber/merge `--dump-config` generation (`DumpConfigWithOptions`).
+  - **`renderer.go`**: Static HTML portal rendering (`portal.html`), deep-linkable URL search/filter synchronization, cross-repo `portal-search.json` generation (`RenderPortalSearchIndex`), and parallel multi-repo RSS feed aggregation (`portal-feed.xml`, Option C).
   - **`types.go`**: Catalog data models and package manager setup snippet builders (`BuildConfigSnippet`).
-- **`internal/repo`**: Data Access Layer (DAL). Unifies package repository access through the `RepoReader` interface:
-  - **`reader.go`**: Defines the format-agnostic `RepoReader` abstraction (`GetAllPackages`, `EnrichPackagesWithDetails`, `EnrichPackagesWithChangelogs`, `ReadPackageFiles`, `Close`).
-  - **RPM Access (`sqlite.go`, `repomd.go`, `rpm_reader.go`)**: Parses `repomd.xml`, decompresses metadata archives, queries `primary.sqlite`/`other.sqlite` with connection pooling and chunked changelog queries, and inspects `.rpm` headers.
-  - **Debian Access (`internal/repo/deb`)**: Discovers `dists/<suite>/<component>/binary-<arch>` layouts and flat trees, streams RFC 822 `Packages` indexes via `pault.ag/go/debian`, extracts maintainer scripts from `control.tar`, extracts file manifests from `data.tar`, parses `changelog.Debian.gz`, and extracts package build timestamps directly from `ar` member headers.
+- **`internal/taxonomy`**: Shared classification ruleset (`taxonomy.go`) for hardware architectures (`DetectPrimaryArch`, `DetectArchFromPath`), custom regex/glob `PathPatternRule` rules, distro/channel heuristics, and branding icons (`MatchDistroIconWithRules`).
+- **`internal/repo`**: Data Access Layer (DAL). Unifies package repository access through the `RepoReader` interface and factory entrypoint:
+  - **`reader.go` & `open.go`**: Defines `RepoReader` plus optional enricher contracts (`ChangelogEnricher`, `DependencyEnricher`, `PackageRenderEnricher`, `AdvisoryEnricher`) and auto-detecting factory `OpenWithOptions`.
+  - **RPM Access (`sqlite.go`, `repomd.go`, `rpm_reader.go`, `rpm_xml.go`, `updateinfo.go`, `comps.go`, `decompress.go`)**: Parses `repomd.xml` (with checksum/size verification), decompresses metadata archives, queries `primary.sqlite`/`other.sqlite` with connection pooling and 500-key batched dependency/changelog queries, falls back cleanly to pure-XML (`primary.xml`/`other.xml`), attaches `updateinfo.xml` CVE errata, and inspects `.rpm` headers in a single pass.
+  - **Debian Access (`internal/repo/deb`)**: Discovers `dists/<suite>/<component>/binary-<arch>` layouts, `.ddeb` debug trees, and flat repos (`discovery.go`), verifies `Release`/`InRelease` SHA-256 digests (`release.go`), streams Deb822 `Packages` indexes (`repository.go`), extracts maintainer scripts/conffiles/files/licenses from `control.tar` and `data.tar` (`details.go`), parses `changelog.Debian.gz` (`changelog.go`), and extracts `ar` member timestamps.
 - **`internal/logic`**: Domain and Business Logic Layer. Contains:
   - **Grouping**: Organizes packages by Comps categories/groups, RPM header groups with heuristic inference, Debian section taxonomies (`admin`, `devel`, `net`, `web`, etc.), and alphabetical letter buckets.
   - **Sorting**: Implements dual EVR comparison semantics—RPM EVR via `go-rpm-version` and Debian EVR via `pault.ag/go/debian/version`.
   - **Filtering**: Applies glob-based package name/NVRA matching and hardware architecture exclusions (`--ignore-package`, `--exclude-arch`).
-- **`internal/render`**: Presentation Layer. Renders HTML5 pages, RSS 2.0 feeds, search indices, and client configuration snippets (`.repo` for YUM/DNF and Deb822 `.sources` for APT) using Go's standard `html/template`. Layout templates and static assets (CSS, Vanilla JS) are compiled into the binary via `embed.FS`.
-- **`internal/state`**: State and Cache Management. Maintains an incremental state store (`.state.json`) with SHA-256 content hashing to avoid redundant disk writes, detect modified pages, and identify stale/orphaned files for pruning.
-- **`internal/models`**: Generalized, format-agnostic domain data structures representing repository metadata, packages (`Package`, `PackageDetails`, `PackageFile`, `PackageScriptlets`, `SourcePackage`), dependencies, comps definitions, search index documents, and self-describing repository metadata descriptors (`RepoDescriptor` in `repoview.json`).
-- **`internal/util`**: Low-level formatting, temporal conversions (RFC 822 / RFC 1123), binary byte size calculations (KiB, MiB, GiB, TiB), and secure filename sanitization routines.
+- **`internal/render`**: Presentation Layer. `renderer.go` renders HTML5 pages, RSS 2.0 feeds, search indices, and `.repo` / Deb822 `.sources` snippets from `embed.FS` templates; `sink.go` abstracts output persistence via `OutputSink` / `FastOutputSink` and path-contained `AtomicLocalSink`.
+- **`internal/state`**: State and Cache Management. Maintains an incremental state store (`state.json`, or `<sha256>.state.json` under `--state-dir`) with SHA-256 content hashing and metadata fingerprinting to avoid redundant disk writes, detect modified pages, and identify stale/orphaned files for pruning.
+- **`internal/models`**: Generalized, format-agnostic domain data structures representing repository metadata, packages (`Package`, `PackageDetails`, `PackageFile`, `PackageScriptlets`, `Advisory`), dependencies, comps definitions, search index documents, sentinel errors (`errors.go`), Deb822 adapters (`adapter_deb.go`), and `RepoDescriptor` (`repoview.json`).
+- **`internal/util`**: Cross-platform atomic file writes (`atomic.go`), bounded lock-free work-stealing (`concurrent.go`), size-capped multi-format decompression (`decompress.go`), symlink-safe containment checks (`path.go`), POSIX/Windows permission & umask helpers (`perm*.go`, `umask*.go`), formatting (`format.go`), and filename/shell/line sanitization (`sanitize.go`).
 
-- **Persistent Bounded Worker Pool**: Parallel operations (package page rendering in `internal/app`, parallel repo rendering in `cmd/repoview`, and RSS feed aggregation in `internal/portal`) employ persistent worker pools draining closed buffered job channels with thread-local slice accumulation. Mutex acquisition occurs once per worker on termination, reducing lock contention from $O(N)$ to $O(W)$.
+- **Lock-Free Worker Stealing & Render Pooling**: Parallel package rendering (`internal/app`) and portal operations use `util.ForEachWorkers` (atomic `atomic.Int64` work stealing), reusable `*bytes.Buffer` pools (`pkgBufPool`), lock-free `rawGenerated[idx]` result slots, and per-worker `StateStore.MarkWrittenBatch`.
+- **Single-Pass Archive Inspection & Non-Fsynced Derived Writes**: `PackageRenderEnricher` opens each `latest` (`.rpm`/`.deb`/`.ddeb`) archive at most once for scriptlets, files, and changelogs, while `FastOutputSink.WriteFileFast` skips redundant per-file `fsync()` on replaceable `.html` pages (opt-in via `--fsync`) and reserves strict `fsync` for `state.json`, `index.html`, `repoview.json`, feeds, and search indices.
 - **Self-Describing Repository Descriptors**: Every single-repository generation pass writes an atomic `repoview.json` descriptor containing format, package counts, architecture, distros, and relative links, turning leaf directories into zero-overhead nodes for catalog crawlers.
 - **Topology-Agnostic Inode Cycle Protection**: Directory scanning in `internal/portal` tracks POSIX `(dev, ino)` tuples across recursive walks to gracefully handle complex nested symlinks and distributed storage mounts without duplicate scans or infinite cycles.
 - **Dependency Injection & Struct-Based Configuration**: Components (`Generator`, `RepositoryAccess`, `Renderer`, `StateStore`, `PortalScanner`, `PortalRenderer`) receive explicit configuration structs, eliminating global state and enabling in-process testing without global side effects.
@@ -204,20 +207,20 @@ The application follows a clean, modular architecture separating concerns betwee
 | **Directory Safety** | User passes `--output-dir .` or `--output-dir /` | `validateOutputDirSafety()` aborts before execution if output directory matches repo directory, is an ancestor/parent, is the filesystem root (`/`), or contains existing `repodata/`. |
 | **Portal Overwrite Guard** | `repoview portal` pointed at existing directory with foreign `index.html` | Portal generator inspects existing `index.html` for RepoView marker signatures. Aborts execution if non-RepoView file is present unless `--force` is toggled. |
 | **Symlink Cycles & Storage Loops** | Circular directory links or complex distributed storage mounts | `scanner_posix.go` records kernel `(dev, ino)` device and inode IDs. Skips already visited inodes to eliminate infinite loops and deduplicate multiple symlinks to identical storage paths. |
-| **Branch Noise Pruning** | Large raw storage trees containing `pool/`, `SRPMS/`, `debug/`, or `.git` | `Scanner.shouldPrune()` intercepts traversal at branch roots, immediately skipping multi-gigabyte payload subtrees that cannot be repository roots. |
+| **Branch Noise Pruning** | Large raw storage trees containing `pool/`, `SRPMS/`, `debug/`, or `.git` | `Scanner.isDirExcluded()` prunes multi-gigabyte payload subtrees (`pool/`, `SRPMS/`, `.git`) and unrelated `debug/` directories while sparing APT debug trees inside `dists/<suite>/<comp>/debug/`. |
 | **Debian Multi-Component** | Multi-suite or multi-component Debian repositories | `DebRepository` discovers all components in `dists/<suite>`, aggregates package indices, and prioritizes concrete architectures over `all`. In the portal, `AggregateDebianSuites` merges multiple component subtrees into a single logical repository card. |
 | **Path Traversal** | Malicious `repomd.xml` contains `<location href="../../etc/passwd"/>` | `ParseRepomd()` cleans all relative paths and enforces strict directory prefix matching against the repo base. |
-| **Metadata Corruption** | Truncated `.state.json` or unreadable SQLite database | `StateStore` catches JSON parsing errors and automatically falls back to an empty cache state; SQLite queries emit structured domain errors and cleanly rollback. |
+| **Metadata Corruption** | Truncated `state.json` or unreadable SQLite database | `StateStore` catches JSON parsing errors and automatically falls back to an empty cache state; SQLite queries emit structured domain errors and cleanly rollback. |
 | **Compression Formats** | Compressed repodata in Gzip, Zstd, XZ, or Bzip2 | Dynamic header magic sniffing detects algorithm regardless of file extension; stream decompression handles truncated archives gracefully. |
 | **Missing Groups / Comps** | Repository lacks group categorization file | `GroupingService` implements format-specific fallbacks: (1) Comps XML or Debian Section taxonomies, (2) Heuristic package name inference, (3) Alphabetical initial letter grouping. |
-| **EVR Comparisons** | Tildes (`~`), Carets (`^`), and missing Epochs | `CompareEVR()` complies with package specifications: RPM EVR via `go-rpm-version` and Debian EVR via `pault.ag/go/debian/version`. Missing epochs default to 0 without allocation. |
+| **EVR Comparisons** | Tildes (`~`), Carets (`^`), and missing Epochs | `CompareVersions()` / `CompareEVR()` comply with package specifications: RPM EVR via `go-rpm-version` and Debian EVR via `pault.ag/go/debian/version`. Missing epochs default to 0 without allocation. |
 | **Debian Build Dates** | Deb822 lacks explicit build timestamp headers | Extracted directly from the numeric modification timestamp inside the outer `ar` archive container header. |
 | **Stale Artifacts** | Packages removed from upstream repository | `Generator.cleanupStale()` cross-references previous state store entries with the current execution and unlinks orphaned HTML/JSON files. |
 
 ### Performance & Efficiency Engineering
 
-- **Batch Changelog Processing**: Instead of issuing individual SQLite SELECT queries per package, `enrichBatch()` constructs dynamic parameter blocks querying 500 packages at a time, cutting query overhead by orders of magnitude.
-- **Persistent Worker Pool Concurrency**: Package page rendering executes across a fixed pool of persistent goroutines sized dynamically to `runtime.NumCPU() * 2`. Job distribution occurs via closed buffered channels, and lock acquisition is batched per-worker.
+- **Batch Database Processing**: Instead of issuing individual SQLite SELECT queries per package, `EnrichPackagesWithChangelogs` and `EnrichPackagesWithDependencies` query changelogs and all 8 dependency tables using `WHERE pkgKey IN (...)` batches of 500 packages.
+- **Lock-Free Work Stealing & Pooled Render Buffers**: Package page rendering distributes work via `util.ForEachWorkers` (`atomic.Int64` cursor), formats pages into pooled `*bytes.Buffer` instances (`pkgBufPool`), writes derived `.html` pages via `AtomicWriteFileFast` (`--fsync` opt-in), and batches `StateStore` commits per worker with compact `state.json` encoding.
 - **Parallel Multi-Repository Ingestion**: Portal generation supports concurrent `--render-missing` repository rendering and parallel multi-repo RSS feed aggregation across all detected child repositories.
 - **Allocation-Free Hot Paths**: First-letter extraction, EVR epoch parsing, and relation formatting are optimized to minimize string allocations on the Go garbage collector.
 
@@ -229,28 +232,28 @@ The application follows a clean, modular architecture separating concerns betwee
 
 ```text
 [1. CLI Entrypoint]
-  │   Parse long-only flags (--format auto|rpm|deb), validate paths, map exit codes.
+  │   Parse long-only flags (--format auto|rpm|deb), load repoview.yaml / portal.yaml, map exit codes 0-8.
   ▼
-[2. Safety Guard Validation & Format Resolution]
-  │   Confirm outputDir safety; detect format (repodata/ vs dists/ or Packages).
+[2. Safety Guard Validation, Fingerprinting & Format Resolution]
+  │   Confirm outputDir safety; short-circuit unchanged repos; detect format (repodata/ vs dists/ or Packages*).
   ▼
 [3. Metadata Ingestion via RepoReader]
-  │   RPM: Parse repomd.xml -> Decompress primary & other sqlite -> Batch enrich changelogs.
-  │   DEB: Discover suite/component -> Stream Deb822 Packages -> Parse changelogs & ar dates.
+  │   RPM: Parse repomd.xml -> Decompress primary/other sqlite (or XML fallback) -> Batch changelogs/deps + updateinfo.
+  │   DEB: Discover suite/component/debug(.ddeb) -> Verify Release SHA-256 -> Stream Deb822 Packages + ar dates.
   ▼
 [4. Categorization & Hierarchy Logic]
   │   RPM: Parse comps.xml / infer RPM groups -> Alphabetical indexing.
-  │   DEB: Map Debian sections (admin, devel, net, web, etc.) -> Alphabetical indexing.
+  │   DEB: Map Debian sections (admin, devel, net, web, debug, etc.) -> Alphabetical indexing.
   ▼
-[5. Parallel Page Rendering (Persistent Worker Pool)]
-  │   Fixed workers (NumCPU * 2) drain jobs chan -> Render HTML -> HasChanged() -> Write.
+[5. Lock-Free Parallel Page Rendering (util.ForEachWorkers)]
+  │   Workers (clamped 1-16) pull indices atomically -> Single-pass EnrichForRender -> CheckChanged -> AtomicWriteFileFast -> MarkWrittenBatch.
   ▼
 [6. Static Asset, Feed & Index Generation]
   │   Render index.html, *.group.html, search.json, latest-feed.xml (universal RSS).
   │   Write self-describing descriptor repoview.json & generate client configuration (.repo / .sources).
   ▼
 [7. Stale File Pruning & State Persistence]
-      Identify unreferenced previous files -> os.Remove() -> Atomically save .state.json.
+      Identify unreferenced previous files -> RemoveFile() -> Atomically save state.json.
 ```
 
 ### Code Relations and Package Interaction
@@ -276,11 +279,18 @@ graph TD
 
     subgraph REPO["internal/repo"]
         READER["RepoReader Interface"]
-        SQLITE["RepositoryAccess (RPM)"]
-        DEB_REPO["DebRepository (Debian)"]
+        OPEN["OpenWithOptions (open.go)"]
+        SQLITE["RepositoryAccess (RPM SQLite)"]
+        XML_REPO["XMLRepository (RPM XML Fallback)"]
+        UPDATEINFO["ParseUpdateInfo (updateinfo.go)"]
+        DEB_REPO["DebRepository (Debian / DDEB)"]
         DECOMP["DecompressFile"]
         RPM["EnrichPackagesWithRPMDetails"]
         DEB_DET["ReadDebDetails"]
+    end
+
+    subgraph TAXONOMY["internal/taxonomy"]
+        TAX_RULES["Arch, Distro & PathPatternRule"]
     end
 
     subgraph LOGIC["internal/logic"]
@@ -294,7 +304,7 @@ graph TD
         ADAPTER_DEB["adapter_deb.go"]
         REPOMD_M["Repomd"]
         COMPS_M["Comps"]
-        SEARCH_M["SearchDoc"]
+        SEARCH_M["SearchIndex (search.go)"]
         REPODESC["RepoDescriptor (repoview.json)"]
     end
 
@@ -309,26 +319,32 @@ graph TD
     subgraph UTIL["internal/util"]
         FMT["HumanSize / RSSTime"]
         SAN["SanitizeFilename"]
+        CONC["ForEachWorkers / AtomicWriteFileFast"]
     end
 
     MAIN --> APP
     MAIN --> PORTAL
     GEN --> SAFETY
-    GEN --> READER
+    GEN --> OPEN
+    OPEN --> READER
     GEN --> DESC
     DESC --> MODELS
     DESC --> PORTAL
     READER --> SQLITE
+    READER --> XML_REPO
     READER --> DEB_REPO
     GEN --> LOGIC
+    GEN --> TAXONOMY
     GEN --> STATE
     GEN --> RENDER
     GEN --> UTIL
 
     PORTAL --> MODELS
+    PORTAL --> TAXONOMY
     PORTAL --> UTIL
     PORTAL --> APP
 
+    TAXONOMY --> MODELS
     REPO --> MODELS
     REPO --> UTIL
     LOGIC --> MODELS
@@ -359,57 +375,58 @@ sequenceDiagram
     
     rect rgb(240, 245, 255)
         note over Gen, Reader: Phase 1: Format Resolution & Ingestion
-        Gen->>Gen: Detect format (RPM or Debian)
+        Gen->>Gen: Detect format (RPM or Debian) & check repo fingerprint
         alt RPM Repository
-            Gen->>Reader: Init RepositoryAccess (repomd + SQLite)
-            Reader->>Reader: Decompress primary.sqlite & other.sqlite
+            Gen->>Reader: Init RepositoryAccess (SQLite) or XMLRepository fallback
+            Reader->>Reader: Decompress primary/other metadata + optional updateinfo
         else Debian Repository
-            Gen->>Reader: Init DebRepository (dists or flat)
-            Reader->>Reader: Parse Deb822 Packages index
+            Gen->>Reader: Init DebRepository (dists, debug, or flat)
+            Reader->>Reader: Verify Release SHA-256 & parse Deb822 Packages
         end
         Gen->>Reader: GetAllPackages()
         Reader-->>Gen: []Package
-        Gen->>Reader: EnrichPackagesWithChangelogs()
-        Gen->>Reader: EnrichPackagesWithDetails()
+        Gen->>Reader: EnrichPackagesWithChangelogs() / EnrichPackagesWithAdvisories()
+        Gen->>Reader: EnrichPackagesWithDependencies() [500-key batches]
     end
 
     rect rgb(245, 255, 240)
         note over Gen, Logic: Phase 2: Domain Organization
         Gen->>Logic: FilterPackages(excludeArch, ignoreList)
-        Gen->>Logic: GroupingService.GetGroups()
+        Gen->>Logic: GroupingService.GetGroups() & AssignCollisionSafePackageFilenames()
         Logic-->>Gen: Comps / Sections / RPM Groups / Letter Groups
         Gen->>Logic: SortPackagesByEVR()
     end
 
     rect rgb(255, 250, 240)
-        note over Gen, Render: Phase 3: Parallel Rendering & State Caching
+        note over Gen, Render: Phase 3: Lock-Free Parallel Rendering & State Caching
         Gen->>State: NewStateStore(state.json)
         Gen->>Gen: findParentPortal() -> auto-detect parent portal URL
         Gen->>Render: NewRenderer(templates, assets, portalURL)
         
-        loop Persistent Worker Pool (NumCPU * 2)
-            Gen->>Reader: ReadPackageFiles(pkg) [On-Demand]
-            Gen->>Render: RenderPackage(pkg, group)
-            Render-->>Gen: HTML Content
-            Gen->>State: HasChanged(filename, content)
+        loop Bounded Lock-Free Worker Pool (util.ForEachWorkers)
+            Gen->>Reader: EnrichForRender(pkg) [Single-pass Details + Files]
+            Gen->>Render: RenderPackageTo(pkg, group, callback) [pkgBufPool]
+            Render-->>Gen: Rendered HTML Slice
+            Gen->>State: CheckChanged(filename, content)
             alt Content Modified or Force Flag
-                Gen->>Disk: WriteToFile(filename, content)
+                Gen->>Disk: WriteToFileFast(filename, content) [--fsync opt-in]
             else Unchanged
                 Gen->>Gen: Skip Write (I/O Saved)
             end
         end
+        Gen->>State: MarkWrittenBatch(pending)
 
         Gen->>Render: RenderIndex(), RenderGroup(), RenderRSS(), RenderSearchIndex()
         Gen->>Disk: Write index.html (with '← All Repositories' backlink), search.json, latest-feed.xml
         Gen->>Disk: Write repoview.json (atomic self-describing descriptor)
-        Gen->>Render: WriteAssets() -> Copy CSS & JS
+        Gen->>Render: WriteAssetsWithState() -> Copy changed CSS & JS
     end
 
     rect rgb(255, 240, 245)
         note over Gen, State: Phase 4: Stale Cleanup & Cache Sync
         Gen->>State: GetStaleFiles(currentGenerated)
         loop Each Stale File
-            Gen->>Disk: os.Remove(staleFile)
+            Gen->>Disk: Sink.RemoveFile(staleFile)
         end
         Gen->>State: Save() -> Atomic Rename state.json.tmp -> state.json
     end
@@ -426,46 +443,45 @@ sequenceDiagram
     actor Admin as Operator / CI Runner
     participant Main as cmd/repoview (main.go)
     participant Scan as internal/portal (Scanner)
-    participant Taxon as internal/portal (Taxonomy)
+    participant Taxon as internal/taxonomy (Rules & Inference)
     participant App as internal/app (Generator)
     participant PRender as internal/portal (Renderer)
-    participant Disk as Filesystem (rootDir)
+    participant Disk as Filesystem (rootDir / portalHome)
 
-    Admin->>Main: repoview portal /srv/repos --render-missing
-    Main->>Main: Load or climb portal.yaml (findPortalConfigIn)
-    Main->>Scan: ScanRepositories(rootDir, opts)
+    Admin->>Main: repoview portal --portal-home /srv/portal /srv/repos --render-missing
+    Main->>Main: Load or climb portal.yaml (FindPortalConfigIn)
+    Main->>Scan: Scanner.Scan() (max_depth=7)
     
     rect rgb(240, 245, 255)
-        note over Scan, Taxon: Phase 1: Fast Directory Crawl & Inode Guards
-        Scan->>Scan: Recursive crawl with prune rules (pool/, debug/, SRPMS/)
-        Scan->>Scan: Check POSIX (dev, ino) to eliminate symlink cycles
+        note over Scan, Taxon: Phase 1: Fast Directory Crawl & File-ID Guards
+        Scan->>Scan: Recursive crawl with isDirExcluded (prunes pool/, SRPMS/, spares dists/.../debug)
+        Scan->>Scan: Check (dev, ino) / Win32 FileID to eliminate symlink cycles
         Scan->>Disk: Sniff repoview.json (Descriptor Fast-Path)
         alt repoview.json exists
             Scan->>Scan: Ingest RepoDescriptor directly (0-overhead)
         else Un-rendered repo (repodata/ or dists/)
-            Scan->>Taxon: InferDistroAndChannel(), DetectPrimaryArch()
+            Scan->>Taxon: InferDistroAndChannelWithRules(), DetectPrimaryArch()
         end
-        Scan->>Scan: AggregateDebianSuites() (merge components into single card)
+        Scan->>Scan: AggregateDebianSuites() (merge components; isolate debug cards)
         Scan-->>Main: []DiscoveredRepo
     end
 
     rect rgb(245, 255, 240)
         note over Main, App: Phase 2: On-Demand Parallel Repo Rendering (--render-missing)
-        opt If --render-missing enabled and un-rendered repos exist
-            loop Parallel Worker Pool (NumCPU)
+        opt If --render-missing or --render-all enabled
+            loop util.ForEachConcurrent (1-16 workers)
                 Main->>App: NewGenerator(cfg).Run()
-                App->>Disk: Render single repository + repoview.json
+                App->>Disk: Render single repository + repoview.json into portalHome
             end
         end
     end
 
     rect rgb(255, 250, 240)
         note over Main, PRender: Phase 3: Catalog Construction & Aggregation
-        Main->>Taxon: BuildCatalog(repos) -> Group by Distro, Channel, Arch
-        Main->>PRender: NewRenderer(catalog)
-        PRender->>Disk: Parallel read child latest-feed.xml feeds (NumCPU workers)
-        PRender->>Disk: Render & atomic write portal-feed.xml (Unified RSS)
-        PRender->>Disk: Render & atomic write index.html (Portal Catalog)
+        Main->>Taxon: BuildCatalog(repos) & ApplyConfig() -> Overrides, Pinned, Snippets
+        Main->>PRender: NewRenderer() -> WritePortal()
+        PRender->>Disk: Parallel read child latest-feed.xml feeds (util.ForEachConcurrent)
+        PRender->>Disk: Render & atomic write portal-feed.xml, portal-search.json, index.html
     end
 
     Main-->>Admin: Exit Code 0 (Catalog Ready)
@@ -479,100 +495,76 @@ The multi-repository catalog engine is designed to transform deep, distributed p
    During individual repository generation, `internal/app/generator.go` writes a lightweight, atomic `repoview.json` descriptor file into the root of the output directory (`models.RepoDescriptor`). It encapsulates format (`rpm` or `deb`), package count, detected distribution, channel, architectures, and relative view URLs. The portal crawler reads this JSON file in sub-millisecond time, bypassing expensive SQLite or Deb822 rescanning.
 
 2. **Branch-Pruning Topology-Agnostic Crawler (`scanner.go`)**:
-   Repository directories in production take numerous forms: deep hierarchies (`<distro>/<channel>/<arch>`), flat single directories, or dispersed symlinked mount points. The scanner walks directory trees recursively, inspecting directories up to `--max-depth` (default 8). It employs strict branch pruning (`shouldPrune`) that skips massive package payload directories such as `pool/`, `SRPMS/`, `debug/`, and `.git`, preventing useless filesystem traversals.
+   Repository directories in production take numerous forms: deep hierarchies (`<distro>/<channel>/<arch>`), flat single directories, or dispersed symlinked mount points. The scanner walks directory trees recursively, inspecting directories up to `--max-depth` (default `7`). It employs context-aware branch pruning (`isDirExcluded`) that skips massive package payload directories (`pool/`, `SRPMS/`, `.git`) and unrelated `debug/` directories while sparing APT `.ddeb` debug trees inside `dists/<suite>/<component>/debug/`.
 
-3. **POSIX Inode Cycle & Symlink Guards (`scanner_posix.go`)**:
-   To support distributed enterprise storage where multiple repositories or architectures are symlinked across separate mount points, the crawler records kernel device and inode tuples `(dev, ino)` for every visited directory. This provides mathematical immunity against circular symlinks and prevents duplicate catalog entries for multi-linked directories.
+3. **POSIX Inode & Win32 File-ID Cycle Guards (`scanner_posix.go`, `scanner_windows.go`)**:
+   To support distributed enterprise storage where multiple repositories or architectures are symlinked across separate mount points, the crawler records platform file identifiers—POSIX `(dev, ino)` or Win32 `(VolumeSerialNumber, FileIndex)`—for every visited directory. This provides mathematical immunity against circular symlinks and prevents duplicate catalog entries for multi-linked directories.
 
 4. **Debian Multi-Component Suite Aggregation (`AggregateDebianSuites`)**:
-   Debian repositories frequently feature multiple components (`main`, `contrib`, `non-free`) and multiple architectures under a single `dists/<suite>` tree. Rather than generating fragmented, disconnected cards for every component, `AggregateDebianSuites` groups sibling component trees into a single logical repository card, displaying all supported architectures and cumulative package counts.
+   Debian repositories frequently feature multiple components (`main`, `contrib`, `non-free`) and multiple architectures under a single `dists/<suite>` tree. Rather than generating fragmented, disconnected cards for every component, `AggregateDebianSuites` groups sibling component trees into a single logical repository card (isolating `<component>/debug` cards), displaying all supported architectures and cumulative package counts.
 
-5. **Heuristic Taxonomy Engine & Icon Mapping (`taxonomy.go`)**:
-   The taxonomy engine automatically infers distribution families (`el8`, `el9`, `el10`, `fedora`, `ubu22`, `ubu24`, `deb11`, `deb12`, `alpine`, `arch`, `suse`, `custom`) and channel classifications (`base`, `custom`, `extras`, `updates`, `security`, `testing`, `stable`) from filesystem path tokens. It matches official SVG distribution branding icons embedded directly in the portal layout.
+5. **Heuristic Taxonomy Engine & Icon Mapping (`internal/taxonomy`)**:
+   The taxonomy engine automatically infers distribution families (`el8`, `el9`, `el10`, `fedora`, `ubu22`, `ubu24`, `deb11`, `deb12`, `alpine`, `arch`, `suse`, `custom`) and channel classifications (`base`, `custom`, `extras`, `updates`, `security`, `testing`, `stable`) from custom `PathPatternRule` patterns or filesystem path tokens, and matches official SVG distribution branding icons.
 
-6. **Hierarchical Configuration Discovery (`config.go`)**:
-   Portal settings can be customized via `portal.yaml`. If the configuration file is not present in the current execution root, `findPortalConfigIn` automatically climbs parent directory hierarchies to locate upstream configurations. The `--dump-config` flag allows operators to bootstrap a fully annotated YAML configuration file populated with all discovered repositories and sensible defaults.
+6. **Hierarchical Configuration Discovery & Safe Merge (`config.go`)**:
+   Portal settings can be customized via `portal.yaml`. If the configuration file is not present in the current execution root, `FindPortalConfigIn` climbs parent directory hierarchies to locate upstream configurations. `--dump-config` emits full metadata and refuses clobbering existing files without `--force`, merging newly discovered repositories safely when `--force` is given.
 
 ---
 
 ## 3. Performance and Scalability
 
-### Concurrency Model & Goroutine Worker Pool
+### Concurrency Model & Lock-Free Worker Pool
 
-The generation bottleneck in large RPM repositories stems from template execution, disk I/O, and on-demand file list decompression. To maximize CPU core saturation without triggering thread contention, memory bloat, or context-switching thrashing, RepoView-Go utilizes a **Persistent Bounded Worker Pool Pattern**:
+The generation bottleneck in large RPM/DEB repositories stems from template execution, disk I/O, and on-demand archive inspection. To saturate CPU cores without channel contention, heap bloat, or mutex serialization, RepoView-Go uses a **Bounded Lock-Free Work-Stealing Pool (`util.ForEachWorkers`)**:
 
 ```go
-// Worker pool bounded to 2x logical CPU cores (never spawns unbounded goroutines)
-numWorkers := runtime.NumCPU() * 2
-if numWorkers < 1 {
-    numWorkers = 1
-}
-if numWorkers > len(uniqueNames) {
-    numWorkers = len(uniqueNames)
-}
-
-// 1. Buffered channel holding all package jobs, closed immediately after enqueueing
-jobs := make(chan string, len(uniqueNames))
-for _, name := range uniqueNames {
-    jobs <- name
-}
-close(jobs)
-
-// 2. Persistent workers draining the shared jobs queue
-var wg sync.WaitGroup
-for w := 0; w < numWorkers; w++ {
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        var localGenerated []string // Thread-local accumulator (Zero lock contention during rendering)
-
-        for pkgName := range jobs {
-            filename, err := g.renderSinglePackage(db, renderer, stateStore, versions, primaryGroup, pkgName)
-            if err != nil {
-                atomic.AddInt64(&errorCount, 1)
-                continue
-            }
-            localGenerated = append(localGenerated, filename)
+// Clamped worker pool (default min(16, max(1, runtime.NumCPU()*2)), bounded to N items)
+util.ForEachWorkers(uniqueNames, g.config.Workers, func(next func() (int, string, bool)) {
+    var pending []state.Entry // Worker-local batch accumulator (Zero mutex contention during render)
+    for {
+        idx, pkgName, ok := next()
+        if !ok {
+            break
         }
-
-        // 3. Batch commit: Acquire lock ONCE per worker at shutdown, reducing mutex overhead from O(N) to O(W)
-        if len(localGenerated) > 0 {
-            mu.Lock()
-            generatedFiles = append(generatedFiles, localGenerated...)
-            mu.Unlock()
+        filename, entry, wrote, err := g.renderSinglePackageWithBatch(db, renderer, stateStore, versions, primaryGroup, pkgName, verbosePkgLog)
+        if err != nil {
+            atomic.AddInt64(&errorCount, 1)
+            continue
         }
-    }()
-}
-wg.Wait()
+        // Pre-allocated index-addressed slice slot (Zero mutex contention)
+        rawGenerated[idx] = filename
+        if wrote {
+            pending = append(pending, entry)
+        }
+    }
+    // Batch commit once per worker at shutdown (reduces mutex locking from O(N) to O(W))
+    stateStore.MarkWrittenBatch(pending)
+})
 ```
 
-### Channel Structures & Synchronization Primitives
+### Synchronization & Allocation Primitives
 
-1. **Closed Buffered Job Queue (`chan string`)**:
-   - Pre-populated with package names and immediately closed before spawning workers.
-   - Workers drain the queue using native `for job := range jobs` loop semantics, providing hardware-efficient lock-free work-stealing across CPU cores.
-2. **Thread-Local Accumulation & Batched Mutex Commit (`sync.Mutex`)**:
-   - Rather than locking a shared mutex on every single package render ($O(N)$ lock operations), each worker accumulates rendered filenames into a thread-local slice.
-   - Mutex acquisition occurs exactly once per worker upon task completion ($O(W)$ operations), virtually eliminating lock contention on 32+ core servers.
-3. **Multi-Repository Concurrent Rendering (`cmd/repoview`)**:
-   - When `repoview portal --render-missing` is executed, missing repositories are scheduled across a dedicated worker pool of size `runtime.NumCPU()`.
-   - Each worker invokes an isolated `app.NewGenerator(cfg).Run()` execution, enabling simultaneous multi-repo generation.
-4. **Parallel RSS Feed Aggregation Fan-In/Fan-Out (`internal/portal`)**:
-   - Portal feed aggregation reads child `latest-feed.xml` files concurrently across a worker pool of size `runtime.NumCPU()`.
-   - Thread-local RSS items are returned through a fan-in results channel (`resChan <- localItems`), merged, sorted by publication date, and truncated to the top 50 global entries.
-5. **Lock-Free Atomic Error Counter (`sync/atomic`)**:
-   - Render failures increment `errorCount` atomically (`atomic.AddInt64(&errorCount, 1)`), avoiding global lock contention across worker threads.
-6. **Read-Write Mutex State Store (`sync.RWMutex`)**:
-   - `StateStore` implements granular read-write locking: `HasChanged()` acquires read locks for hash matching and upgrades to write locks only when registering newly dirty files.
+1. **Atomic Index Work-Stealing (`util.ForEachWorkers`)**:
+   - Replaces per-item channel operations with a shared `atomic.Int64` cursor (`idx := int(nextIdx.Add(1) - 1)`), eliminating channel lock contention across worker goroutines.
+2. **Pre-Allocated Output Slots & Pooled Render Buffers (`pkgBufPool`)**:
+   - Rendered package filenames are written directly into `rawGenerated[idx]` by index without mutex synchronization.
+   - `Renderer.pkgBufPool` (`sync.Pool` of `*bytes.Buffer`, pre-sized to 24 KiB and capped at 512 KiB) recycles HTML rendering buffers across goroutines.
+3. **Batched State Tracking (`StateStore.MarkWrittenBatch`) & Compact `state.json`**:
+   - Workers compute SHA-256 digests outside the state lock (`CheckChanged`) and commit all changed entries once on worker completion using compact non-indented `state.json` marshaling.
+4. **Multi-Repository Concurrent Rendering (`cmd/repoview`)**:
+   - When `repoview portal --render-missing` or `--render-all` is executed, target repositories are dispatched concurrently across `util.ForEachConcurrent` (`1–16` clamped workers), each executing an isolated `app.NewGenerator(cfg).Run()`.
+5. **Parallel RSS Feed Aggregation & Cross-Repo Search (`internal/portal`)**:
+   - `RenderFeed` collects up to 5 latest items per child `latest-feed.xml` concurrently via `util.ForEachConcurrent`, sorts descending by publication date, and caps `portal-feed.xml` at 50 entries.
+   - `RenderPortalSearchIndex` compiles child `search.json` rows into compact columnar `portal-search.json` entries for instant cross-repo package/CVE lookup in `portal.html`.
+6. **Non-Fsynced Derived Writes (`AtomicWriteFileFast`)**:
+   - Replaceable group and package HTML pages use temp-write + rename without per-file `fsync()` by default (`--fsync` opts back in), reserving strict `fsync` (`AtomicWriteFile`) for `state.json`, `index.html`, `repoview.json`, `latest-feed.xml`, `search.json`, `portal-feed.xml`, and `portal-search.json`.
 
 ### Memory Footprint & Heap Allocation Optimization
 
-- **On-Demand File List Loading**:
-  In a 10,000 package repository, loading all files (often 100 to 1,000 files per package) into RAM requires >2 GB of resident heap. RepoView-Go defers file list reading to the specific package worker goroutine, and immediately nulls the pointer after rendering:
+- **Single-Pass On-Demand Archive Inspection (`PackageRenderEnricher`)**:
+  In a 10,000-package repository, keeping all file lists in RAM triggers gigabytes of heap growth. RepoView-Go inspects only the newest version's archive (`latest := versions[0]`) once per package via `EnrichForRender` (extracting scriptlets, files, changelogs, and fallback licenses in one open) and immediately clears `latest.Details.Files` after rendering:
   ```go
-  files, err := repo.ReadRPMFiles(rpmPath)
-  if err == nil {
-      latest.Details.Files = files
+  if latest.Details != nil {
       defer func() {
           if latest.Details != nil {
               latest.Details.Files = nil // Allow Go GC to reclaim memory immediately
@@ -580,13 +572,12 @@ wg.Wait()
       }()
   }
   ```
-- **Prepared Statement Caching**:
-  Dependency lookup statements (`SELECT flags, name, epoch, version, release FROM requires WHERE pkgKey = ?`) are prepared once upon database initialization and reused across all goroutines.
+- **Batched Database Enrichment & Prepared Statement Caching**:
+  `EnrichPackagesWithDependencies` and `EnrichPackagesWithChangelogs` batch `WHERE pkgKey IN (...)` queries across chunks of 500 packages, while single-key prepared statements cover on-demand fallback queries across all 8 RPM dependency tables.
 
 ### SQLite Connection Pooling & Prepared Statement Caching
 
-- SQLite is opened in read-only URI mode (`file:path?mode=ro&cache=shared`).
-- Connection parameters are tuned for batch read performance with busy timeouts to eliminate `SQLITE_BUSY` errors during concurrent accesses.
+- SQLite is opened in read-only URI mode (`mode=ro&cache=shared&_busy_timeout=5000&_query_only=1`) with `query_only=ON`, `trusted_schema=OFF`, memory temp store, and bounded connection pool sizes (`4–16` connections).
 - Prepared statement handles are stored in `RepositoryAccess` and cleanly finalized via `Close()`.
 
 ---
@@ -601,15 +592,15 @@ All external dependencies have been audited for reliability, active maintenance,
 | :--- | :---: | :---: | :--- |
 | **`github.com/mattn/go-sqlite3`** | `v1.14.53` | MIT | CGo SQLite3 driver utilized for low-latency querying of `primary.sqlite` and `other.sqlite`. |
 | **`github.com/klauspost/compress`** | `v1.20.5` | BSD-3-Clause | Highly optimized, multi-threaded Zstandard (`zstd`) and accelerated Gzip decompression engine. |
-| **`github.com/ulikunitz/xz`** | `v0.5.17` | BSD-3-Clause | Pure Go XZ decompression library handling `.xz` compressed SQLite databases. |
+| **`github.com/ulikunitz/xz`** | `v0.5.17` | BSD-3-Clause | Pure Go XZ decompression library handling `.xz` compressed metadata and `.deb` payloads. |
 | **`github.com/knqyf263/go-rpm-version`** | Latest | MIT | Upstream-compliant RPM EVR (Epoch-Version-Release) parsing and comparison engine. |
 | **`github.com/sassoftware/go-rpmutils`** | `v0.4.0` | Apache-2.0 | RPM payload reader for extracting RPM lead, signatures, scriptlets, and file lists directly from `.rpm` files. |
-| **`pault.ag/go/debian`** | `v0.21.4` | MIT | Debian control file, Deb822 index parsing, and Debian EVR version comparison engine. |
+| **`pault.ag/go/debian`** | `v0.21.4` | MIT | Debian control file, Deb822 index parsing, `.deb` inspection, and Debian EVR version comparison engine. |
 | **`go.yaml.in/yaml/v3`** | `v3.0.6` | Apache-2.0 / MIT | YAML configuration parser powering `repoview.yaml`, `portal.yaml` parsing, and `--dump-config`. |
 
 ### Build Tooling & System Dependencies
 
-- **Go SDK**: Version `1.21` or higher (`1.22+` recommended).
+- **Go SDK**: Version `1.26` or higher (`go.mod` specifies `go 1.26.0`).
 - **C Compiler**: `gcc` or `clang` required by CGo for `go-sqlite3`. On Alpine Linux, `musl-dev` is required.
 - **Operating Systems**: Native Linux (CentOS/RHEL, Debian/Ubuntu, Alpine, Fedora), macOS, and Windows (via WSL or MinGW-w64).
 
@@ -695,7 +686,8 @@ RepoView-Go Architecture
 
 During the generation phase, the `repoview` binary treats all input repository files as potentially untrusted:
 
-- **Path Traversal Shield**: `ParseRepomd()` ensures that XML `<location href="...">` paths cannot escape the designated repository root. Traversal payloads such as `../../etc/shadow` are rejected immediately.
+- **Path Traversal Shield**: `util.ResolveContainedPath()` and `ParseRepomd()` ensure symlink targets and XML `<location href="...">` paths cannot escape the designated repository root (rejecting traversal payloads such as `../../etc/shadow`).
+- **SQLite Read-Only & Schema Hardening (`go-sqlite3` CGo)**: RepoView-Go intentionally uses `github.com/mattn/go-sqlite3` (requiring CGo, reflected by `"cgo": true` in `build.json`) for native SQLite C performance over pure-Go alternatives. Untrusted repository SQLite files are opened via escaped `file:` URIs (`mode=ro`, `_query_only=1`), read-only attached `other.sqlite`, and strict pragmas (`PRAGMA query_only = ON`, `PRAGMA trusted_schema = OFF`, read-only `temp_store`/`cache_size`/`mmap_size`).
 - **Filename Sanitization**: `util.SanitizeFilename()` converts arbitrary package identifiers and group names into strictly safe filesystem characters (`[a-zA-Z0-9._-]`), neutralizing directory traversal and null-byte injection (`\x00`).
 - **Destructive Deletion Barrier**: `validateOutputDirSafety()` validates that the destination directory is not identical to the repo directory, parent tree, or root partition, preventing accidental data loss when `--force` is toggled.
 

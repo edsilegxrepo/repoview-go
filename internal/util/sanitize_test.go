@@ -24,6 +24,7 @@ func TestSanitizeFilename(t *testing.T) {
 		{"path\\with\\backslashes", "path.with.backslashes"},
 		{"name with spaces", "name_with_spaces"},
 		{"colon:asterisk*question?quote\"lt<gt>pipe|", "colon_asterisk_question_quote_lt_gt_pipe_"},
+		{"pkg;id#frag", "pkg;id_frag"},
 		{"..leading.and.trailing..", "leading.and.trailing"},
 		{"CON", "_CON_"},
 		{"aux", "_aux_"},

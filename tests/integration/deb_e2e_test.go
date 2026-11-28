@@ -2,10 +2,16 @@
 
 package integration
 
+// OBJECTIVES:
+// Execute end-to-end Debian (.deb) and debug symbol (.ddeb) integration workflows across
+// pure-Go Matrix B/C specs as well as optional real APT mirror smoke tests.
+//
+// TEST STRATEGY:
+// Synthesizes authentic Deb822 Packages (.gz/.bz2/.zst), clearsigned InRelease, .deb/.ddeb
+// ar payloads (.tar.gz/.xz/.zst), and dists/.../debug trees in t.TempDir(), compiles/runs
+// repoview subprocesses, crawls output over ephemeral HTTP servers, and verifies SHA-256 downloads.
+
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -14,7 +20,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -26,172 +31,46 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
 
-// Helper to build an in-memory tar.gz for control.tar.gz or data.tar.gz
-func makeTarGz(files map[string][]byte) []byte {
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
-
-	for name, content := range files {
-		hdr := &tar.Header{
-			Name:    name,
-			Mode:    0o755,
-			Size:    int64(len(content)),
-			ModTime: time.Now(),
-			Uname:   "root",
-			Gname:   "root",
-		}
-		_ = tw.WriteHeader(hdr)
-		_, _ = tw.Write(content)
-	}
-
-	_ = tw.Close()
-	_ = gw.Close()
-	return buf.Bytes()
-}
-
-// Helper to build an in-memory .deb file (standard Unix ar archive)
-func makeDebArchive(controlTarGz, dataTarGz []byte) []byte {
-	var buf bytes.Buffer
-	buf.WriteString("!<arch>\n")
-
-	writeArMember := func(name string, data []byte) {
-		hdr := fmt.Sprintf("%-16s%-12d%-6d%-6d%-8o%-10d`\n",
-			name, time.Now().Unix(), 0, 0, 0o644, len(data))
-		buf.WriteString(hdr)
-		buf.Write(data)
-		if len(data)%2 != 0 {
-			buf.WriteByte('\n')
-		}
-	}
-
-	writeArMember("debian-binary", []byte("2.0\n"))
-	writeArMember("control.tar.gz", controlTarGz)
-	writeArMember("data.tar.gz", dataTarGz)
-
-	return buf.Bytes()
-}
-
-// createSyntheticDebianRepo builds an authentic Debian repository tree in t.TempDir()
 func createSyntheticDebianRepo(t *testing.T) string {
+	t.Helper()
 	repoDir := t.TempDir()
-
-	// 1. Prepare changelog text
-	rawChangelog := `nginx (1.24.0-2) bookworm; urgency=medium
-
-  * Real Debian E2E Integration test release.
-
- -- Debian Nginx Maintainers <pkg-nginx-maintainers@example.com>  Thu, 17 Sep 2026 12:00:00 +0000
-`
-	var gzChangelog bytes.Buffer
-	gw := gzip.NewWriter(&gzChangelog)
-	_, _ = gw.Write([]byte(rawChangelog))
-	_ = gw.Close()
-
-	// 2. Build nginx_1.24.0-2_amd64.deb
-	nginxControl := map[string][]byte{
-		"./control":  []byte("Package: nginx\nVersion: 1.24.0-2\nArchitecture: amd64\nMaintainer: Debian Nginx Maintainers <pkg-nginx-maintainers@example.com>\nInstalled-Size: 1500\nDepends: libc6 (>= 2.34), libssl3 (>= 3.0.0)\nRecommends: logrotate\nSuggests: nginx-doc\nConflicts: nginx-light\nBreaks: nginx-full (<< 1.20)\nReplaces: nginx-common\nSection: httpd\nDescription: high-performance web server\n Small and fast web server.\n"),
-		"./preinst":  []byte("#!/bin/sh\necho 'nginx preinst running'\n"),
-		"./postinst": []byte("#!/bin/sh\necho 'nginx postinst running'\n"),
-		"./prerm":    []byte("#!/bin/sh\necho 'nginx prerm running'\n"),
-		"./postrm":   []byte("#!/bin/sh\necho 'nginx postrm running'\n"),
-	}
-	nginxData := map[string][]byte{
-		"./usr/sbin/nginx":                          []byte("#!/bin/sh\necho nginx binary\n"),
-		"./etc/nginx/nginx.conf":                    []byte("worker_processes 1;\n"),
-		"./usr/share/doc/nginx/changelog.Debian.gz": gzChangelog.Bytes(),
-	}
-	nginxDebBytes := makeDebArchive(makeTarGz(nginxControl), makeTarGz(nginxData))
-
-	// 3. Build curl_8.5.0-1_amd64.deb
-	curlControl := map[string][]byte{
-		"./control": []byte("Package: curl\nVersion: 8.5.0-1\nArchitecture: amd64\nMaintainer: Debian cURL Team <curl@example.com>\nInstalled-Size: 450\nDepends: libc6 (>= 2.34), libcurl4 (= 8.5.0-1)\nSection: web\nDescription: command line tool for transferring data\n curl transfers data using URL syntax.\n"),
-	}
-	curlData := map[string][]byte{
-		"./usr/bin/curl": []byte("#!/bin/sh\necho curl binary\n"),
-	}
-	curlDebBytes := makeDebArchive(makeTarGz(curlControl), makeTarGz(curlData))
-
-	// 4. Create pool hierarchy: pool/main/n/nginx and pool/main/c/curl
-	nginxPoolDir := filepath.Join(repoDir, "pool", "main", "n", "nginx")
-	curlPoolDir := filepath.Join(repoDir, "pool", "main", "c", "curl")
-	if err := os.MkdirAll(nginxPoolDir, 0o755); err != nil {
-		t.Fatalf("failed to create nginx pool dir: %v", err)
-	}
-	if err := os.MkdirAll(curlPoolDir, 0o755); err != nil {
-		t.Fatalf("failed to create curl pool dir: %v", err)
-	}
-
-	nginxDebPath := filepath.Join(nginxPoolDir, "nginx_1.24.0-2_amd64.deb")
-	curlDebPath := filepath.Join(curlPoolDir, "curl_8.5.0-1_amd64.deb")
-	if err := os.WriteFile(nginxDebPath, nginxDebBytes, 0o644); err != nil {
-		t.Fatalf("failed to write nginx.deb: %v", err)
-	}
-	if err := os.WriteFile(curlDebPath, curlDebBytes, 0o644); err != nil {
-		t.Fatalf("failed to write curl.deb: %v", err)
-	}
-
-	// 5. Create dists hierarchy: dists/bookworm/main/binary-amd64
-	binDir := filepath.Join(repoDir, "dists", "bookworm", "main", "binary-amd64")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatalf("failed to create binary-amd64 dir: %v", err)
-	}
-
-	packagesContent := fmt.Sprintf(`Package: nginx
-Version: 1.24.0-2
-Architecture: amd64
-Maintainer: Debian Nginx Maintainers <pkg-nginx-maintainers@example.com>
-Installed-Size: 1500
-Depends: libc6 (>= 2.34), libssl3 (>= 3.0.0)
-Recommends: logrotate
-Suggests: nginx-doc
-Conflicts: nginx-light
-Breaks: nginx-full (<< 1.20)
-Replaces: nginx-common
-Section: httpd
-Filename: pool/main/n/nginx/nginx_1.24.0-2_amd64.deb
-Size: %d
-SHA256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-Description: high-performance web server
- Small and fast web server.
-
-Package: curl
-Version: 8.5.0-1
-Architecture: amd64
-Maintainer: Debian cURL Team <curl@example.com>
-Installed-Size: 450
-Depends: libc6 (>= 2.34), libcurl4 (= 8.5.0-1)
-Section: web
-Filename: pool/main/c/curl/curl_8.5.0-1_amd64.deb
-Size: %d
-SHA256: abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
-Description: command line tool for transferring data
- curl transfers data using URL syntax.
-`, len(nginxDebBytes), len(curlDebBytes))
-
-	pkgGzPath := filepath.Join(binDir, "Packages.gz")
-	pkgGzFile, err := os.Create(pkgGzPath)
-	if err != nil {
-		t.Fatalf("failed to create Packages.gz: %v", err)
-	}
-	pgw := gzip.NewWriter(pkgGzFile)
-	_, _ = pgw.Write([]byte(packagesContent))
-	_ = pgw.Close()
-	_ = pkgGzFile.Close()
-
-	// 6. Release file
-	releaseDir := filepath.Join(repoDir, "dists", "bookworm")
-	releaseContent := `Origin: Debian
-Label: Debian
-Suite: bookworm
-Codename: bookworm
-Components: main
-Architectures: amd64
-`
-	if err := os.WriteFile(filepath.Join(releaseDir, "Release"), []byte(releaseContent), 0o644); err != nil {
-		t.Fatalf("failed to write Release: %v", err)
-	}
-
+	WriteDebRepo(t, repoDir, []DebIndexGroup{{
+		Suite: "bookworm", Codename: "bookworm", Component: "main", Arch: "amd64", IndexComp: "gz",
+		Origin: "Debian", Label: "Debian", Description: "Debian Bookworm Test Repo",
+		Packages: []SynthDebSpec{
+			{
+				Name: "nginx", Version: "1.24.0-2", Arch: "amd64", Section: "httpd", InstalledSize: 1500,
+				Maintainer:      "Debian Nginx Maintainers <pkg-nginx-maintainers@example.com>",
+				Depends:         "libc6 (>= 2.34), libssl3 (>= 3.0.0)",
+				Recommends:      "logrotate",
+				Suggests:        "nginx-doc",
+				Conflicts:       "nginx-light",
+				Breaks:          "nginx-full (<< 1.20)",
+				Replaces:        "nginx-common",
+				Description:     "high-performance web server",
+				LongDescription: "Small and fast web server.",
+				PreInst:         "#!/bin/sh\necho 'nginx preinst running'\n",
+				PostInst:        "#!/bin/sh\necho 'nginx postinst running'\n",
+				PreRm:           "#!/bin/sh\necho 'nginx prerm running'\n",
+				PostRm:          "#!/bin/sh\necho 'nginx postrm running'\n",
+				Changelog:       "nginx (1.24.0-2) bookworm; urgency=medium\n\n  * Real Debian E2E Integration test release.\n\n -- Debian Nginx Maintainers <pkg-nginx-maintainers@example.com>  Thu, 17 Sep 2026 12:00:00 +0000\n",
+				ExtraFiles: []SynthDebFileSpec{
+					{Path: "./usr/sbin/nginx", Mode: 0o755, Content: []byte("#!/bin/sh\necho nginx\n")},
+					{Path: "./etc/nginx/nginx.conf", Mode: 0o644, Content: []byte("worker_processes 1;\n")},
+				},
+			},
+			{
+				Name: "curl", Version: "8.5.0-1", Arch: "amd64", Section: "web", InstalledSize: 450,
+				Maintainer:      "Debian cURL Team <curl@example.com>",
+				Depends:         "libc6 (>= 2.34), libcurl4 (= 8.5.0-1)",
+				Description:     "command line tool for transferring data",
+				LongDescription: "curl transfers data using URL syntax.",
+				ExtraFiles: []SynthDebFileSpec{
+					{Path: "./usr/bin/curl", Mode: 0o755, Content: []byte("#!/bin/sh\necho curl\n")},
+				},
+			},
+		},
+	}})
 	return repoDir
 }
 
@@ -287,7 +166,7 @@ func TestLive_Debian_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /index.html failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)
@@ -315,7 +194,7 @@ func TestLive_Debian_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /search.json failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)
@@ -356,7 +235,7 @@ func TestLive_Debian_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /nginx.html failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)
@@ -414,7 +293,7 @@ func TestLive_Debian_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /latest-feed.xml failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)
@@ -455,59 +334,353 @@ func TestLive_Debian_EndToEndWorkflow(t *testing.T) {
 func TestLive_Debian_SubprocessCLI(t *testing.T) {
 	repoDir := createSyntheticDebianRepo(t)
 	outDir := t.TempDir()
-	binName := "repoview"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	tempBin := filepath.Join(t.TempDir(), binName)
 
-	// 1. Compile binary
-	t.Log("Compiling repoview binary...")
-	buildCmd := exec.Command("go", "build", "-o", tempBin, "../../cmd/repoview/main.go")
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("go build failed: %v\nOutput: %s", err, string(out))
-	}
-
-	// 2. Execute CLI subprocess with explicit --format deb
-	t.Log("Executing repoview subprocess with --format deb...")
-	runCmd := exec.Command(tempBin,
+	// 1. Execute CLI subprocess with explicit --format deb
+	_, output, code := runRepoview(t, t.TempDir(),
 		"--output-dir", outDir,
 		"--format", "deb",
 		"--force",
 		"--quiet",
 		repoDir,
 	)
-
-	output, err := runCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("subprocess execution with --format deb failed: %v\nOutput: %s", err, string(output))
+	if code != 0 {
+		t.Fatalf("subprocess execution with --format deb failed (exit %d): %s", code, output)
 	}
 
-	// 3. Verify index was created
 	indexPath := filepath.Join(outDir, "index.html")
 	if fi, err := os.Stat(indexPath); err != nil || fi.Size() == 0 {
 		t.Errorf("index.html was not generated by CLI subprocess: %v", err)
 	}
 
-	// 4. Execute CLI subprocess with --format auto (testing auto-detection of Debian repository)
+	// 2. Execute CLI subprocess with --format auto
 	outDirAuto := t.TempDir()
-	t.Log("Executing repoview subprocess with auto-detection on Debian repo...")
-	runCmdAuto := exec.Command(tempBin,
+	_, outputAuto, codeAuto := runRepoview(t, t.TempDir(),
 		"--output-dir", outDirAuto,
 		"--format", "auto",
 		"--force",
 		"--quiet",
 		repoDir,
 	)
-
-	outputAuto, err := runCmdAuto.CombinedOutput()
-	if err != nil {
-		t.Fatalf("subprocess execution with auto-detection failed: %v\nOutput: %s", err, string(outputAuto))
+	if codeAuto != 0 {
+		t.Fatalf("subprocess execution with auto-detection failed (exit %d): %s", codeAuto, outputAuto)
 	}
 
 	indexPathAuto := filepath.Join(outDirAuto, "index.html")
 	if fi, err := os.Stat(indexPathAuto); err != nil || fi.Size() == 0 {
 		t.Errorf("index.html was not generated by CLI auto-detection: %v", err)
+	}
+}
+
+// ---------- Matrix B: Multi-Suite, Multi-Arch & Custom DEB Topologies ----------
+
+func TestE2E_DEB_01_MultiSuiteArchAndPayloads(t *testing.T) {
+	workspace := t.TempDir()
+	ubuDir := filepath.Join(workspace, "ubu24")
+	deb13Dir := filepath.Join(workspace, "deb13")
+
+	writtenUbu := WriteDebRepo(t, ubuDir, []DebIndexGroup{
+		{
+			Suite: "noble", Codename: "noble", Component: "main", Arch: "amd64", IndexComp: "zst", UseInRelease: true,
+			Origin: "Ubuntu", Description: "Ubuntu 24.04 Noble",
+			Packages: []SynthDebSpec{{
+				Name: "noble-only", Version: "24.04.1", Arch: "amd64", Section: "net",
+				ControlComp: "zst", DataComp: "zst", Description: "Noble-only package",
+			}},
+		},
+		{
+			Suite: "jammy", Codename: "jammy", Component: "universe", Arch: "arm64", IndexComp: "zst", UseInRelease: true,
+			Origin: "Ubuntu", Description: "Ubuntu 22.04 Jammy Universe",
+			Packages: []SynthDebSpec{{
+				Name: "jammy-arm-tool", Version: "2.1.0-1", Arch: "arm64", Section: "utils",
+				Priority: "important", MultiArch: "foreign", BuiltUsing: "glibc (= 2.35-0ubuntu3)",
+				Tag: "role::program, uitoolkit::cli", ControlComp: "zst", DataComp: "zst",
+				Conffiles:   []string{"/etc/jammy-arm/app.conf"},
+				Description: "Jammy ARM64 Zstd tool",
+				Copyright:   "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nLicense: Apache-2.0\n",
+				ExtraFiles: []SynthDebFileSpec{
+					{Path: "./usr/bin/jammy-arm", Mode: 0o755, Content: []byte("#!/bin/sh\necho arm\n")},
+					{Path: "./etc/jammy-arm/app.conf", Mode: 0o644, Content: []byte("mode=prod\n")},
+					{Path: "./usr/bin/jammy-link", SymlinkTarget: "/usr/bin/jammy-arm"},
+				},
+			}},
+		},
+	})
+
+	WriteDebRepo(t, deb13Dir, []DebIndexGroup{
+		{
+			Suite: "trixie", Codename: "trixie", Component: "main", Arch: "amd64", IndexComp: "xz", UseInRelease: true,
+			Origin: "Debian", Description: "Debian 13 Trixie Main",
+			Packages: []SynthDebSpec{{
+				Name: "trixie-core", Version: "13.0.1", Arch: "amd64", Section: "libs",
+				ControlComp: "xz", DataComp: "xz", Description: "Debian 13 XZ core package",
+				Copyright: "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\nLicense: GPL-3.0+\n",
+			}},
+		},
+		{
+			Suite: "trixie", Codename: "trixie", Component: "contrib", Arch: "amd64", IndexComp: "bz2", UseInRelease: true,
+			Origin: "Debian", Description: "Debian 13 Trixie Contrib",
+		},
+	})
+
+	// 1. Test --suite jammy --arch arm64 isolation on multi-suite ubu24
+	outJammy := filepath.Join(workspace, "out-jammy")
+	mux := http.NewServeMux()
+	mux.Handle("/ubu24/", http.StripPrefix("/ubu24/", http.FileServer(http.Dir(ubuDir))))
+	mux.Handle("/view-jammy/", http.StripPrefix("/view-jammy/", http.FileServer(http.Dir(outJammy))))
+	baseURL, client := startTestMuxHTTPServer(t, mux)
+
+	_, stderr, code := runRepoview(t, t.TempDir(),
+		"--output-dir", outJammy,
+		"--suite", "jammy",
+		"--arch", "arm64",
+		"--url", baseURL+"/ubu24",
+		"--baseurl", baseURL+"/ubu24",
+		"--force",
+		ubuDir,
+	)
+	if code != 0 {
+		t.Fatalf("DEB-01 jammy/arm64 failed (exit %d): %s", code, stderr)
+	}
+
+	pages := crawlAndVerifySite(t, client, baseURL+"/view-jammy", CrawlExpectations{
+		ExpectRepoView:        true,
+		VerifyPackageSnippets: true,
+		MinHTMLPages:          3,
+		ForbiddenSubstrings:   []string{"-----BEGIN PGP"},
+	})
+	if _, hasNoble := pages[baseURL+"/view-jammy/noble-only.html"]; hasNoble {
+		t.Errorf("noble-only package leaked into --suite jammy --arch arm64 build")
+	}
+	pkgPage := pages[baseURL+"/view-jammy/jammy-arm-tool.html"]
+	for _, want := range []string{"important", "Multi-Arch: foreign", "role::program", "Apache-2.0", "/usr/bin/jammy-arm", "/etc/jammy-arm/app.conf"} {
+		if !strings.Contains(pkgPage, want) {
+			t.Errorf("jammy-arm-tool.html missing expected attribute %q", want)
+		}
+	}
+	for href, info := range writtenUbu {
+		if strings.Contains(href, "jammy-arm-tool") {
+			data, _ := httpGetBytes(t, client, baseURL+"/ubu24/"+href)
+			if sha256Hex(data) != info.SHA256 {
+				t.Errorf("jammy .deb download SHA-256 mismatch")
+			}
+		}
+	}
+
+	// 2. Test deb13 trixie with .tar.xz + InRelease + Packages.bz2
+	outDeb13 := t.TempDir()
+	_, stderr2, code2 := runRepoview(t, t.TempDir(),
+		"--output-dir", outDeb13,
+		"--suite", "trixie",
+		"--arch", "amd64",
+		"--force",
+		deb13Dir,
+	)
+	if code2 != 0 {
+		t.Fatalf("DEB-01 deb13 trixie failed (exit %d): %s", code2, stderr2)
+	}
+	for _, fname := range []string{"trixie-core.html", "bz2-demo.html"} {
+		if _, err := os.Stat(filepath.Join(outDeb13, fname)); err != nil {
+			t.Errorf("expected %s from deb13 trixie (xz + bz2): %v", fname, err)
+		}
+	}
+}
+
+func TestE2E_DEB_02_FlatAndTwoLevelTopologies(t *testing.T) {
+	workspace := t.TempDir()
+
+	// ubu24/custom (Packages.zst + Release), ubu26/custom (Packages.gz + Release), deb13/custom (Packages.bz2 + Release), flat roots
+	targets := []struct {
+		rel      string
+		groups   []DebIndexGroup
+		wantPkg  string
+		wantText string
+	}{
+		{
+			rel: "ubu24/custom",
+			groups: []DebIndexGroup{{
+				Arch: "amd64", IndexComp: "zst", Origin: "Ubuntu", Label: "Ubu24 Custom",
+				Packages: []SynthDebSpec{{Name: "ubu24-svc", Version: "1.0-1", Arch: "amd64", ControlComp: "zst", DataComp: "zst", Description: "Ubu24 custom service"}},
+			}},
+			wantPkg: "ubu24-svc",
+		},
+		{
+			rel: "ubu26/custom",
+			groups: []DebIndexGroup{{
+				Arch: "amd64", IndexComp: "gz", Origin: "Ubuntu", Label: "Ubu26 Custom",
+				Packages: []SynthDebSpec{{Name: "ubu26-svc", Version: "2.0-1", Arch: "amd64", ControlComp: "zst", DataComp: "zst", Description: "Ubu26 custom service"}},
+			}},
+			wantPkg: "ubu26-svc",
+		},
+		{
+			rel: "deb13/custom",
+			groups: []DebIndexGroup{{
+				Arch: "amd64", IndexComp: "bz2", Origin: "Debian", Label: "Deb13 Custom",
+			}},
+			wantPkg: "bz2-demo",
+		},
+		{
+			rel: "ubuntu-26.04-amd64",
+			groups: []DebIndexGroup{{
+				Arch: "amd64", IndexComp: "gz", Origin: "Ubuntu", Label: "Flat 26.04",
+				Packages: []SynthDebSpec{{Name: "flat-ubu26", Version: "1.0", Arch: "amd64", Description: "Flat Ubuntu 26.04"}},
+			}},
+			wantPkg: "flat-ubu26",
+		},
+		{
+			rel: "debian-13-amd64",
+			groups: []DebIndexGroup{{
+				Arch: "amd64", IndexComp: "xz", Origin: "Debian", Label: "Flat Deb13",
+				Packages: []SynthDebSpec{{Name: "flat-deb13", Version: "1.0", Arch: "amd64", ControlComp: "xz", DataComp: "xz", Description: "Flat Debian 13"}},
+			}},
+			wantPkg: "flat-deb13",
+		},
+	}
+
+	for _, tc := range targets {
+		repoDir := filepath.Join(workspace, filepath.FromSlash(tc.rel))
+		WriteDebRepo(t, repoDir, tc.groups)
+		outDir := t.TempDir()
+		stateDir := t.TempDir()
+
+		_, stderr, code := runRepoview(t, t.TempDir(), "--output-dir", outDir, "--state-dir", stateDir, repoDir)
+		if code != 0 {
+			t.Fatalf("DEB-02 %s failed (exit %d): %s", tc.rel, code, stderr)
+		}
+		if _, err := os.Stat(filepath.Join(outDir, tc.wantPkg+".html")); err != nil {
+			t.Errorf("DEB-02 %s missing %s.html: %v", tc.rel, tc.wantPkg, err)
+		}
+		// Incremental short-circuit run
+		_, stderr2, code2 := runRepoview(t, t.TempDir(), "--output-dir", outDir, "--state-dir", stateDir, repoDir)
+		if code2 != 0 {
+			t.Fatalf("DEB-02 %s incremental failed (exit %d): %s", tc.rel, code2, stderr2)
+		}
+	}
+}
+
+// ---------- Matrix C: DDEB Debian Debug Symbol Scenarios ----------
+
+func TestE2E_DDEB_01_StandaloneFlatDDEB(t *testing.T) {
+	workspace := t.TempDir()
+	repoDir := filepath.Join(workspace, "ubu24-dbgsym")
+	outDir := filepath.Join(workspace, "site")
+
+	written := WriteDebRepo(t, repoDir, []DebIndexGroup{{
+		Arch: "amd64", IndexComp: "zst", Origin: "Ubuntu-Debug", Label: "Ubuntu 24.04 dbgsym",
+		Packages: []SynthDebSpec{{
+			Name: "nginx-dbgsym", Version: "1.24.0-2", Arch: "amd64",
+			Section: "debug", Extension: ".ddeb", ControlComp: "zst", DataComp: "zst",
+			BuildIDs:    []string{"abcdef1234567890fedcba0987654321"},
+			Description: "debug symbols for nginx",
+		}},
+	}})
+
+	mux := http.NewServeMux()
+	mux.Handle("/repo/", http.StripPrefix("/repo/", http.FileServer(http.Dir(repoDir))))
+	mux.Handle("/view/", http.StripPrefix("/view/", http.FileServer(http.Dir(outDir))))
+	baseURL, client := startTestMuxHTTPServer(t, mux)
+
+	_, stderr, code := runRepoview(t, t.TempDir(),
+		"--output-dir", outDir,
+		"--url", baseURL+"/repo",
+		"--baseurl", baseURL+"/repo",
+		repoDir,
+	)
+	if code != 0 {
+		t.Fatalf("DDEB-01 failed (exit %d): %s", code, stderr)
+	}
+
+	pages := crawlAndVerifySite(t, client, baseURL+"/view", CrawlExpectations{
+		ExpectRepoView: true,
+		MinHTMLPages:   3,
+	})
+	pkgHTML := pages[baseURL+"/view/nginx-dbgsym.html"]
+	for _, want := range []string{
+		"nginx-dbgsym_1.24.0-2_amd64.ddeb",
+		"/usr/lib/debug/.build-id/ab/cdef1234567890fedcba0987654321.debug",
+		"Section",
+	} {
+		if !strings.Contains(pkgHTML, want) {
+			t.Errorf("nginx-dbgsym.html missing %q", want)
+		}
+	}
+	for href, info := range written {
+		data, _ := httpGetBytes(t, client, baseURL+"/repo/"+href)
+		if sha256Hex(data) != info.SHA256 {
+			t.Errorf(".ddeb download %s SHA-256 mismatch", href)
+		}
+	}
+}
+
+func TestE2E_DDEB_02_APTDebugTreeAndPortal(t *testing.T) {
+	workspace := t.TempDir()
+	mirrorRoot := filepath.Join(workspace, "mirror")
+	ddebRepo := filepath.Join(mirrorRoot, "ddebs")
+
+	written := WriteDebRepo(t, ddebRepo, []DebIndexGroup{
+		{
+			Suite: "noble", Component: "main", IsDebug: true, Arch: "amd64", IndexComp: "gz", OmitRelease: true,
+			Packages: []SynthDebSpec{{
+				Name: "nginx-dbgsym", Version: "1.24.0-2", Arch: "amd64", Section: "debug",
+				Extension: ".ddeb", ControlComp: "zst", DataComp: "zst",
+				BuildIDs:    []string{"11223344556677889900aabbccddeeff"},
+				Description: "amd64 debug symbols for nginx",
+			}},
+		},
+		{
+			Suite: "noble", Component: "main", IsDebug: true, Arch: "arm64", IndexComp: "gz", OmitRelease: true,
+			Packages: []SynthDebSpec{{
+				Name: "nginx-dbgsym", Version: "1.24.0-2", Arch: "arm64", Section: "debug",
+				Extension: ".ddeb", ControlComp: "zst", DataComp: "zst",
+				BuildIDs:    []string{"ffeeddccbbaa00998877665544332211"},
+				Description: "arm64 debug symbols for nginx",
+			}},
+		},
+	})
+
+	// 1. Standalone repoview targeting ddebs --suite noble --arch amd64 (even without Release!)
+	standaloneOut := filepath.Join(workspace, "standalone")
+	_, stderr, code := runRepoview(t, t.TempDir(),
+		"--output-dir", standaloneOut,
+		"--suite", "noble",
+		"--arch", "amd64",
+		ddebRepo,
+	)
+	if code != 0 {
+		t.Fatalf("DDEB-02 standalone failed (exit %d): %s", code, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(standaloneOut, "nginx-dbgsym.html")); err != nil {
+		t.Errorf("DDEB-02 standalone missing nginx-dbgsym.html: %v", err)
+	}
+
+	// 2. Portal detached rendering discovering both amd64 & arm64 debug trees (sparing dists/.../debug, pruning pool/)
+	portalOut := filepath.Join(workspace, "portal-out")
+	_, stderrP, codeP := runRepoview(t, t.TempDir(), "portal",
+		"--portal-home", portalOut,
+		"--render-all",
+		"--title", "DDEB Debug Catalog",
+		mirrorRoot,
+	)
+	if codeP != 0 {
+		t.Fatalf("DDEB-02 portal failed (exit %d): %s", codeP, stderrP)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", http.FileServer(http.Dir(portalOut)))
+	baseURL, client := startTestMuxHTTPServer(t, mux)
+	pages := crawlAndVerifySite(t, client, baseURL, CrawlExpectations{
+		ExpectPortal:     true,
+		RequireKnownArch: true,
+		ExpectFormats:    []string{"deb"},
+		ForbidFormats:    []string{"rpm"},
+		MinHTMLPages:     3,
+	})
+
+	portalHTML := pages[baseURL+"/index.html"]
+	if !strings.Contains(portalHTML, `data-arch="amd64"`) || !strings.Contains(portalHTML, `data-arch="arm64"`) {
+		t.Errorf("DDEB-02 portal missing amd64 or arm64 debug card despite OmitRelease=true")
+	}
+	if len(written) != 2 {
+		t.Errorf("expected 2 written .ddeb payloads, got %d", len(written))
 	}
 }
 
@@ -607,7 +780,7 @@ func TestLive_Debian_RealRepository_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /index.html failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)
@@ -640,7 +813,7 @@ func TestLive_Debian_RealRepository_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /search.json failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)
@@ -686,7 +859,7 @@ func TestLive_Debian_RealRepository_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /gcsfuse.html failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)
@@ -711,7 +884,7 @@ func TestLive_Debian_RealRepository_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /proxysql.html failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)
@@ -733,7 +906,7 @@ func TestLive_Debian_RealRepository_EndToEndWorkflow(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET /latest-feed.xml failed: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 OK, got %d", resp.StatusCode)

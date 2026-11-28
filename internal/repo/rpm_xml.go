@@ -1,5 +1,22 @@
 package repo
 
+// OBJECTIVES:
+// Support pure-XML RPM repositories generated without SQLite databases
+// (`createrepo --no-database`) via streaming decoding of primary.xml and other.xml.
+//
+// CORE COMPONENTS:
+//   - XMLRepository: RepoReader implementation holding paths to decompressed XML scratch files
+//     and an in-memory dependency lookup map indexed by synthetic PkgKey.
+//   - GetAllPackages / EnrichPackagesWithChangelogs / EnrichPackagesWithAdvisories: Streaming parsers.
+//   - EnrichForRender / ReadPackageFiles: Single-pass or on-demand RPM header inspection.
+//
+// FUNCTIONALITY:
+//   - Enforces MaxDecompressedSize via io.LimitReader during XML decoding.
+//   - Caps loaded changelogs at the 10 newest entries per package ordered newest-first.
+//
+// DATA FLOW:
+//   primary.xml + other.xml + updateinfo.xml* -> XMLRepository -> []*models.Package -> render
+
 import (
 	"encoding/xml"
 	"fmt"
@@ -41,19 +58,19 @@ type xmlPrimaryMetadata struct {
 }
 
 type xmlPrimaryPkg struct {
-	Type        string            `xml:"type,attr"`
-	Name        string            `xml:"name"`
-	Arch        string            `xml:"arch"`
-	Version     xmlPrimaryVer     `xml:"version"`
-	Checksum    xmlPrimaryCheck   `xml:"checksum"`
-	Summary     string            `xml:"summary"`
-	Description string            `xml:"description"`
-	Packager    string            `xml:"packager"`
-	URL         string            `xml:"url"`
-	Time        xmlPrimaryTime    `xml:"time"`
-	Size        xmlPrimarySize    `xml:"size"`
-	Location    xmlPrimaryLoc     `xml:"location"`
-	Format      xmlPrimaryFormat  `xml:"format"`
+	Type        string           `xml:"type,attr"`
+	Name        string           `xml:"name"`
+	Arch        string           `xml:"arch"`
+	Version     xmlPrimaryVer    `xml:"version"`
+	Checksum    xmlPrimaryCheck  `xml:"checksum"`
+	Summary     string           `xml:"summary"`
+	Description string           `xml:"description"`
+	Packager    string           `xml:"packager"`
+	URL         string           `xml:"url"`
+	Time        xmlPrimaryTime   `xml:"time"`
+	Size        xmlPrimarySize   `xml:"size"`
+	Location    xmlPrimaryLoc    `xml:"location"`
+	Format      xmlPrimaryFormat `xml:"format"`
 }
 
 type xmlPrimaryVer struct {
@@ -84,11 +101,11 @@ type xmlPrimaryLoc struct {
 }
 
 type xmlPrimaryFormat struct {
-	License     string          `xml:"license"`
-	Vendor      string          `xml:"vendor"`
-	Group       string          `xml:"group"`
-	BuildHost   string          `xml:"buildhost"`
-	SourceRPM   string          `xml:"sourcerpm"`
+	License     string            `xml:"license"`
+	Vendor      string            `xml:"vendor"`
+	Group       string            `xml:"group"`
+	BuildHost   string            `xml:"buildhost"`
+	SourceRPM   string            `xml:"sourcerpm"`
 	Requires    xmlPrimaryEntries `xml:"requires"`
 	Provides    xmlPrimaryEntries `xml:"provides"`
 	Conflicts   xmlPrimaryEntries `xml:"conflicts"`
@@ -320,6 +337,11 @@ func (r *XMLRepository) ReadPackageFiles(repoDir string, pkg *models.Package) ([
 	return ReadRPMFiles(rpmPath)
 }
 
+// EnrichForRender loads RPM header details and file manifests in a single file open pass.
+func (r *XMLRepository) EnrichForRender(repoDir string, pkg *models.Package) error {
+	return EnrichRPMForRender(repoDir, pkg)
+}
+
 // Close releases temporary decompressed XML files.
 func (r *XMLRepository) Close() error {
 	if r.cleanup != nil {
@@ -329,8 +351,9 @@ func (r *XMLRepository) Close() error {
 }
 
 var (
-	_ RepoReader        = (*XMLRepository)(nil)
-	_ ChangelogEnricher = (*XMLRepository)(nil)
-	_ DependencyReader  = (*XMLRepository)(nil)
-	_ AdvisoryEnricher  = (*XMLRepository)(nil)
+	_ RepoReader            = (*XMLRepository)(nil)
+	_ ChangelogEnricher     = (*XMLRepository)(nil)
+	_ DependencyReader      = (*XMLRepository)(nil)
+	_ AdvisoryEnricher      = (*XMLRepository)(nil)
+	_ PackageRenderEnricher = (*XMLRepository)(nil)
 )

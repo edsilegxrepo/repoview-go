@@ -1,5 +1,13 @@
 package util
 
+// OBJECTIVES:
+// Verify atomic write durability/fast-mode helpers, bounded worker pool concurrency,
+// multi-format metadata decompression, byte formatting edge cases, and injection quoting.
+//
+// TEST STRATEGY:
+// Runs race-checked parallel ForEachWorkers stress tests alongside gzip/xz/zstd/uncompressed
+// decompression checks, temp-replace writes, and control-character / ShellQuote assertions.
+
 import (
 	"bytes"
 	"compress/gzip"
@@ -29,6 +37,14 @@ func TestAtomicWriteFile(t *testing.T) {
 	}
 	if string(got) != "hello v2" {
 		t.Errorf("expected 'hello v2', got %q", string(got))
+	}
+
+	fastTarget := filepath.Join(dir, "fast.html")
+	if err := AtomicWriteFileFast(fastTarget, []byte("fast html"), DefaultFilePerm); err != nil {
+		t.Fatalf("AtomicWriteFileFast failed: %v", err)
+	}
+	if fastGot, err := os.ReadFile(fastTarget); err != nil || string(fastGot) != "fast html" {
+		t.Errorf("expected 'fast html', got %q (err=%v)", string(fastGot), err)
 	}
 
 	if err := AtomicWriteFile(filepath.Join(dir, "missing", "child.txt"), []byte("x"), DefaultFilePerm); err == nil {

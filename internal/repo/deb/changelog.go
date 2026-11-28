@@ -1,5 +1,20 @@
 package deb
 
+// OBJECTIVES:
+// Extract and parse Debian binary package changelog entries from .deb/data.tar
+// archives into format-agnostic ChangelogEntry records.
+//
+// CORE COMPONENTS:
+//   - ParseChangelog: Decodes size-capped changelog.Debian text via pault.ag/go/debian/changelog.
+//   - ExtractChangelogFromDeb: Streams data.tar looking for compressed or plain changelog docs.
+//
+// FUNCTIONALITY:
+//   - Guards against oversized changelog streams via a 2 MiB LimitReader cap and
+//     normalizes the newest entry author, Unix timestamp, and description body.
+//
+// DATA FLOW:
+//   .deb path -> data.tar stream -> gzip (optional) -> ParseChangelog -> *models.ChangelogEntry
+
 import (
 	"compress/gzip"
 	"io"
@@ -10,6 +25,8 @@ import (
 	debchangelog "pault.ag/go/debian/changelog"
 	pdeb "pault.ag/go/debian/deb"
 )
+
+// --- Debian Changelog Stream Decoders ---
 
 const maxChangelogBytes = 2 * 1024 * 1024 // 2 MiB ceiling for changelog files
 

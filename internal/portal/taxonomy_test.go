@@ -1,5 +1,13 @@
 package portal
 
+// OBJECTIVES:
+// Validate package portal's delegated architecture, slug tokenization, distro/channel
+// classification, and branding icon matching APIs.
+//
+// TEST STRATEGY:
+// Executes table-driven assertions verifying backward-compatible portal taxonomy wrappers
+// match internal/taxonomy behavior across standard and unknown inputs.
+
 import (
 	"testing"
 )

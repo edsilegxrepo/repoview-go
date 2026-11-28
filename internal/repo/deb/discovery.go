@@ -1,5 +1,22 @@
 package deb
 
+// OBJECTIVES:
+// Locate Debian and Ubuntu APT metadata across all common repository layouts, including
+// full dists/ suites, multi-component repos, debug (.ddeb) subtrees, and flat directories.
+//
+// CORE COMPONENTS:
+//   - DebRepoLocations: Resolved repository root, Packages files, Release metadata, suites, components, arch.
+//   - Discover / DiscoverWithOptions: Four-tier probing engine supporting --suite and --arch filters.
+//   - collectComponentPackages / findTargetArch / sortComponents: Multi-component aggregation & priority helpers.
+//
+// FUNCTIONALITY:
+//   - Prioritizes concrete hardware architectures over binary-all while merging binary-all slices.
+//   - Detects dists/<suite>/<comp>/debug/binary-<arch> debug trees without losing Release roots.
+//   - Recognizes uncompressed, .gz, .bz2, .xz, and .zst Packages indexes plus Release / InRelease.
+//
+// DATA FLOW:
+//   repoDir (+ DiscoverOptions) -> DiscoverWithOptions -> *DebRepoLocations -> DebRepository
+
 import (
 	"fmt"
 	"os"
@@ -7,6 +24,8 @@ import (
 	"sort"
 	"strings"
 )
+
+// --- Debian Layout Models & Multi-Tier Discovery ---
 
 // DebRepoLocations encapsulates discovered paths to Debian repository metadata.
 type DebRepoLocations struct {
@@ -50,6 +69,11 @@ func DiscoverWithOptions(repoDir string, opts DiscoverOptions) (*DebRepoLocation
 			compDir := filepath.Dir(absDir)
 			component := filepath.Base(compDir)
 			suiteDir := filepath.Dir(compDir)
+			if component == "debug" && filepath.Base(filepath.Dir(filepath.Dir(suiteDir))) == "dists" {
+				parentCompDir := suiteDir
+				component = filepath.Base(parentCompDir) + "/debug"
+				suiteDir = filepath.Dir(parentCompDir)
+			}
 			suite := filepath.Base(suiteDir)
 
 			if relFile == "" {
@@ -260,26 +284,34 @@ func collectComponentPackages(suitePath string, components []os.DirEntry, target
 		compName := c.Name()
 		compPath := filepath.Join(suitePath, compName)
 
-		archPath := filepath.Join(compPath, "binary-"+targetArch)
-		if pkgFile := findPackagesFile(archPath); pkgFile != "" {
-			if !seenPkgFiles[pkgFile] {
-				seenPkgFiles[pkgFile] = true
-				pkgFiles = append(pkgFiles, pkgFile)
-			}
-			if !seenComponents[compName] {
-				seenComponents[compName] = true
-				compNames = append(compNames, compName)
-			}
-		}
-
-		if targetArch != "all" {
-			allPath := filepath.Join(compPath, "binary-all")
-			if pkgFile := findPackagesFile(allPath); pkgFile != "" {
+		addComponentDir := func(name, dir string) {
+			archPath := filepath.Join(dir, "binary-"+targetArch)
+			if pkgFile := findPackagesFile(archPath); pkgFile != "" {
 				if !seenPkgFiles[pkgFile] {
 					seenPkgFiles[pkgFile] = true
 					pkgFiles = append(pkgFiles, pkgFile)
 				}
+				if !seenComponents[name] {
+					seenComponents[name] = true
+					compNames = append(compNames, name)
+				}
 			}
+
+			if targetArch != "all" {
+				allPath := filepath.Join(dir, "binary-all")
+				if pkgFile := findPackagesFile(allPath); pkgFile != "" {
+					if !seenPkgFiles[pkgFile] {
+						seenPkgFiles[pkgFile] = true
+						pkgFiles = append(pkgFiles, pkgFile)
+					}
+				}
+			}
+		}
+
+		addComponentDir(compName, compPath)
+		debugDir := filepath.Join(compPath, "debug")
+		if fi, err := os.Stat(debugDir); err == nil && fi.IsDir() {
+			addComponentDir(compName+"/debug", debugDir)
 		}
 	}
 
@@ -295,16 +327,18 @@ func findTargetArch(suitePath string, components []os.DirEntry, preferredArch st
 			continue
 		}
 		compPath := filepath.Join(suitePath, c.Name())
-		entries, err := os.ReadDir(compPath)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() && strings.HasPrefix(e.Name(), "binary-") {
-				arch := strings.TrimPrefix(e.Name(), "binary-")
-				if !seen[arch] {
-					seen[arch] = true
-					archs = append(archs, arch)
+		for _, searchDir := range []string{compPath, filepath.Join(compPath, "debug")} {
+			entries, err := os.ReadDir(searchDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() && strings.HasPrefix(e.Name(), "binary-") {
+					arch := strings.TrimPrefix(e.Name(), "binary-")
+					if !seen[arch] {
+						seen[arch] = true
+						archs = append(archs, arch)
+					}
 				}
 			}
 		}

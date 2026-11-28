@@ -1,4 +1,10 @@
 <!DOCTYPE html>
+{{/*
+  OBJECTIVE: Primary single-repository landing page showcasing repository summary metrics,
+  browseable group cards, the 30 newest builds, and the client .repo / Deb822 .sources setup modal.
+  SECTIONS: Hero Banner | Stats Chips | Group Grid | Recent Updates Table | Client Config Modal.
+  DATA FLOW: render.PageData (.Repo, .Groups, .Latest) -> index.html -> layout/search.js modal helpers.
+*/}}
 <html lang="en" data-theme="dark">
 {{ template "_head.html" . }}
 <body>
@@ -33,8 +39,8 @@
                     <span class="stat-value">{{ if .Repo.TotalPackages }}{{ .Repo.TotalPackages }}{{ else }}{{ len .Latest }}{{ end }}</span>
                 </div>
                 <div class="stat-chip">
-                    <span class="stat-label">Status:</span>
-                    <span class="stat-value" style="color: #10b981;">Online</span>
+                    <span class="stat-label">Last Built:</span>
+                    <span class="stat-value">{{ if .Repo.BuildDate }}{{ .Repo.BuildDate }}{{ else }}{{ now | ymd }}{{ end }}</span>
                 </div>
             </div>
 
@@ -123,7 +129,8 @@
                         {{ if eq .Repo.Format "deb" }}
                         <pre><code id="repoSnippetCode" data-configured-baseurl="{{ .Repo.BaseURL | singleLine }}">Types: deb
 URIs: {{ if .Repo.BaseURL }}{{ .Repo.BaseURL | singleLine }}{{ else }}$URL{{ end }}
-Suites: ./
+{{ if .Repo.Suite }}Suites: {{ .Repo.Suite | singleLine }}
+Components: {{ if .Repo.Components }}{{ .Repo.Components | singleLine }}{{ else }}main{{ end }}{{ else }}Suites: ./{{ end }}
 {{ if .Repo.GPGKey }}Signed-By: {{ .Repo.GPGKey | singleLine }}{{ else }}Trusted: yes{{ end }}</code></pre>
                         {{ else }}
                         <pre><code id="repoSnippetCode" data-configured-baseurl="{{ .Repo.BaseURL | singleLine }}">[{{ if .Repo.RepoID }}{{ .Repo.RepoID | singleLine }}{{ else }}custom-repository{{ end }}]
@@ -150,7 +157,8 @@ gpgkey={{ .Repo.GPGKey | singleLine }}{{ else }}gpgcheck=0{{ end }}</code></pre>
                         <code id="repoFastSetupCmd" data-configured-baseurl="{{ .Repo.BaseURL | singleLine }}">sudo tee /etc/apt/sources.list.d/{{ if .Repo.RepoID }}{{ .Repo.RepoID | singleLine }}{{ else }}repo{{ end }}.sources &gt; /dev/null &lt;&lt; 'EOF'
 Types: deb
 URIs: {{ if .Repo.BaseURL }}{{ .Repo.BaseURL | singleLine }}{{ else }}$URL{{ end }}
-Suites: ./
+{{ if .Repo.Suite }}Suites: {{ .Repo.Suite | singleLine }}
+Components: {{ if .Repo.Components }}{{ .Repo.Components | singleLine }}{{ else }}main{{ end }}{{ else }}Suites: ./{{ end }}
 {{ if .Repo.GPGKey }}Signed-By: {{ .Repo.GPGKey | singleLine }}{{ else }}Trusted: yes{{ end }}
 EOF &amp;&amp; sudo apt update</code>
                         {{ else }}

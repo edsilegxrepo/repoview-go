@@ -1,13 +1,32 @@
 package portal
 
+// OBJECTIVES:
+// Render the multi-repository portal catalog (index.html), unified cross-repository
+// RSS feed (portal-feed.xml), and cross-repository package/CVE index (portal-search.json).
+//
+// CORE COMPONENTS:
+//   - Renderer: Template compiler and output writer backed by embedded/custom HTML templates.
+//   - RenderHTML / RenderFeed / RenderPortalSearchIndex: Portal artifact generators.
+//   - WritePortal: Safety-guarded atomic writer preventing foreign index.html overwrites.
+//
+// FUNCTIONALITY:
+//   - Aggregates up to 5 latest items per child repository in parallel and caps portal-feed.xml at 50 items.
+//   - Compiles child search.json files into compact columnar portal-search.json rows for instant search.
+//   - Re-bases relative TargetURLs only when portal output differs from source mirror root.
+//
+// DATA FLOW:
+//   *Catalog (+ child search.json / latest-feed.xml) -> WritePortal -> index.html + portal-feed.xml + portal-search.json
+
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"html/template"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +36,8 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/models"
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
+
+// --- Template Embedding, Safety Errors & Renderer Setup ---
 
 //go:embed templates/*
 var defaultTemplates embed.FS
@@ -379,5 +400,139 @@ func (r *Renderer) WritePortal(outputDir, rootDir string, catalog *Catalog, forc
 		return fmt.Errorf("%w: failed to write portal-feed.xml: %w", models.ErrIO, err)
 	}
 
+	// Render aggregated cross-repository search index (portal-search.json)
+	searchBytes, err := r.RenderPortalSearchIndex(catalog, cleanOut)
+	if err != nil {
+		return fmt.Errorf("%w: failed to build portal-search.json: %w", models.ErrIO, err)
+	}
+	searchPath := filepath.Join(cleanOut, "portal-search.json")
+	if err := util.AtomicWriteFile(searchPath, searchBytes, util.DefaultFilePerm); err != nil {
+		return fmt.Errorf("%w: failed to write portal-search.json: %w", models.ErrIO, err)
+	}
+
 	return nil
+}
+
+// PortalSearchRepo captures per-repository metadata referenced by portal-search.json rows.
+type PortalSearchRepo struct {
+	Title    string `json:"t"`
+	BaseHref string `json:"h"`
+	Distro   string `json:"d"`
+	Format   string `json:"f"`
+	Arch     string `json:"a"`
+	Suite    string `json:"s,omitempty"`
+}
+
+// PortalSearchIndex aggregates child repository search.json entries for cross-repo browser search.
+type PortalSearchIndex struct {
+	Repos  []PortalSearchRepo `json:"repos"`
+	Schema []string           `json:"schema"`
+	Data   [][]string         `json:"data"`
+}
+
+// RenderPortalSearchIndex reads child search.json files and builds a compact portal-wide search index.
+func (r *Renderer) RenderPortalSearchIndex(catalog *Catalog, outputDir string) ([]byte, error) {
+	const maxChildSearchBytes = 16 * 1024 * 1024 // 16 MiB cap per child search.json
+
+	idx := PortalSearchIndex{
+		Schema: []string{"ri", "n", "v", "a", "s", "f", "l", "p", "c"},
+		Repos:  make([]PortalSearchRepo, 0),
+		Data:   make([][]string, 0),
+	}
+	if catalog == nil {
+		return json.Marshal(idx)
+	}
+
+	for _, repo := range catalog.Repos {
+		if repo == nil || !repo.IsRendered || repo.IsExternal {
+			continue
+		}
+
+		// Locate child search.json safely inside outputDir or fallback repo.Path/repoview
+		targetDirSlash := path.Dir(filepath.ToSlash(repo.TargetURL))
+		if targetDirSlash == "." {
+			targetDirSlash = ""
+		}
+
+		var candidates []string
+		if outputDir != "" && !strings.HasPrefix(repo.TargetURL, "http://") && !strings.HasPrefix(repo.TargetURL, "https://") {
+			if targetDirSlash != "" {
+				candidates = append(candidates, filepath.Join(outputDir, filepath.FromSlash(targetDirSlash), "search.json"))
+			} else {
+				candidates = append(candidates, filepath.Join(outputDir, "search.json"))
+			}
+		}
+		if repo.Path != "" {
+			candidates = append(candidates,
+				filepath.Join(repo.Path, "repoview", "search.json"),
+				filepath.Join(repo.Path, "search.json"),
+			)
+		}
+
+		var childBytes []byte
+		for _, cand := range candidates {
+			// #nosec G304 -- reading child search.json from validated portal output or discovered repo dir
+			f, err := os.Open(filepath.Clean(cand))
+			if err != nil {
+				continue
+			}
+			data, readErr := io.ReadAll(io.LimitReader(f, maxChildSearchBytes))
+			_ = f.Close()
+			if readErr == nil && len(data) > 0 {
+				childBytes = data
+				break
+			}
+		}
+		if len(childBytes) == 0 {
+			continue
+		}
+
+		var child models.SearchIndex
+		if err := json.Unmarshal(childBytes, &child); err != nil || len(child.Data) == 0 {
+			continue
+		}
+
+		colIdx := make(map[string]int, len(child.Schema))
+		for i, col := range child.Schema {
+			colIdx[col] = i
+		}
+		getCol := func(row []string, key string) string {
+			i, ok := colIdx[key]
+			if !ok || i < 0 || i >= len(row) {
+				return ""
+			}
+			return row[i]
+		}
+
+		repoIdx := fmt.Sprintf("%d", len(idx.Repos))
+		idx.Repos = append(idx.Repos, PortalSearchRepo{
+			Title:    repo.Title,
+			BaseHref: targetDirSlash,
+			Distro:   repo.Distro,
+			Format:   string(repo.Format),
+			Arch:     repo.Arch,
+			Suite:    repo.Suite,
+		})
+
+		for _, row := range child.Data {
+			name := getCol(row, "n")
+			file := getCol(row, "f")
+			if name == "" || file == "" {
+				continue
+			}
+			idx.Data = append(idx.Data, []string{
+				repoIdx,
+				name,
+				getCol(row, "v"),
+				getCol(row, "a"),
+				getCol(row, "s"),
+				file,
+				getCol(row, "l"),
+				getCol(row, "p"),
+				getCol(row, "t"),
+			})
+		}
+	}
+
+	return json.Marshal(idx)
 }

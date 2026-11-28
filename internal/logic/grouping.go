@@ -35,6 +35,8 @@ import (
 // DATA FLOW:
 //   []*models.Package (+ comps.xml) -> GroupingService -> []*GroupData -> BuildGroupTree -> []*GroupCategory -> Template Rendering
 
+// --- Group & Navigation Tree Structures ---
+
 // GroupData holds the aggregated data for a specific package group.
 // This structure maps directly to the data context passed to 'group.html'.
 type GroupData struct {
@@ -187,6 +189,8 @@ func BuildGroupTree(groups []*GroupData) []*GroupCategory {
 
 	return result
 }
+
+// --- Package Grouping & Collision Resolution ---
 
 // GroupingService handles the organization of packages into logical groups.
 // It supports grouping by Comps.xml definitions, RPM Header Groups, and First Letter.
@@ -535,6 +539,8 @@ func AssignCollisionSafePackageFilenames(pkgVersions map[string][]*models.Packag
 }
 
 // Helpers
+
+// --- Heuristic Group Inference & Internal Helpers ---
 
 // cleanID sanitizes a group identifier into a safe filename.
 func cleanID(text string) string {

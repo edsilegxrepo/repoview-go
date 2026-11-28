@@ -1,5 +1,13 @@
 package app
 
+// OBJECTIVES:
+// Verify custom OutputSink plumbing, XML-only RPM fallback generation, incremental repo
+// fingerprint short-circuiting, repoview.yaml overrides, stale pruning, and worker clamping.
+//
+// TEST STRATEGY:
+// Injects an in-memory memoryOutputSink and synthetic gzip-compressed XML RPM repositories
+// in t.TempDir() to test short-circuit hits, config precedence, and error propagation.
+
 import (
 	"bytes"
 	"compress/gzip"

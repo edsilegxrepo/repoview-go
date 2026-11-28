@@ -1,5 +1,13 @@
 package util
 
+// OBJECTIVES:
+// Verify web-hosting permission constants, startup umask handling, and EnsureDir /
+// WriteWebFile behavior across POSIX mode enforcement and Windows ACL builds.
+//
+// TEST STRATEGY:
+// Uses t.TempDir() to assert directory and file mode bits (0755/0644) on non-Windows targets
+// while verifying file creation and umask restoration across both OS targets.
+
 import (
 	"os"
 	"path/filepath"

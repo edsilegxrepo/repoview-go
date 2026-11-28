@@ -165,4 +165,29 @@ func TestStateStore_CheckChangedAndMarkWritten(t *testing.T) {
 	if _, afterMarkChanged := store.CheckChanged("page.html", content); afterMarkChanged {
 		t.Errorf("expected CheckChanged to report false after MarkWritten")
 	}
+
+	store.Set(MetadataKeyRepoFingerprint, "fp-123")
+	if gotFP, ok := store.Get(MetadataKeyRepoFingerprint); !ok || gotFP != "fp-123" {
+		t.Errorf("expected Get/Set fingerprint fp-123, got %q (ok=%v)", gotFP, ok)
+	}
+
+	// MarkWrittenBatch with empty slice + populated entries
+	store.MarkWrittenBatch(nil)
+	store.MarkWrittenBatch([]Entry{
+		{Filename: "batch1.html", Hash: "h1"},
+		{Filename: "batch2.html", Hash: "h2"},
+	})
+	if h, ok := store.Get("batch1.html"); !ok || h != "h1" {
+		t.Errorf("expected batch1.html hash h1, got %q (ok=%v)", h, ok)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	reloaded, err := NewStateStore(statePath)
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if h, ok := reloaded.Get("batch2.html"); !ok || h != "h2" {
+		t.Errorf("expected persisted batch2.html hash h2, got %q (ok=%v)", h, ok)
+	}
 }

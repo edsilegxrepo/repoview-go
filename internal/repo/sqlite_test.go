@@ -313,3 +313,34 @@ func TestRepositoryAccess_ReadOnlyAndSecurityPragmas(t *testing.T) {
 		t.Errorf("expected write DDL to fail under query_only/ro mode")
 	}
 }
+
+func TestRepositoryAccess_BulkDependenciesAndRenderEnrich(t *testing.T) {
+	primaryPath, otherPath := setupTestDBs(t)
+	ra, err := NewRepositoryAccess(primaryPath, otherPath)
+	if err != nil {
+		t.Fatalf("failed to open repo access: %v", err)
+	}
+	defer func() { _ = ra.Close() }()
+
+	pkgs, err := ra.GetAllPackages()
+	if err != nil || len(pkgs) == 0 {
+		t.Fatalf("GetAllPackages failed: len=%d err=%v", len(pkgs), err)
+	}
+	if err := ra.EnrichPackagesWithDependencies(pkgs); err != nil {
+		t.Fatalf("EnrichPackagesWithDependencies failed: %v", err)
+	}
+	if pkgs[0].Dependencies == nil || len(pkgs[0].Dependencies.Requires) == 0 {
+		t.Errorf("expected bulk dependencies populated on pkg 0, got %+v", pkgs[0].Dependencies)
+	}
+
+	tempDir := t.TempDir()
+	rpmHref := "demo-1.0.rpm"
+	writeSyntheticRPM(t, filepath.Join(tempDir, rpmHref))
+	pkgs[0].LocationHref = rpmHref
+	if err := ra.EnrichForRender(tempDir, pkgs[0]); err != nil {
+		t.Fatalf("RepositoryAccess.EnrichForRender failed: %v", err)
+	}
+	if pkgs[0].Details == nil || len(pkgs[0].Details.Files) != 3 {
+		t.Errorf("expected 3 files via EnrichForRender, got %+v", pkgs[0].Details)
+	}
+}

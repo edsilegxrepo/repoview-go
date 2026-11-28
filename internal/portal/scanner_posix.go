@@ -2,6 +2,9 @@
 
 package portal
 
+// OBJECTIVES: Extract POSIX (dev, ino) filesystem identifiers for O(1) symlink cycle
+// detection and multi-mount alias deduplication during portal directory scans.
+
 import (
 	"os"
 	"syscall"

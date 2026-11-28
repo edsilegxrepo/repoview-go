@@ -36,6 +36,8 @@ import (
 // DATA FLOW:
 //   primary.sqlite + other.sqlite -> RepositoryAccess -> models.Package / models.PackageDependencies
 
+// --- SQLite Repository Lifecycle & Prepared Statements ---
+
 // RepositoryAccess handles interactions with the SQLite databases.
 // It manages connections to both 'primary' (packages) and 'other' (changelogs)
 // databases and provides methods to query them efficiently.
@@ -488,24 +490,8 @@ func cleanAuthor(author string) string {
 
 // GetPackageDependencies fetches mandatory and optional weak dependency vectors for pkgKey.
 func (r *RepositoryAccess) GetPackageDependencies(pkgKey int64) (*models.PackageDependencies, error) {
-	deps := &models.PackageDependencies{}
-	specs := []struct {
-		kind     string
-		stmt     *sql.Stmt
-		fallback string
-		hasPre   bool
-		required bool
-		target   *[]*models.DependencyEntry
-	}{
-		{"requires", r.reqStmt, `SELECT name, flags, epoch, version, release, pre FROM requires WHERE pkgKey = ? ORDER BY name`, true, true, &deps.Requires},
-		{"provides", r.provStmt, `SELECT name, flags, epoch, version, release FROM provides WHERE pkgKey = ? ORDER BY name`, false, true, &deps.Provides},
-		{"conflicts", r.confStmt, `SELECT name, flags, epoch, version, release FROM conflicts WHERE pkgKey = ? ORDER BY name`, false, true, &deps.Conflicts},
-		{"obsoletes", r.obsStmt, `SELECT name, flags, epoch, version, release FROM obsoletes WHERE pkgKey = ? ORDER BY name`, false, true, &deps.Obsoletes},
-		{"recommends", r.recStmt, "", false, false, &deps.Recommends},
-		{"suggests", r.sugStmt, "", false, false, &deps.Suggests},
-		{"enhances", r.enhStmt, "", false, false, &deps.Enhances},
-		{"supplements", r.supStmt, "", false, false, &deps.Supplements},
-	}
+	var deps models.PackageDependencies
+	specs := r.depSpecs(&deps)
 
 	for _, sp := range specs {
 		if !sp.required && sp.stmt == nil {
@@ -518,7 +504,136 @@ func (r *RepositoryAccess) GetPackageDependencies(pkgKey int64) (*models.Package
 		*sp.target = entries
 	}
 
-	return deps, nil
+	return &deps, nil
+}
+
+type depSpec struct {
+	kind     string
+	stmt     *sql.Stmt
+	fallback string
+	hasPre   bool
+	required bool
+	target   *[]*models.DependencyEntry
+	setter   func(d *models.PackageDependencies, entry *models.DependencyEntry)
+}
+
+func (r *RepositoryAccess) depSpecs(deps *models.PackageDependencies) []depSpec {
+	var (
+		reqPtr, provPtr, confPtr, obsPtr *[]*models.DependencyEntry
+		recPtr, sugPtr, enhPtr, supPtr   *[]*models.DependencyEntry
+	)
+	if deps != nil {
+		reqPtr = &deps.Requires
+		provPtr = &deps.Provides
+		confPtr = &deps.Conflicts
+		obsPtr = &deps.Obsoletes
+		recPtr = &deps.Recommends
+		sugPtr = &deps.Suggests
+		enhPtr = &deps.Enhances
+		supPtr = &deps.Supplements
+	}
+	return []depSpec{
+		{"requires", r.reqStmt, `SELECT name, flags, epoch, version, release, pre FROM requires WHERE pkgKey = ? ORDER BY name`, true, true, reqPtr, func(d *models.PackageDependencies, e *models.DependencyEntry) { d.Requires = append(d.Requires, e) }},
+		{"provides", r.provStmt, `SELECT name, flags, epoch, version, release FROM provides WHERE pkgKey = ? ORDER BY name`, false, true, provPtr, func(d *models.PackageDependencies, e *models.DependencyEntry) { d.Provides = append(d.Provides, e) }},
+		{"conflicts", r.confStmt, `SELECT name, flags, epoch, version, release FROM conflicts WHERE pkgKey = ? ORDER BY name`, false, true, confPtr, func(d *models.PackageDependencies, e *models.DependencyEntry) { d.Conflicts = append(d.Conflicts, e) }},
+		{"obsoletes", r.obsStmt, `SELECT name, flags, epoch, version, release FROM obsoletes WHERE pkgKey = ? ORDER BY name`, false, true, obsPtr, func(d *models.PackageDependencies, e *models.DependencyEntry) { d.Obsoletes = append(d.Obsoletes, e) }},
+		{"recommends", r.recStmt, "", false, false, recPtr, func(d *models.PackageDependencies, e *models.DependencyEntry) { d.Recommends = append(d.Recommends, e) }},
+		{"suggests", r.sugStmt, "", false, false, sugPtr, func(d *models.PackageDependencies, e *models.DependencyEntry) { d.Suggests = append(d.Suggests, e) }},
+		{"enhances", r.enhStmt, "", false, false, enhPtr, func(d *models.PackageDependencies, e *models.DependencyEntry) { d.Enhances = append(d.Enhances, e) }},
+		{"supplements", r.supStmt, "", false, false, supPtr, func(d *models.PackageDependencies, e *models.DependencyEntry) {
+			d.Supplements = append(d.Supplements, e)
+		}},
+	}
+}
+
+// EnrichPackagesWithDependencies bulk-loads dependency graphs in 500-key batches using WHERE pkgKey IN (...)
+// to eliminate per-package N+1 SQLite query round-trips during package HTML generation.
+func (r *RepositoryAccess) EnrichPackagesWithDependencies(pkgs []*models.Package) error {
+	var pending []*models.Package
+	for _, p := range pkgs {
+		if p != nil && p.Dependencies == nil && p.PkgKey > 0 {
+			p.Dependencies = &models.PackageDependencies{}
+			pending = append(pending, p)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	const batchSize = 500
+	specs := r.depSpecs(nil)
+
+	for i := 0; i < len(pending); i += batchSize {
+		end := i + batchSize
+		if end > len(pending) {
+			end = len(pending)
+		}
+		batch := pending[i:end]
+		if err := r.enrichDepBatch(batch, specs); err != nil {
+			r.warnf("Warning: failed to enrich dependency batch: %v\n", err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *RepositoryAccess) enrichDepBatch(batch []*models.Package, specs []depSpec) error {
+	ids := make([]interface{}, len(batch))
+	pkgMap := make(map[int64]*models.Package, len(batch))
+	for i, p := range batch {
+		ids[i] = p.PkgKey
+		pkgMap[p.PkgKey] = p
+	}
+	placeholders := strings.Repeat("?,", len(ids)-1) + "?"
+
+	for _, sp := range specs {
+		if !sp.required && sp.stmt == nil {
+			continue
+		}
+		var q string
+		if sp.hasPre {
+			// #nosec G201 -- table name sp.kind is a fixed literal from depSpecs and placeholders only contains '?'
+			q = fmt.Sprintf(`SELECT pkgKey, name, flags, epoch, version, release, pre FROM %s WHERE pkgKey IN (%s) ORDER BY pkgKey, name`, sp.kind, placeholders)
+		} else {
+			// #nosec G201 -- table name sp.kind is a fixed literal from depSpecs and placeholders only contains '?'
+			q = fmt.Sprintf(`SELECT pkgKey, name, flags, epoch, version, release FROM %s WHERE pkgKey IN (%s) ORDER BY pkgKey, name`, sp.kind, placeholders)
+		}
+		rows, err := r.PrimaryDB.Query(q, ids...)
+		if err != nil {
+			return fmt.Errorf("failed to bulk-query %s: %w", sp.kind, err)
+		}
+		for rows.Next() {
+			var pkgKey int64
+			var name, flags, epoch, version, release sql.NullString
+			var pre bool
+			var scanErr error
+			if sp.hasPre {
+				scanErr = rows.Scan(&pkgKey, &name, &flags, &epoch, &version, &release, &pre)
+			} else {
+				scanErr = rows.Scan(&pkgKey, &name, &flags, &epoch, &version, &release)
+			}
+			if scanErr != nil {
+				_ = rows.Close()
+				return fmt.Errorf("failed to scan batch %s row: %w", sp.kind, scanErr)
+			}
+			if p, ok := pkgMap[pkgKey]; ok {
+				sp.setter(p.Dependencies, &models.DependencyEntry{
+					Name:    name.String,
+					Flags:   flags.String,
+					Epoch:   epoch.String,
+					Version: version.String,
+					Release: release.String,
+					Pre:     pre,
+				})
+			}
+		}
+		rowErr := rows.Err()
+		_ = rows.Close()
+		if rowErr != nil {
+			return rowErr
+		}
+	}
+	return nil
 }
 
 func (r *RepositoryAccess) queryDepEntries(stmt *sql.Stmt, fallbackSQL string, pkgKey int64, hasPre bool) ([]*models.DependencyEntry, error) {
@@ -597,9 +712,16 @@ func (r *RepositoryAccess) ReadPackageFiles(repoDir string, pkg *models.Package)
 	return ReadRPMFiles(rpmPath)
 }
 
+// EnrichForRender loads RPM header details and file manifests in a single file open pass.
+func (r *RepositoryAccess) EnrichForRender(repoDir string, pkg *models.Package) error {
+	return EnrichRPMForRender(repoDir, pkg)
+}
+
 var (
-	_ RepoReader        = (*RepositoryAccess)(nil)
-	_ ChangelogEnricher = (*RepositoryAccess)(nil)
-	_ DependencyReader  = (*RepositoryAccess)(nil)
-	_ AdvisoryEnricher  = (*RepositoryAccess)(nil)
+	_ RepoReader            = (*RepositoryAccess)(nil)
+	_ ChangelogEnricher     = (*RepositoryAccess)(nil)
+	_ DependencyReader      = (*RepositoryAccess)(nil)
+	_ DependencyEnricher    = (*RepositoryAccess)(nil)
+	_ AdvisoryEnricher      = (*RepositoryAccess)(nil)
+	_ PackageRenderEnricher = (*RepositoryAccess)(nil)
 )

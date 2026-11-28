@@ -580,3 +580,61 @@ func TestScanner_SinglePassSearchJSON(t *testing.T) {
 		t.Errorf("expected PackageCount=2 Arch=aarch64 from single-pass search.json parse, got count=%d arch=%q", repos[0].PackageCount, repos[0].Arch)
 	}
 }
+
+func TestScanner_DebianDebugAndDDEBArch(t *testing.T) {
+	root := t.TempDir()
+
+	// 1. Standard noble main + universe
+	for _, comp := range []string{"main", "universe"} {
+		d := filepath.Join(root, "ubu24", "dists", "noble", comp, "binary-amd64")
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(filepath.Join(d, "Packages.gz"), []byte("dummy"), 0o644)
+	}
+
+	// 2. Debug symbol tree under ubu24/dists/noble/main/debug/binary-amd64
+	dbgDir := filepath.Join(root, "ubu24", "dists", "noble", "main", "debug", "binary-amd64")
+	if err := os.MkdirAll(dbgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dbgDir, "Packages.gz"), []byte("dummy"), 0o644)
+
+	// 3. Unrelated noise debug/ directory outside dists/ MUST still be pruned
+	noiseDebug := filepath.Join(root, "debug")
+	_ = os.MkdirAll(filepath.Join(noiseDebug, "repodata"), 0o755)
+
+	// 4. Flat .ddeb repository without Release file
+	flatDdeb := filepath.Join(root, "custom-dbgsym")
+	_ = os.MkdirAll(flatDdeb, 0o755)
+	_ = os.WriteFile(filepath.Join(flatDdeb, "Packages.gz"), []byte("dummy"), 0o644)
+	_ = os.WriteFile(filepath.Join(flatDdeb, "nginx-dbgsym_1.24.0_arm64.ddeb"), []byte("dummy"), 0o644)
+
+	repos, err := NewScanner(ScanConfig{RootDir: root, MaxDepth: 8}).Scan()
+	if err != nil {
+		t.Fatalf("Scan failed: %v", err)
+	}
+
+	var sawRegular, sawDebug, sawFlatDdeb bool
+	for _, r := range repos {
+		if r.RelPath == "debug" {
+			t.Errorf("unrelated top-level debug/ dir should still be pruned")
+		}
+		if r.Suite == "noble" && r.Distro == "ubu24" {
+			if len(r.Components) == 1 && r.Components[0] == "main/debug" {
+				sawDebug = true
+			} else if len(r.Components) == 2 && r.Components[0] == "main" && r.Components[1] == "universe" {
+				sawRegular = true
+			}
+		}
+		if r.RelPath == "custom-dbgsym" {
+			sawFlatDdeb = true
+			if r.Arch != "arm64" {
+				t.Errorf("expected arm64 arch detected from .ddeb file, got %q", r.Arch)
+			}
+		}
+	}
+	if !sawRegular || !sawDebug || !sawFlatDdeb {
+		t.Errorf("missing expected repos: regular=%v debug=%v flatDdeb=%v (repos=%d)", sawRegular, sawDebug, sawFlatDdeb, len(repos))
+	}
+}

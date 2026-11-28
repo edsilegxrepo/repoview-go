@@ -1,5 +1,22 @@
 package repo
 
+// OBJECTIVES:
+// Auto-detect repository packaging formats and instantiate the appropriate RepoReader
+// implementation (SQLite RPM, XML-only RPM fallback, or Debian/Ubuntu APT reader).
+//
+// CORE COMPONENTS:
+//   - OpenOptions / RepoMetadata: Configuration and summary metadata returned on open.
+//   - DetectFormat: Filesystem probe distinguishing RPM (repodata/repomd.xml) vs DEB (dists/ or Packages*).
+//   - Open / OpenWithOptions: Unified repository factory managing parallel metadata decompression.
+//
+// FUNCTIONALITY:
+//   - For RPM, prefers primary.sqlite + other.sqlite decompressed in parallel via goroutines,
+//     falling back cleanly to primary.xml + other.xml when SQLite databases are omitted.
+//   - For DEB, discovers suites, components, arches, and Release metadata via deb.DiscoverWithOptions.
+//
+// DATA FLOW:
+//   repoDir + OpenOptions -> DetectFormat -> (DEB | RPM SQLite | RPM XML) -> (RepoReader, *RepoMetadata, cleanup)
+
 import (
 	"fmt"
 	"io"

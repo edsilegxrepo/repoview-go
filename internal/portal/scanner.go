@@ -2,16 +2,19 @@
 // and unified catalog generation for multi-repository hosting.
 //
 // OBJECTIVES:
-// Traverse nested, flat, or dedicated repository trees with high performance (<25ms),
-// prune irrelevant package subdirectories (pool/, SRPMS/), guard against symlink cycles,
-// parse self-describing repoview.json metadata with graceful fallbacks, and aggregate
+// Traverse nested, flat, or dedicated repository trees quickly, prune noisy payload
+// subdirectories (pool/, SRPMS/, unrelated debug/), guard against symlink cycles using
+// platform file IDs, parse repoview.json with search/path fallbacks, and aggregate
 // Debian multi-component suites into unified catalog cards.
 //
-// DESIGN PILLARS:
-//   - Pillar 1: Self-Describing Repositories (reads repoview.json, falls back to HTML/path heuristics).
-//   - Pillar 2: High-Speed Traversal & Branch Pruning (skips pool/, SRPMS/, prunes at repo leaves).
-//   - Pillar 3: Symlink Inode Guards & Mirror Alias Deduplication (filepath.EvalSymlinks).
-//   - Pillar 5: Debian Suite Grouping (Option A: combines components by Suite + Arch).
+// CORE COMPONENTS:
+//   - ScanConfig / Scanner: Recursive crawler tracking canonical paths and (dev/vol, ino/idx) IDs.
+//   - inspectDirectory: Evaluates detached portal home, in-tree descriptors, HTML signatures, and raw mirrors.
+//   - AggregateDebianSuites: Consolidates suite components while isolating debug (.ddeb) subtrees.
+//
+// DATA FLOW:
+//
+//	RootDir (+ PortalHome) -> Scanner.Scan -> AggregateDebianSuites -> sorted []*DiscoveredRepo
 package portal
 
 import (
@@ -27,11 +30,13 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/taxonomy"
 )
 
+// --- Scanner Configuration & Directory Crawler ---
+
 // ScanConfig defines traversal and filtering options for repository auto-discovery.
 type ScanConfig struct {
 	RootDir         string          // Root directory to crawl (HOME PATH)
 	PortalHome      string          // Optional detached portal home directory (containing rendered views)
-	MaxDepth        int             // Maximum directory recursion depth (default: 5)
+	MaxDepth        int             // Maximum directory recursion depth (default: 7)
 	RequireRendered bool            // If true, filters out unbuilt/raw repositories
 	ExcludePatterns []string        // Directory names or glob patterns to skip
 	TaxonomyRules   *taxonomy.Rules // Optional custom path patterns and distro icon aliases
@@ -53,7 +58,7 @@ func (s *Scanner) Warnings() []string {
 // NewScanner creates a new Scanner instance.
 func NewScanner(cfg ScanConfig) *Scanner {
 	if cfg.MaxDepth <= 0 {
-		cfg.MaxDepth = 5
+		cfg.MaxDepth = 7
 	}
 	return &Scanner{
 		config:        cfg,
@@ -98,7 +103,12 @@ func (s *Scanner) Scan() ([]*DiscoveredRepo, error) {
 	}
 	s.visitedPaths[absRoot] = nil
 
-	if err := s.crawl(absRoot, ".", 0, absRoot, &discovered); err != nil {
+	if rootRepo, isRepo := s.inspectDirectory(absRoot, "."); isRepo {
+		s.visitedPaths[absRoot] = rootRepo
+		if !s.config.RequireRendered || rootRepo.IsRendered {
+			discovered = append(discovered, rootRepo)
+		}
+	} else if err := s.crawl(absRoot, ".", 0, absRoot, &discovered); err != nil {
 		return nil, fmt.Errorf("error during traversal: %w", err)
 	}
 
@@ -126,12 +136,12 @@ func (s *Scanner) crawl(dirPath, virtualRel string, depth int, absRoot string, d
 	for _, entry := range entries {
 		name := entry.Name()
 
+		childPath := filepath.Join(dirPath, name)
+
 		// Never prune root, but prune subdirectories matching default or custom exclusions
-		if s.isExcluded(name) {
+		if s.isDirExcluded(name, childPath) {
 			continue
 		}
-
-		childPath := filepath.Join(dirPath, name)
 		childRel := name
 		if virtualRel != "." {
 			childRel = filepath.Join(virtualRel, name)
@@ -541,7 +551,11 @@ func (s *Scanner) enrichDebianSuite(repo *DiscoveredRepo, path string) {
 				repo.Suite = parts[i+1]
 			}
 			if i+2 < len(parts) && !strings.HasPrefix(parts[i+2], "binary-") {
-				repo.Components = []string{parts[i+2]}
+				comp := parts[i+2]
+				if i+3 < len(parts) && parts[i+3] == "debug" && !strings.HasPrefix(parts[i+3], "binary-") {
+					comp += "/debug"
+				}
+				repo.Components = []string{comp}
 			}
 			break
 		}
@@ -560,7 +574,8 @@ func AggregateDebianSuites(repos []*DiscoveredRepo) []*DiscoveredRepo {
 			continue
 		}
 
-		key := fmt.Sprintf("%s|%s|%s", repo.Distro, repo.Suite, repo.Arch)
+		isDebug := isDebugDebianRepo(repo)
+		key := fmt.Sprintf("%s|%s|%s|%t", repo.Distro, repo.Suite, repo.Arch, isDebug)
 		if existing, exists := suiteMap[key]; exists {
 			// Prioritize "main" component for primary Path, RelPath, and TargetURL
 			hasMainBefore := containsString(existing.Components, "main")
@@ -621,16 +636,56 @@ func AggregateDebianSuites(repos []*DiscoveredRepo) []*DiscoveredRepo {
 	return result
 }
 
-// isExcluded returns true if the directory name matches default or custom glob exclusion patterns.
-func (s *Scanner) isExcluded(name string) bool {
-	if defaultExcludedDirs[name] {
-		return true
+func isDebugDebianRepo(repo *DiscoveredRepo) bool {
+	if repo == nil {
+		return false
 	}
+	for _, c := range repo.Components {
+		if c == "debug" || strings.HasSuffix(c, "/debug") {
+			return true
+		}
+	}
+	slash := filepath.ToSlash(repo.RelPath)
+	return strings.Contains(slash, "/debug/binary-")
+}
+
+// isDirExcluded checks exclusions with path awareness so Debian APT debug component trees
+// (dists/<suite>/<component>/debug/binary-<arch>) are spared while unrelated debug dirs remain pruned.
+func (s *Scanner) isDirExcluded(name, childPath string) bool {
 	for _, pattern := range s.config.ExcludePatterns {
 		if pattern == "" {
 			continue
 		}
 		if matched, _ := filepath.Match(pattern, name); matched {
+			return true
+		}
+	}
+	if name == "debug" && hasPathSegment(childPath, "dists") && hasDebugDebianEntries(childPath) {
+		return false
+	}
+	return defaultExcludedDirs[name]
+}
+
+func hasPathSegment(p, segment string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+		if part == segment {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDebugDebianEntries(dirPath string) bool {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		ename := e.Name()
+		if e.IsDir() && strings.HasPrefix(ename, "binary-") {
+			return true
+		}
+		if !e.IsDir() && (ename == "Packages" || strings.HasPrefix(ename, "Packages.")) {
 			return true
 		}
 	}
@@ -855,8 +910,12 @@ func detectArchFromPackageFiles(repoDir string) string {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, ".deb") {
-			base := strings.TrimSuffix(name, ".deb")
+		if strings.HasSuffix(name, ".deb") || strings.HasSuffix(name, ".ddeb") {
+			ext := ".deb"
+			if strings.HasSuffix(name, ".ddeb") {
+				ext = ".ddeb"
+			}
+			base := strings.TrimSuffix(name, ext)
 			if idx := strings.LastIndex(base, "_"); idx != -1 {
 				arch := base[idx+1:]
 				if IsKnownArch(arch) {

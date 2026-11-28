@@ -17,18 +17,16 @@ import (
 )
 
 // TEST STRATEGY:
-// Validate the CLI interface, flag parser, early directory validation, error mappings,
-// and process exit codes without polluting the repository.
+// Validate the CLI interface, flag parser, YAML defaults merging, early directory validation,
+// portal subcommand orchestration, --dump-config behavior, error mappings, and process exit codes
+// without polluting the source repository.
 //
-// Test coverage includes:
-//   - TestRun_Version: Validates that --version writes version string and returns ExitSuccess.
-//   - TestRun_NoArgs: Validates that zero arguments prints usage and returns ExitUsageError.
-//   - TestRun_InvalidFlag: Validates that an unknown flag returns ExitUsageError.
-//   - TestRun_MissingRepo: Validates that a non-existent path returns ExitRepoMetadataError.
-//   - TestRun_NotADirectory: Validates that passing a file instead of a directory returns ExitRepoMetadataError.
-//   - TestRun_SafetyViolation: Validates that specifying --output-dir matching repoDir returns ExitUsageError.
-//   - TestRun_StringList: Validates custom stringList flag accumulator.
-//   - TestRun_FullPipeline: Validates successful run with real/fixture repository in t.TempDir().
+// CORE SCENARIOS:
+//   - Single-Repo CLI: --version, --help, missing/invalid args, safety violations, --format,
+//     --portal-url, repoview.yaml defaults, --suite/--arch, and --dump-config merge/non-clobber.
+//   - Portal CLI: --portal-home vs --in-place enforcement, detached clean source invariant,
+//     --render-missing/--render-all worker pools, --require-rendered, overrides, and --dump-config.
+//   - Exit Code Matrix: Verifies deterministic mapping across domain errors (exit codes 0-8).
 
 func TestRun_Version(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -380,10 +378,49 @@ func TestRunPortal_DumpConfig(t *testing.T) {
 		t.Errorf("expected dumped config to contain 'auto_discovery', got: %s", string(data))
 	}
 
+	// Verify non-clobber guard refuses overwriting without --force
+	stdout.Reset()
+	stderr.Reset()
+	if codeClobber := run([]string{"portal", "--dump-config", dumpPath, tempDir}, &stdout, &stderr); codeClobber != app.ExitSafetyError {
+		t.Errorf("expected ExitSafetyError (%d) without --force on existing dump file, got %d (%s)", app.ExitSafetyError, codeClobber, stderr.String())
+	}
+
 	// Verify index.html was NOT generated in dump mode
 	indexPath := filepath.Join(tempDir, "index.html")
 	if _, err := os.Stat(indexPath); err == nil {
 		t.Errorf("dump-config should not generate index.html")
+	}
+}
+
+func TestRun_SingleRepoDumpConfig(t *testing.T) {
+	parent := t.TempDir()
+	repoDir := filepath.Join(parent, "el9", "base", "x86_64")
+	createMockRPMRepo(t, repoDir)
+	dumpPath := filepath.Join(t.TempDir(), "repoview.yaml")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--dump-config", dumpPath, "--baseurl", "https://mirrors.example.com/el9", repoDir}, &stdout, &stderr)
+	if code != app.ExitSuccess {
+		t.Fatalf("expected ExitSuccess (0), got %d, stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(dumpPath)
+	if err != nil {
+		t.Fatalf("failed to read single-repo dumped config: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "format: rpm") || !strings.Contains(text, "arch: x86_64") || !strings.Contains(text, "https://mirrors.example.com/el9") {
+		t.Errorf("unexpected dumped repoview.yaml content:\n%s", text)
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "repoview", "index.html")); err == nil {
+		t.Errorf("single-repo --dump-config should not generate HTML output")
+	}
+
+	// Verify non-clobber guard without --force, and merge with --force
+	if codeClobber := run([]string{"--dump-config", dumpPath, repoDir}, &stdout, &stderr); codeClobber != app.ExitSafetyError {
+		t.Errorf("expected ExitSafetyError without --force, got %d", codeClobber)
+	}
+	if codeForce := run([]string{"--force", "--dump-config", dumpPath, repoDir}, &stdout, &stderr); codeForce != app.ExitSuccess {
+		t.Errorf("expected ExitSuccess with --force merge, got %d (%s)", codeForce, stderr.String())
 	}
 }
 
@@ -911,4 +948,3 @@ func TestRun_ExitCodeMatrix(t *testing.T) {
 		t.Errorf("expected ExitConfigError (8), got %d", code)
 	}
 }
-

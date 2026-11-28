@@ -1,5 +1,21 @@
 package portal
 
+// OBJECTIVES:
+// Define the multi-repository portal catalog structures and synthesize copy-ready
+// client package manager configuration snippets (.repo and Deb822 .sources).
+//
+// CORE COMPONENTS:
+//   - DiscoveredRepo: Unified representation of a discovered/overridden repository node.
+//   - Catalog: Aggregated portal dataset driving portal.html, filters, and RSS feeds.
+//   - BuildCatalog / BuildConfigSnippet: Catalog facet aggregation and snippet formatters.
+//
+// FUNCTIONALITY:
+//   - Computes detached vs external vs APT archive URLs cleanly across topologies.
+//   - Sanitizes single-line fields via util.SanitizeSingleLine to block INI/Deb822 injection.
+//
+// DATA FLOW:
+//   []*DiscoveredRepo -> BuildCatalog (+ BuildConfigSnippet) -> *Catalog -> portal.Renderer
+
 import (
 	"fmt"
 	"path/filepath"
@@ -10,6 +26,8 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/models"
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
+
+// --- Catalog & Repository Node Models ---
 
 // DiscoveredRepo represents an indexed RPM, DEB, or aggregated Debian suite repository.
 type DiscoveredRepo struct {
@@ -39,6 +57,20 @@ type DiscoveredRepo struct {
 	ExcludeArch   []string               `json:"exclude_arch,omitempty"`   // Override architecture exclusions
 	Comps         string                 `json:"comps,omitempty"`          // Override comps.xml path
 	Hidden        bool                   `json:"hidden,omitempty"`         // Excluded from portal catalog display
+	Pinned        bool                   `json:"pinned,omitempty"`         // Promoted to Pinned / Featured section
+}
+
+// HasPinned reports whether any repository in the catalog is marked as pinned.
+func (c *Catalog) HasPinned() bool {
+	if c == nil {
+		return false
+	}
+	for _, r := range c.Repos {
+		if r != nil && r.Pinned {
+			return true
+		}
+	}
+	return false
 }
 
 // Catalog holds the aggregated portal state ready for rendering.

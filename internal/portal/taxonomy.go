@@ -1,6 +1,22 @@
 package portal
 
+// OBJECTIVES:
+// Expose path, architecture, distribution/channel, and icon classification helpers directly
+// within package portal while delegating core rules to shared internal/taxonomy.
+//
+// CORE COMPONENTS:
+//   - IsKnownArch / KnownArchitectures / DetectPrimaryArch / DetectArchFromPath
+//   - InferDistroAndChannel / TokenizeSlug / MatchDistroIcon
+//
+// FUNCTIONALITY:
+//   - Prevents taxonomy drift between standalone repo builds and multi-repo portal discovery.
+//
+// DATA FLOW:
+//   portal scanner/renderer -> portal taxonomy wrappers -> internal/taxonomy
+
 import "github.com/edsilegxrepo/repoview/internal/taxonomy"
+
+// --- Shared Taxonomy Delegations ---
 
 // IsKnownArch returns true if the architecture is in the known architecture dictionary.
 func IsKnownArch(arch string) bool {

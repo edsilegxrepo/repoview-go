@@ -1,6 +1,6 @@
 {
 	"name": "repoview",
-	"version": "0.3.0",
+	"version": "0.5.0",
 	"release": "1",
 	"channel": "xg",
 	"entrypoint": "./cmd/repoview",
@@ -16,7 +16,7 @@
 	"install_path": "/usr/bin",
 	"cgo": true,
 	"history": [
-		"* Thu Sep 18 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
+		"* Fri Nov 27 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
 		"- Packaged to new code release"
 	]
 }

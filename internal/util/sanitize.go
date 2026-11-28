@@ -37,7 +37,7 @@ func SanitizeFilename(text string) string {
 	b.Grow(len(text))
 	for _, r := range text {
 		switch r {
-		case ':', '*', '?', '"', '<', '>', '|':
+		case ':', '*', '?', '"', '<', '>', '|', '#':
 			b.WriteRune('_')
 		default:
 			if r < 32 {
@@ -69,6 +69,8 @@ func SanitizeFilename(text string) string {
 
 	return result
 }
+
+// --- Metadata Line & Shell Quoting Guards ---
 
 // SanitizeSingleLine strips ASCII control characters (including CR, LF, NUL, and tabs)
 // so untrusted repository metadata cannot inject newlines or extra INI/Deb822 directives

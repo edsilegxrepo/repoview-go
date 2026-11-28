@@ -2,6 +2,9 @@
 
 package util
 
+// OBJECTIVES: Implement POSIX permission-enforcing directory and static file helpers
+// overriding restrictive runtime umasks for public static web serving (0755/0644).
+
 import "os"
 
 // EnsureDir creates a directory hierarchy with DefaultDirPerm (0755) and explicitly

@@ -1,5 +1,13 @@
 package taxonomy
 
+// OBJECTIVES:
+// Validate shared architecture recognition, dominant arch election, declarative path_patterns,
+// custom distro_aliases, and distro/channel/icon classification across RPM and DEB layouts.
+//
+// TEST STRATEGY:
+// Exercises deterministic table-driven unit tests over representative filesystem paths, package
+// inventories, and custom YAML Rules structures without filesystem side effects.
+
 import (
 	"testing"
 
@@ -89,9 +97,9 @@ func TestTaxonomy_ComprehensiveDistroAndPathVariants(t *testing.T) {
 	}
 
 	archPaths := map[string]string{
-		"/repos/el9-base.aarch64":          "aarch64",
-		"/repos/fedora-40-riscv64":         "riscv64",
-		"/repos/deb/binary-armhf":          "armhf",
+		"/repos/el9-base.aarch64":           "aarch64",
+		"/repos/fedora-40-riscv64":          "riscv64",
+		"/repos/deb/binary-armhf":           "armhf",
 		"/repos/no-arch-indicator/packages": "unknown",
 	}
 	for p, want := range archPaths {

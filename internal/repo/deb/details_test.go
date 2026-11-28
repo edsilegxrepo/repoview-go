@@ -1,5 +1,13 @@
 package deb
 
+// OBJECTIVES:
+// Verify pure-Go inspection of .deb/.ddeb archives including ar timestamps, maintainer scripts,
+// conffiles/triggers, data.tar manifests, Debian changelogs, and DEP-5 license extraction.
+//
+// TEST STRATEGY:
+// Synthesizes in-memory ar + tar.gz / tar.zst .deb archives in t.TempDir() and exercises
+// ReadDebDetails, ReadDebFilesMetadata, and ReadDebRenderMetadata without dpkg-deb.
+
 import (
 	"archive/tar"
 	"bytes"

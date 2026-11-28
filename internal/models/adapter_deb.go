@@ -1,5 +1,24 @@
 package models
 
+// OBJECTIVES:
+// Translate Debian control.BinaryIndex records into RepoView's format-agnostic
+// domain package representation so downstream grouping, rendering, and search
+// pipelines operate uniformly across RPM and DEB repositories.
+//
+// CORE COMPONENTS:
+//   - PackageFromBinaryIndex: Primary adapter mapping Deb822 binary fields, tags,
+//     checksums, descriptions, and dependency vectors into models.Package.
+//   - mapDebianDependencies: Helper flattening pault.ag/go/debian relations and
+//     skipping unresolved substvar placeholders into DependencyEntry slices.
+//
+// FUNCTIONALITY:
+//   - Normalizes KiB Installed-Size values to byte counts, cleans "./" prefixes
+//     from archive paths, splits single-line summaries from multi-line bodies,
+//     and preserves Debtags as well as weak/reverse dependency relationships.
+//
+// DATA FLOW:
+//   control.BinaryIndex -> PackageFromBinaryIndex -> *models.Package -> logic/render
+
 import (
 	"fmt"
 	"strings"
@@ -52,6 +71,15 @@ func PackageFromBinaryIndex(idx control.BinaryIndex) *Package {
 			pkg.Tags = append(pkg.Tags, trimmed)
 		}
 	}
+	if len(pkg.Tags) == 0 {
+		if rawTag := strings.TrimSpace(idx.Values["Tag"]); rawTag != "" {
+			for _, t := range strings.Split(rawTag, ",") {
+				if trimmed := strings.TrimSpace(t); trimmed != "" {
+					pkg.Tags = append(pkg.Tags, trimmed)
+				}
+			}
+		}
+	}
 
 	// First line of Description is summary; remaining lines form full description
 	desc := strings.TrimSpace(idx.Description)
@@ -61,6 +89,8 @@ func PackageFromBinaryIndex(idx control.BinaryIndex) *Package {
 			pkg.Description = strings.TrimSpace(lines[1])
 		}
 	}
+
+	// --- Dependency Vector Mapping ---
 
 	pkg.Dependencies = &PackageDependencies{
 		Requires:   mapDebianDependencies(idx.GetPreDepends(), true),
@@ -78,6 +108,8 @@ func PackageFromBinaryIndex(idx control.BinaryIndex) *Package {
 
 	return pkg
 }
+
+// --- Dependency Translation Helpers ---
 
 // mapDebianDependencies converts pault.ag/go/debian Dependency objects into DependencyEntry records.
 func mapDebianDependencies(dep dependency.Dependency, isPre bool) []*DependencyEntry {

@@ -1,6 +1,25 @@
 package deb
 
+// OBJECTIVES:
+// Inspect local .deb and .ddeb ar archives in pure Go (no dpkg-deb dependency) to
+// extract build timestamps, maintainer scripts, conffiles, file manifests, changelogs,
+// and DEP-5 license identifiers.
+//
+// CORE COMPONENTS:
+//   - ReadDebTimestamp / readArTimestampFromFile: Reads 60-byte ar header build epochs.
+//   - ReadDebDetails / ReadDebDetailsWithTimestamp: Extracts control.tar.* scripts & triggers.
+//   - ReadDebRenderMetadata: Single-pass combined reader for control + data tar streams.
+//   - ReadDebFilesMetadata / streamDataTarMetadata: Extracts files, copyright, and changelog.
+//
+// FUNCTIONALITY:
+//   - Caps scriptlet reads at 1 MiB and copyright reads at 256 KiB.
+//   - Marks files declared in DEBIAN/conffiles with the "config" role flag.
+//
+// DATA FLOW:
+//   .deb/.ddeb file -> ar header + control.tar + data.tar -> models.PackageDetails & []PackageFile
+
 import (
+	"archive/tar"
 	"bufio"
 	"compress/gzip"
 	"io"
@@ -13,6 +32,8 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/models"
 	pdeb "pault.ag/go/debian/deb"
 )
+
+// --- Archive Timestamps & Control Member Extraction ---
 
 // ReadDebTimestamp extracts the package build timestamp from the .deb archive.
 // It inspects the first ar archive member ("debian-binary"), which per Debian policy
@@ -71,6 +92,37 @@ func ReadDebDetailsWithTimestamp(debPath string) (*models.PackageDetails, int64,
 		return nil, ts, err
 	}
 
+	details := extractDebControlDetails(debFile)
+	return details, ts, nil
+}
+
+// ReadDebRenderMetadata extracts ar timestamp, control details, file manifests, changelog,
+// and fallback DEP-5 license from a single .deb archive open pass.
+func ReadDebRenderMetadata(debPath string) (*models.PackageDetails, int64, []models.PackageFile, *models.ChangelogEntry, string, error) {
+	// #nosec G304 -- debPath is validated against directory traversal by repository discovery
+	f, err := os.Open(filepath.Clean(debPath))
+	if err != nil {
+		return nil, 0, nil, nil, "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	ts := readArTimestampFromFile(f)
+
+	debFile, err := pdeb.Load(f, debPath)
+	if err != nil {
+		return nil, ts, nil, nil, "", err
+	}
+
+	details := extractDebControlDetails(debFile)
+	var conffiles map[string]bool
+	if details != nil {
+		conffiles = details.Conffiles
+	}
+	files, changelog, detectedLicense := streamDataTarMetadata(debFile.Data, conffiles)
+	return details, ts, files, changelog, detectedLicense, nil
+}
+
+func extractDebControlDetails(debFile *pdeb.Deb) *models.PackageDetails {
 	details := &models.PackageDetails{}
 	scriptlets := &models.PackageScriptlets{}
 
@@ -143,7 +195,7 @@ func ReadDebDetailsWithTimestamp(debPath string) (*models.PackageDetails, int64,
 	if scriptlets.HasAny() {
 		details.Scriptlets = scriptlets
 	}
-	return details, ts, nil
+	return details
 }
 
 // ReadDebFiles streams file headers from debFile.Data (*tar.Reader) on-demand.
@@ -170,12 +222,20 @@ func ReadDebFilesMetadata(debPath string, conffiles map[string]bool) ([]models.P
 		_ = closer()
 	}()
 
+	files, changelog, detectedLicense := streamDataTarMetadata(debFile.Data, conffiles)
+	return files, changelog, detectedLicense, nil
+}
+
+func streamDataTarMetadata(dataTar *tar.Reader, conffiles map[string]bool) ([]models.PackageFile, *models.ChangelogEntry, string) {
+	if dataTar == nil {
+		return nil, nil, ""
+	}
 	var files []models.PackageFile
 	var changelog *models.ChangelogEntry
 	var detectedLicense string
 
 	for {
-		header, err := debFile.Data.Next()
+		header, err := dataTar.Next()
 		if err != nil {
 			break
 		}
@@ -202,14 +262,14 @@ func ReadDebFilesMetadata(debPath string, conffiles map[string]bool) ([]models.P
 
 		base := path.Base(name)
 		if detectedLicense == "" && base == "copyright" && strings.Contains(name, "/usr/share/doc/") {
-			detectedLicense = parseDEP5License(io.LimitReader(debFile.Data, 256*1024))
+			detectedLicense = parseDEP5License(io.LimitReader(dataTar, 256*1024))
 		}
 
 		// Extract changelog in single-pass if not already found
 		if changelog == nil && (strings.HasPrefix(base, "changelog.Debian") || base == "changelog.gz" || base == "changelog") {
-			var r io.Reader = debFile.Data
+			var r io.Reader = dataTar
 			if strings.HasSuffix(base, ".gz") {
-				if gzr, err := gzip.NewReader(debFile.Data); err == nil {
+				if gzr, err := gzip.NewReader(dataTar); err == nil {
 					if entry, err := ParseChangelog(io.LimitReader(gzr, 2*1024*1024)); err == nil && entry != nil {
 						changelog = entry
 					}
@@ -222,7 +282,7 @@ func ReadDebFilesMetadata(debPath string, conffiles map[string]bool) ([]models.P
 			}
 		}
 	}
-	return files, changelog, detectedLicense, nil
+	return files, changelog, detectedLicense
 }
 
 // parseDEP5License extracts concise license identifiers from a Debian DEP-5 copyright file.

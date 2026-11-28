@@ -1,5 +1,11 @@
 {{ define "_sidebar.html" }}
-    <aside class="sidebar">
+{{/*
+  OBJECTIVE: Render the persistent left navigation rail with theme toggle, repo setup modal trigger,
+  qualifier-aware package search input (#pkgSearchInput), group tree quick filter (#groupTreeFilter),
+  hierarchical Comps/Section accordion tree, and A-Z letter index matrix.
+  DATA FLOW: render.PageData (.PageKind, .Repo.GroupTree, .Repo.Letters, .Group) -> sidebar DOM.
+*/}}
+    <aside id="repoSidebar" class="sidebar">
         <div class="sidebar-header">
             <div class="brand-row">
                 <a href="index.html" class="brand-title" title="{{ .Repo.Title }}">
@@ -47,10 +53,20 @@
                         <circle cx="11" cy="11" r="8"></circle>
                         <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                     </svg>
-                    <input type="text" id="pkgSearchInput" placeholder="Search packages... (arch:, license:, cve:)" autocomplete="off">
-                    <span class="kbd-hint">/</span>
+                    <input type="text" id="pkgSearchInput" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="searchResults" placeholder="Search packages... (arch:, cve:, license:)" autocomplete="off">
+                    <button type="button" id="pkgSearchClear" class="search-clear-btn" aria-label="Clear package search" hidden>&times;</button>
+                    <span class="kbd-hint" id="pkgSearchKbd">/</span>
                 </div>
-                <div id="searchResults"></div>
+                <div id="searchHints" class="search-hints" hidden>
+                    <span class="search-hints-label">Filters:</span>
+                    <button type="button" class="search-hint-pill" data-qualifier="arch:">arch:</button>
+                    <button type="button" class="search-hint-pill" data-qualifier="cve:">cve:</button>
+                    <button type="button" class="search-hint-pill" data-qualifier="license:">license:</button>
+                    <button type="button" class="search-hint-pill" data-qualifier="tag:">tag:</button>
+                    <button type="button" class="search-hint-pill" data-qualifier="provides:">provides:</button>
+                    <button type="button" class="search-hint-pill" data-qualifier="group:">group:</button>
+                </div>
+                <div id="searchResults" role="listbox" aria-label="Package search results"></div>
             </div>
         </div>
 
@@ -78,6 +94,7 @@
                     <span>Package Groups</span>
                     <span class="count-badge">{{ len .Repo.Groups }}</span>
                 </div>
+                <input type="text" id="groupTreeFilter" class="sidebar-tree-filter" placeholder="Filter groups..." aria-label="Filter package groups" autocomplete="off">
                 <div class="nav-tree">
                     {{ range .Repo.GroupTree }}
                     {{ if .IsLeaf }}

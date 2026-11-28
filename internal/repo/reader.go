@@ -1,6 +1,24 @@
 package repo
 
+// OBJECTIVES:
+// Define the format-agnostic data access contracts decoupling upstream generator
+// orchestration from underlying RPM and Debian metadata storage engines.
+//
+// CORE COMPONENTS:
+//   - RepoReader: Required baseline contract (GetAllPackages, EnrichPackageDetails, ReadPackageFiles, Close).
+//   - Optional Enricher Interfaces: ChangelogEnricher, DependencyReader, DependencyEnricher,
+//     PackageRenderEnricher, and AdvisoryEnricher for backend-specific optimizations.
+//
+// FUNCTIONALITY:
+//   - Enables single-pass binary archive enrichment (PackageRenderEnricher) and batched SQLite
+//     queries (DependencyEnricher) via clean interface assertions in app.Generator.
+//
+// DATA FLOW:
+//   app.Generator -> RepoReader (+ optional interface assertions) -> []*models.Package
+
 import "github.com/edsilegxrepo/repoview/internal/models"
+
+// --- Core Storage & Capability Contracts ---
 
 // RepoReader unifies minimal package repository ingestion across RPM and DEB backends.
 type RepoReader interface {
@@ -27,6 +45,18 @@ type ChangelogEnricher interface {
 // per-package dependency graphs on demand instead of attaching them in GetAllPackages.
 type DependencyReader interface {
 	GetPackageDependencies(pkgKey int64) (*models.PackageDependencies, error)
+}
+
+// DependencyEnricher is an optional capability interface implemented by backends that can
+// bulk-load dependency graphs across a slice of packages prior to parallel page rendering.
+type DependencyEnricher interface {
+	EnrichPackagesWithDependencies(pkgs []*models.Package) error
+}
+
+// PackageRenderEnricher populates archive details (scriptlets, signatures, conffiles, timestamps)
+// and on-demand file manifests in a single file open right before rendering a package page.
+type PackageRenderEnricher interface {
+	EnrichForRender(repoDir string, pkg *models.Package) error
 }
 
 // AdvisoryEnricher is an optional capability interface implemented by backends supporting updateinfo errata.

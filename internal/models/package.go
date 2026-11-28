@@ -35,6 +35,8 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/util"
 )
 
+// --- Core Package Format & Domain Models ---
+
 // RepoFormat identifies the underlying distribution packaging system.
 type RepoFormat string
 
@@ -96,6 +98,8 @@ type Package struct {
 	Dependencies *PackageDependencies // Package dependencies (requires, provides, conflicts, obsoletes, recommends, suggests, enhances, supplements)
 	Advisories   []Advisory           // Matching security/bugfix/enhancement advisories (updateinfo.xml)
 }
+
+// --- Dependencies, Archive Inspection & Changelogs ---
 
 // Advisory represents an RPM updateinfo errata / security advisory affecting a package.
 type Advisory struct {
@@ -224,6 +228,8 @@ type ChangelogEntry struct {
 	Date      int64  `db:"date"`      // Unix epoch timestamp of the changelog note
 	Changelog string `db:"changelog"` // Changelog entry description text
 }
+
+// --- Formatting & Filename Derivation Methods ---
 
 // EVR returns the Epoch-Version-Release tuple string.
 // For Debian packages, returns standard Debian version string (omitting epoch if 0 or empty).

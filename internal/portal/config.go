@@ -1,5 +1,22 @@
 package portal
 
+// OBJECTIVES:
+// Load, validate, merge, and bootstrap declarative portal.yaml configuration files
+// governing auto-discovery limits, taxonomy overrides, pinning, hiding, and external repos.
+//
+// CORE COMPONENTS:
+//   - PortalConfig / AutoDiscoveryConfig / RepoOverrideConfig / LocalRepoConfig: YAML schema models.
+//   - LoadConfig / DefaultPortalConfig / FindPortalConfigIn: Bounded config discovery & normalization.
+//   - DumpConfigWithOptions: Starter YAML emission with non-clobber guard and --force safe merge.
+//   - ApplyConfig: Merges overrides, declared local/external repos, icons, and pinned ordering into Catalog.
+//
+// FUNCTIONALITY:
+//   - Normalizes cross-platform override path separators to forward slashes on load and lookup.
+//   - Preserves hand-edited portal.yaml sections, comments, and pinned flags when regenerating with --force.
+//
+// DATA FLOW:
+//   portal.yaml -> LoadConfig -> ApplyConfig(Catalog) -> sorted/enriched portal rendering
+
 import (
 	"fmt"
 	"io"
@@ -13,6 +30,8 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/models"
 	"github.com/edsilegxrepo/repoview/internal/taxonomy"
 )
+
+// --- Portal YAML Schema & Override Models ---
 
 const maxPortalConfigBytes = 2 * 1024 * 1024 // 2 MiB ceiling for portal.yaml
 
@@ -51,6 +70,7 @@ type RepoOverrideConfig struct {
 	Distro        string   `yaml:"distro,omitempty"`
 	Channel       string   `yaml:"channel,omitempty"`
 	Suite         string   `yaml:"suite,omitempty"`
+	Components    []string `yaml:"components,omitempty"`
 	Arch          string   `yaml:"arch,omitempty"`
 	Format        string   `yaml:"format,omitempty"`
 	BaseURL       string   `yaml:"base_url,omitempty"`
@@ -60,6 +80,7 @@ type RepoOverrideConfig struct {
 	ExcludeArch   []string `yaml:"exclude_arch,omitempty"`
 	Comps         string   `yaml:"comps,omitempty"`
 	Hidden        bool     `yaml:"hidden,omitempty"`
+	Pinned        bool     `yaml:"pinned,omitempty"`
 }
 
 // LocalRepoConfig declares an explicit local repository entry when auto-discovery cannot infer layout
@@ -85,6 +106,7 @@ type LocalRepoConfig struct {
 	ExcludeArch   []string `yaml:"exclude_arch,omitempty"`
 	Comps         string   `yaml:"comps,omitempty"`
 	Hidden        bool     `yaml:"hidden,omitempty"`
+	Pinned        bool     `yaml:"pinned,omitempty"`
 }
 
 // DeclaredRepos returns the combined list of Repositories and LocalRepos.
@@ -122,7 +144,7 @@ func DefaultPortalConfig() *PortalConfig {
 		Description: "Unified browsing and distribution catalog for RPM and Debian packages",
 		AutoDiscovery: AutoDiscoveryConfig{
 			Enabled:         true,
-			MaxDepth:        5,
+			MaxDepth:        7,
 			RequireRendered: false,
 			Exclude: []string{
 				"*debuginfo*",
@@ -158,7 +180,7 @@ func LoadConfig(path string) (*PortalConfig, error) {
 	}
 
 	if cfg.AutoDiscovery.MaxDepth <= 0 {
-		cfg.AutoDiscovery.MaxDepth = 5
+		cfg.AutoDiscovery.MaxDepth = 7
 	}
 
 	if cfg.PortalURL == "" && cfg.BaseURL != "" {
@@ -179,30 +201,87 @@ func LoadConfig(path string) (*PortalConfig, error) {
 	return cfg, nil
 }
 
+// DumpConfigOptions customizes portal starter YAML generation, rule preservation, and safe merging.
+type DumpConfigOptions struct {
+	ExistingConfig *PortalConfig
+	RawRepos       []*DiscoveredRepo
+	Force          bool
+}
+
 // DumpConfig serializes a discovered Catalog into a starter YAML configuration template.
 func DumpConfig(outputPath string, catalog *Catalog) error {
-	starter := DefaultPortalConfig()
+	return DumpConfigWithOptions(outputPath, catalog, DumpConfigOptions{})
+}
+
+// DumpConfigWithOptions writes a starter or merged portal.yaml while preserving existing rules,
+// emitting full inferred metadata, and refusing to clobber existing files without Force.
+func DumpConfigWithOptions(outputPath string, catalog *Catalog, opts DumpConfigOptions) error {
+	cleanPath := filepath.Clean(outputPath)
+	baseCfg := opts.ExistingConfig
+
+	if fi, err := os.Stat(cleanPath); err == nil {
+		if fi.IsDir() {
+			return fmt.Errorf("%w: configuration path %s is a directory", models.ErrIO, outputPath)
+		}
+		if !opts.Force {
+			return fmt.Errorf("%w: configuration file %s already exists (use --force to merge/overwrite)", models.ErrSafety, outputPath)
+		}
+		if baseCfg == nil {
+			loaded, loadErr := LoadConfig(cleanPath)
+			if loadErr != nil {
+				return loadErr
+			}
+			baseCfg = loaded
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("%w: failed to stat configuration file %s: %w", models.ErrIO, outputPath, err)
+	}
+
+	starter := clonePortalConfig(baseCfg)
 	if catalog != nil {
-		if catalog.Title != "" {
+		defCfg := DefaultPortalConfig()
+		if catalog.Title != "" && (starter.Title == "" || starter.Title == defCfg.Title) {
 			starter.Title = catalog.Title
 		}
-		if catalog.Description != "" {
+		if catalog.Description != "" && (starter.Description == "" || starter.Description == defCfg.Description) {
 			starter.Description = catalog.Description
 		}
-		if catalog.BaseURL != "" {
+		if catalog.BaseURL != "" && starter.BaseURL == "" {
 			starter.BaseURL = catalog.BaseURL
 		}
 
-		for i, repo := range catalog.Repos {
-			if i < 2 && repo.RelPath != "" {
-				starter.Pinned = append(starter.Pinned, repo.RelPath)
+		reposToDump := opts.RawRepos
+		if len(reposToDump) == 0 {
+			reposToDump = catalog.Repos
+		}
+
+		for _, repo := range reposToDump {
+			if repo == nil || repo.RelPath == "" || repo.IsExternal {
+				continue
 			}
-			if repo.RelPath != "" {
-				starter.Overrides[repo.RelPath] = RepoOverrideConfig{
-					Title: repo.Title,
-					Icon:  MatchDistroIcon(repo.Distro),
-					Badge: "Production",
-				}
+			key := strings.ReplaceAll(filepath.ToSlash(repo.RelPath), "\\", "/")
+			icon := repo.Icon
+			if icon == "" {
+				icon = taxonomy.MatchDistroIconWithRules(repo.Distro, starter.Taxonomy)
+			}
+			inferred := RepoOverrideConfig{
+				Title:       repo.Title,
+				Description: repo.Description,
+				Icon:        icon,
+				Badge:       repo.Badge,
+				Distro:      repo.Distro,
+				Channel:     repo.Channel,
+				Suite:       repo.Suite,
+				Components:  append([]string(nil), repo.Components...),
+				Arch:        repo.Arch,
+				Format:      string(repo.Format),
+				BaseURL:     repo.BaseURL,
+				GPGKey:      repo.GPGKey,
+			}
+			if existing, ok := starter.LookupOverride(key, repo.Path); ok {
+				starter.Overrides[key] = mergeRepoOverride(existing, inferred)
+			} else {
+				starter.Overrides[key] = inferred
 			}
 		}
 	}
@@ -212,18 +291,110 @@ func DumpConfig(outputPath string, catalog *Catalog) error {
 		return fmt.Errorf("failed to marshal starter configuration: %w", err)
 	}
 
-	header := []byte("# portal.yaml - RepoView Multi-Repository Portal Configuration\n\n")
-	content := make([]byte, 0, len(header)+len(data))
+	header := "# portal.yaml - RepoView Multi-Repository Portal Configuration\n\n"
+	footer := "\n# Optional starter examples (uncomment and customize as needed):\n" +
+		"# taxonomy:\n" +
+		"#   path_patterns:\n" +
+		"#     - pattern: \"corp/{distro}/{channel}/{arch}\"\n" +
+		"#   distro_aliases:\n" +
+		"#     corp-linux: redhat\n" +
+		"# repositories:\n" +
+		"#   - path: /path/to/custom/repo\n" +
+		"#     rel_path: custom/el9\n" +
+		"#     format: rpm\n" +
+		"# overrides:\n" +
+		"#   some/repo/path:\n" +
+		"#     hidden: true\n" +
+		"#     ignore_package: [\"*-debuginfo\"]\n" +
+		"#     exclude_arch: [\"i686\"]\n"
+
+	content := make([]byte, 0, len(header)+len(data)+len(footer))
 	content = append(content, header...)
 	content = append(content, data...)
+	content = append(content, footer...)
 
-	cleanPath := filepath.Clean(outputPath)
 	// #nosec G306 -- writing generated configuration file with standard web readability (0644)
 	if err := os.WriteFile(cleanPath, content, 0o644); err != nil {
-		return fmt.Errorf("failed to write configuration file %s: %w", outputPath, err)
+		return fmt.Errorf("%w: failed to write configuration file %s: %w", models.ErrIO, outputPath, err)
 	}
 
 	return nil
+}
+
+func clonePortalConfig(src *PortalConfig) *PortalConfig {
+	if src == nil {
+		return DefaultPortalConfig()
+	}
+	clone := *src
+	clone.AutoDiscovery.Exclude = append([]string(nil), src.AutoDiscovery.Exclude...)
+	clone.Pinned = append([]string(nil), src.Pinned...)
+	clone.Repositories = append([]LocalRepoConfig(nil), src.Repositories...)
+	clone.LocalRepos = append([]LocalRepoConfig(nil), src.LocalRepos...)
+	clone.ExternalRepos = append([]*DiscoveredRepo(nil), src.ExternalRepos...)
+	if src.Taxonomy != nil {
+		taxCopy := *src.Taxonomy
+		taxCopy.PathPatterns = append([]taxonomy.PathPatternRule(nil), src.Taxonomy.PathPatterns...)
+		if src.Taxonomy.DistroAliases != nil {
+			taxCopy.DistroAliases = make(map[string]string, len(src.Taxonomy.DistroAliases))
+			for k, v := range src.Taxonomy.DistroAliases {
+				taxCopy.DistroAliases[k] = v
+			}
+		}
+		clone.Taxonomy = &taxCopy
+	}
+	clone.Overrides = make(map[string]RepoOverrideConfig, len(src.Overrides))
+	for k, v := range src.Overrides {
+		normKey := strings.ReplaceAll(filepath.ToSlash(k), "\\", "/")
+		v.Components = append([]string(nil), v.Components...)
+		v.IgnorePackage = append([]string(nil), v.IgnorePackage...)
+		v.ExcludeArch = append([]string(nil), v.ExcludeArch...)
+		clone.Overrides[normKey] = v
+	}
+	return &clone
+}
+
+func mergeRepoOverride(existing, inferred RepoOverrideConfig) RepoOverrideConfig {
+	merged := existing
+	if merged.Title == "" {
+		merged.Title = inferred.Title
+	}
+	if merged.Description == "" {
+		merged.Description = inferred.Description
+	}
+	if merged.Icon == "" {
+		merged.Icon = inferred.Icon
+	}
+	if merged.Badge == "" {
+		merged.Badge = inferred.Badge
+	}
+	if merged.Distro == "" {
+		merged.Distro = inferred.Distro
+	}
+	if merged.Channel == "" {
+		merged.Channel = inferred.Channel
+	}
+	if merged.Suite == "" {
+		merged.Suite = inferred.Suite
+	}
+	if len(merged.Components) == 0 && len(inferred.Components) > 0 {
+		merged.Components = append([]string(nil), inferred.Components...)
+	}
+	if merged.Arch == "" {
+		merged.Arch = inferred.Arch
+	}
+	if merged.Format == "" {
+		merged.Format = inferred.Format
+	}
+	if merged.BaseURL == "" {
+		merged.BaseURL = inferred.BaseURL
+	}
+	if merged.GPGKey == "" {
+		merged.GPGKey = inferred.GPGKey
+	}
+	if existing.Pinned || inferred.Pinned {
+		merged.Pinned = true
+	}
+	return merged
 }
 
 // ApplyConfig applies configuration overrides, pins, external repos, and icon assignments to a Catalog.
@@ -348,27 +519,31 @@ func ApplyConfig(catalog *Catalog, cfg *PortalConfig) {
 		catalog.Repos = append(catalog.Repos, ext)
 	}
 
-	// 3. Apply pinned ordering
-	if len(cfg.Pinned) > 0 {
-		pinnedSet := make(map[string]int)
-		for idx, p := range cfg.Pinned {
-			pinnedSet[filepath.ToSlash(p)] = idx
+	// 3. Apply pinned ordering (honoring both top-level pinned list and per-override pinned: true)
+	pinnedSet := make(map[string]int)
+	for idx, p := range cfg.Pinned {
+		pinnedSet[filepath.ToSlash(p)] = idx
+	}
+
+	var pinnedRepos []*DiscoveredRepo
+	var unpinnedRepos []*DiscoveredRepo
+
+	for _, r := range catalog.Repos {
+		if _, isPinned := pinnedSet[r.RelPath]; isPinned {
+			r.Pinned = true
+			pinnedRepos = append(pinnedRepos, r)
+		} else if _, isPinned := pinnedSet[r.Path]; isPinned {
+			r.Pinned = true
+			pinnedRepos = append(pinnedRepos, r)
+		} else if r.Pinned {
+			pinnedRepos = append(pinnedRepos, r)
+		} else {
+			unpinnedRepos = append(unpinnedRepos, r)
 		}
+	}
 
-		var pinnedRepos []*DiscoveredRepo
-		var unpinnedRepos []*DiscoveredRepo
-
-		for _, r := range catalog.Repos {
-			if _, isPinned := pinnedSet[r.RelPath]; isPinned {
-				pinnedRepos = append(pinnedRepos, r)
-			} else if _, isPinned := pinnedSet[r.Path]; isPinned {
-				pinnedRepos = append(pinnedRepos, r)
-			} else {
-				unpinnedRepos = append(unpinnedRepos, r)
-			}
-		}
-
-		// Sort pinned repositories by their order in cfg.Pinned
+	if len(pinnedRepos) > 0 {
+		// Sort pinned repositories by their explicit order in cfg.Pinned when listed; override-pinned preserve stable order
 		sort.SliceStable(pinnedRepos, func(i, j int) bool {
 			orderI := pinnedOrder(pinnedRepos[i], pinnedSet)
 			orderJ := pinnedOrder(pinnedRepos[j], pinnedSet)
@@ -448,6 +623,9 @@ func applyOverride(repo *DiscoveredRepo, ov RepoOverrideConfig) {
 	if ov.Suite != "" {
 		repo.Suite = ov.Suite
 	}
+	if len(ov.Components) > 0 {
+		repo.Components = append([]string(nil), ov.Components...)
+	}
 	if ov.Arch != "" {
 		repo.Arch = ov.Arch
 	}
@@ -471,6 +649,9 @@ func applyOverride(repo *DiscoveredRepo, ov RepoOverrideConfig) {
 	}
 	if ov.Hidden {
 		repo.Hidden = true
+	}
+	if ov.Pinned {
+		repo.Pinned = true
 	}
 }
 

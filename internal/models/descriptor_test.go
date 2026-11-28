@@ -1,5 +1,12 @@
 package models
 
+// OBJECTIVES:
+// Verify JSON round-trip serialization fidelity of the self-describing repoview.json contract.
+//
+// TEST STRATEGY:
+// Marshals and unmarshals a populated RepoDescriptor struct and asserts lossless preservation
+// of title, format, architecture, distro, channel, package count, build timestamp, and URLs.
+
 import (
 	"encoding/json"
 	"testing"

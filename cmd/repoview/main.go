@@ -1,24 +1,25 @@
 // Package main is the entry point for the repoview-go utility.
 //
 // OBJECTIVES:
-// Provides the CLI frontend for repoview-go, transforming RPM repository
-// metadata into high-performance, air-gap compliant static HTML browsing sites.
+// Provide the CLI frontend for both single-repository builds (repoview [opts] <repo>)
+// and multi-repository catalog portals (repoview portal [opts] [root]), converting
+// RPM and Debian/Ubuntu mirrors into air-gap compliant static websites.
 //
 // CORE COMPONENTS:
-//   - stringList: Custom flag.Value implementation for accumulating repeatable CLI options.
-//   - run(): Core CLI runner accepting input arguments and output streams, returning exit codes.
-//   - main(): CLI entry point delegating to run() and exiting with the resulting status code.
+//   - stringList / syncWriter: Thread-safe CLI logging and repeatable flag accumulation.
+//   - run(): Single-repo flag parser, repoview.yaml loader, --dump-config handler, and runner.
+//   - runPortal(): Portal scanner coordinator, parallel --render-missing/--render-all worker launcher,
+//     --dump-config merger, and catalog writer.
+//   - handleCLIError() / main(): Startup umask configuration and deterministic OS exit code mapping.
 //
 // FUNCTIONALITY:
-//   - Parses long-only command-line flags (--output-dir, --baseurl, --force, etc.).
-//   - Validates existence and readability of the target repository directory early.
-//   - Assembles application configuration (app.Config) with safety validations.
-//   - Executes the core generation engine (app.Generator).
-//   - Translates domain errors into granular exit codes (ExitSuccess, ExitUsageError, ExitRepoMetadataError, etc.).
+//   - Parses long-only flags, merges optional YAML defaults (CLI > YAML > defaults), enforces
+//     safety barriers (--portal-home vs --in-place, no output overwrite), and maps domain sentinels
+//     onto exit codes 0-8.
 //
 // DATA FLOW:
 //
-//	os.Args -> run() -> flag.Parse() -> app.Config -> app.NewGenerator() -> generator.Run() -> exit code
+//	os.Args -> run() / runPortal() -> (app.Generator | portal.Scanner+Renderer) -> Exit Code
 package main
 
 import (
@@ -90,25 +91,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	var (
-		repoDir     string
-		outputDir   string
-		stateDir    string
-		compsFile   string
-		templateDir string
-		title       string
-		url         string
-		baseURL     string
-		format      string
-		suite       string
-		arch        string
-		force       bool
-		quiet       bool
-		showVer     bool
-		portalURL   string
-		gpgKey      string
-		workers     int
-		ignoreList  stringList
-		excludeArch stringList
+		repoDir        string
+		outputDir      string
+		stateDir       string
+		compsFile      string
+		templateDir    string
+		title          string
+		url            string
+		baseURL        string
+		format         string
+		suite          string
+		arch           string
+		force          bool
+		quiet          bool
+		showVer        bool
+		portalURL      string
+		gpgKey         string
+		dumpConfigPath string
+		workers        int
+		fsyncDerived   bool
+		ignoreList     stringList
+		excludeArch    stringList
 	)
 
 	fs := flag.NewFlagSet("repoview", flag.ContinueOnError)
@@ -130,7 +133,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&excludeArch, "exclude-arch", "Exclude architecture (can be repeated)")
 	fs.StringVar(&portalURL, "portal-url", "auto", "Parent portal URL ('auto', 'none', or custom URL/path)")
 	fs.StringVar(&gpgKey, "gpgkey", "", "GPG public key URL or path for client snippets (enables gpgcheck=1)")
+	fs.StringVar(&dumpConfigPath, "dump-config", "", "Inspect repository and write starter repoview.yaml, then exit")
 	fs.IntVar(&workers, "workers", 0, "Parallel worker count (1-16, default auto)")
+	fs.BoolVar(&fsyncDerived, "fsync", false, "Sync every derived group/package HTML page individually to disk")
 	fs.BoolVar(&showVer, "version", false, "Display version")
 
 	// Custom Usage output to display clean long-only options to the user.
@@ -151,7 +156,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		printOption(stderr, "exclude-arch <arch>", "Exclude architecture (can be repeated)", "")
 		printOption(stderr, "portal-url <url>", "Parent portal URL ('auto', 'none', or path)", "auto")
 		printOption(stderr, "gpgkey <url-or-path>", "GPG public key URL or path (enables gpgcheck=1)", "")
+		printOption(stderr, "dump-config <file>", "Inspect repository and write starter repoview.yaml, then exit", "")
 		printOption(stderr, "workers <n>", "Parallel worker count (1-16, default auto)", "")
+		printOption(stderr, "fsync", "Sync every derived group/package HTML page to disk", false)
 		printOption(stderr, "force", "Force regeneration", false)
 		printOption(stderr, "quiet", "Quiet mode", false)
 		printOption(stderr, "version", "Display version information", false)
@@ -189,7 +196,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		cliFlags[f.Name] = true
 	})
 
-	var descText, distroName, channelName, badgeText, iconName string
+	var descText, distroName, channelName, badgeText, iconName, pkgBaseURL string
 	if rcPath, ok := app.FindRepoConfig(repoDir); ok {
 		rc, err := app.LoadRepoConfig(rcPath)
 		if err != nil {
@@ -235,6 +242,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if !cliFlags["workers"] && rc.Workers > 0 {
 			workers = rc.Workers
 		}
+		if !cliFlags["fsync"] && rc.Fsync {
+			fsyncDerived = true
+		}
 		if !cliFlags["ignore-package"] && len(rc.IgnorePackage) > 0 {
 			ignoreList = rc.IgnorePackage
 		}
@@ -246,6 +256,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		channelName = rc.Channel
 		badgeText = rc.Badge
 		iconName = rc.Icon
+		pkgBaseURL = rc.PackageBaseURL
 	}
 
 	// Validate format option
@@ -267,76 +278,97 @@ func run(args []string, stdout, stderr io.Writer) int {
 		outputDir = filepath.Join(repoDir, outputDir)
 	}
 
-	if !quiet {
-		_, _ = fmt.Fprintf(stdout, "Repoview %s\n", version)
-	}
-
 	// If baseURL is omitted but URL is a full HTTP(S) address, reuse it as the default base URL
 	if baseURL == "" && (strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")) {
 		baseURL = url
 	}
 
 	config := app.Config{
-		RepoDir:     repoDir,
-		OutputDir:   outputDir,
-		StateDir:    stateDir,
-		CompsFile:   compsFile,
-		TemplateDir: templateDir,
-		Title:       title,
-		Description: descText,
-		URL:         url,
-		BaseURL:     baseURL,
-		Format:      repoFormat,
-		Suite:       suite,
-		Arch:        arch,
-		Distro:      distroName,
-		Channel:     channelName,
-		Badge:       badgeText,
-		Icon:        iconName,
-		Force:       force,
-		Quiet:       quiet,
-		IgnoreList:  ignoreList,
-		ExcludeArch: excludeArch,
-		PortalURL:   portalURL,
-		GPGKey:      gpgKey,
-		Workers:     workers,
-		Version:     version,
-		Stdout:      stdout,
-		Stderr:      stderr,
+		RepoDir:        repoDir,
+		OutputDir:      outputDir,
+		StateDir:       stateDir,
+		CompsFile:      compsFile,
+		TemplateDir:    templateDir,
+		Title:          title,
+		Description:    descText,
+		URL:            url,
+		BaseURL:        baseURL,
+		PackageBaseURL: pkgBaseURL,
+		Format:         repoFormat,
+		Suite:          suite,
+		Arch:           arch,
+		Distro:         distroName,
+		Channel:        channelName,
+		Badge:          badgeText,
+		Icon:           iconName,
+		Force:          force,
+		Quiet:          quiet,
+		IgnoreList:     ignoreList,
+		ExcludeArch:    excludeArch,
+		PortalURL:      portalURL,
+		GPGKey:         gpgKey,
+		Workers:        workers,
+		Fsync:          fsyncDerived,
+		Version:        version,
+		Stdout:         stdout,
+		Stderr:         stderr,
+	}
+
+	// Dump single-repository starter YAML configuration if requested (no HTML output written)
+	if dumpConfigPath != "" {
+		starterCfg, err := app.BuildStarterRepoConfig(config)
+		if err == nil {
+			err = app.WriteStarterRepoConfig(dumpConfigPath, starterCfg, force)
+		}
+		if err != nil {
+			return handleCLIError(err, stderr)
+		}
+		if !quiet {
+			_, _ = fmt.Fprintf(stdout, "Wrote starter configuration to %s\n", dumpConfigPath)
+		}
+		return app.ExitSuccess
+	}
+
+	if !quiet {
+		_, _ = fmt.Fprintf(stdout, "Repoview %s\n", version)
 	}
 
 	// Instantiate generator and execute generation workflow
 	generator := app.NewGenerator(config)
 	if err := generator.Run(); err != nil {
-		var partialErr *app.PartialFailureError
-
-		// Translate domain errors deterministically via errors.Is / errors.As
-		switch {
-		case errors.Is(err, app.ErrSafety) || errors.Is(err, app.ErrIntegrity):
-			_, _ = fmt.Fprintf(stderr, "Safety Violation: %v\n", err)
-			return app.ExitSafetyError
-		case errors.As(err, &partialErr):
-			_, _ = fmt.Fprintf(stderr, "Warning: %v\n", partialErr)
-			return app.ExitPartialFailure
-		case errors.Is(err, app.ErrConfig):
-			_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
-			return app.ExitConfigError
-		case errors.Is(err, app.ErrRepoMetadata):
-			_, _ = fmt.Fprintf(stderr, "Repository Metadata Error: %v\n", err)
-			return app.ExitRepoMetadataError
-		case errors.Is(err, app.ErrTemplate):
-			_, _ = fmt.Fprintf(stderr, "Template Error: %v\n", err)
-			return app.ExitTemplateError
-		case errors.Is(err, app.ErrIO):
-			_, _ = fmt.Fprintf(stderr, "I/O Error: %v\n", err)
-			return app.ExitIOError
-		default:
-			_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
-			return app.ExitGeneralError
-		}
+		return handleCLIError(err, stderr)
 	}
 
 	return app.ExitSuccess
+}
+
+// handleCLIError maps domain errors deterministically via errors.Is / errors.As to exit codes.
+func handleCLIError(err error, stderr io.Writer) int {
+	var partialErr *app.PartialFailureError
+
+	switch {
+	case errors.Is(err, app.ErrSafety) || errors.Is(err, app.ErrIntegrity):
+		_, _ = fmt.Fprintf(stderr, "Safety Violation: %v\n", err)
+		return app.ExitSafetyError
+	case errors.As(err, &partialErr):
+		_, _ = fmt.Fprintf(stderr, "Warning: %v\n", partialErr)
+		return app.ExitPartialFailure
+	case errors.Is(err, app.ErrConfig):
+		_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
+		return app.ExitConfigError
+	case errors.Is(err, app.ErrRepoMetadata):
+		_, _ = fmt.Fprintf(stderr, "Repository Metadata Error: %v\n", err)
+		return app.ExitRepoMetadataError
+	case errors.Is(err, app.ErrTemplate):
+		_, _ = fmt.Fprintf(stderr, "Template Error: %v\n", err)
+		return app.ExitTemplateError
+	case errors.Is(err, app.ErrIO):
+		_, _ = fmt.Fprintf(stderr, "I/O Error: %v\n", err)
+		return app.ExitIOError
+	default:
+		_, _ = fmt.Fprintf(stderr, "Error: %v\n", err)
+		return app.ExitGeneralError
+	}
 }
 
 // runPortal handles multi-repository discovery, catalog aggregation, and portal site generation.
@@ -373,7 +405,7 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&description, "description", "", "Portal page description")
 	fs.StringVar(&configPath, "config", "", "Path to optional portal.yaml configuration")
 	fs.StringVar(&dumpConfigPath, "dump-config", "", "Dump auto-discovered catalog to starter YAML and exit")
-	fs.IntVar(&maxDepth, "max-depth", 5, "Maximum directory scan depth")
+	fs.IntVar(&maxDepth, "max-depth", 7, "Maximum directory scan depth")
 	fs.BoolVar(&requireRendered, "require-rendered", false, "Only include repositories with generated repoview pages")
 	fs.BoolVar(&renderMissing, "render-missing", false, "Automatically generate repoview pages for raw repositories in parallel")
 	fs.BoolVar(&renderAll, "render-all", false, "Force generate repoview pages for all discovered repositories in parallel")
@@ -393,7 +425,7 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		printOption(stderr, "description <text>", "Portal page description", "")
 		printOption(stderr, "config <file>", "Path to optional portal.yaml configuration", "")
 		printOption(stderr, "dump-config <file>", "Dump auto-discovered catalog to starter YAML and exit", "")
-		printOption(stderr, "max-depth <n>", "Maximum directory scan depth", 5)
+		printOption(stderr, "max-depth <n>", "Maximum directory scan depth", 7)
 		printOption(stderr, "require-rendered", "Only include repositories with generated repoview pages", false)
 		printOption(stderr, "render-missing", "Automatically generate repoview pages for raw repositories in parallel", false)
 		printOption(stderr, "render-all", "Force generate repoview pages for all discovered repositories in parallel", false)
@@ -443,14 +475,26 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		portalCfg = loadedCfg
 	} else {
 		foundConfig, err := portal.FindPortalConfigIn(absTargetDir)
-		if err == nil {
+		switch {
+		case err == nil:
 			loadedCfg, err := portal.LoadConfig(foundConfig)
 			if err != nil {
 				_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", err)
 				return app.ExitConfigError
 			}
 			portalCfg = loadedCfg
-		} else {
+		case dumpConfigPath != "" && force:
+			if fi, stErr := os.Stat(filepath.Clean(dumpConfigPath)); stErr == nil && !fi.IsDir() {
+				loadedCfg, loadErr := portal.LoadConfig(dumpConfigPath)
+				if loadErr != nil {
+					_, _ = fmt.Fprintf(stderr, "Configuration Error: %v\n", loadErr)
+					return app.ExitConfigError
+				}
+				portalCfg = loadedCfg
+			} else {
+				portalCfg = portal.DefaultPortalConfig()
+			}
+		default:
 			portalCfg = portal.DefaultPortalConfig()
 		}
 	}
@@ -573,12 +617,16 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 	// Parallel Batch Rendering for unrendered or all repositories (updating catalog entries in memory without re-scanning)
 	renderFailureCount := 0
 	if renderAll || renderMissing {
+		hiddenDirs := make(map[string]bool)
 		var targets []*portal.DiscoveredRepo
 		for _, r := range repos {
 			if r.IsExternal {
 				continue
 			}
 			if ov, ok := portalCfg.LookupOverride(r.RelPath, r.Path); ok && ov.Hidden {
+				if absH, absErr := filepath.Abs(r.Path); absErr == nil {
+					hiddenDirs[filepath.Clean(absH)] = true
+				}
 				continue
 			}
 			if renderAll || !r.IsRendered {
@@ -662,6 +710,9 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 				repoFormat := r.Format
 				repoSuite := r.Suite
 				repoArch := r.Arch
+				if strings.EqualFold(repoArch, "unknown") {
+					repoArch = ""
+				}
 				if hasOv {
 					if ov.Title != "" {
 						repoTitle = ov.Title
@@ -678,29 +729,31 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 				}
 
 				repoCfg := app.Config{
-					RepoDir:        r.Path,
-					OutputDir:      repoOut,
-					Format:         repoFormat,
-					Suite:          repoSuite,
-					Arch:           repoArch,
-					Title:          repoTitle,
-					Description:    ov.Description,
-					Distro:         ov.Distro,
-					Channel:        ov.Channel,
-					Badge:          ov.Badge,
-					Icon:           ov.Icon,
-					GPGKey:         ov.GPGKey,
-					CompsFile:      ov.Comps,
-					IgnoreList:     ov.IgnorePackage,
-					ExcludeArch:    ov.ExcludeArch,
-					Quiet:          true,
-					Force:          force,
-					PortalURL:      portalLink,
-					PackageBaseURL: pkgBaseURL,
-					BaseURL:        pkgBaseURL,
-					Version:        version,
-					Stdout:         safeStdout,
-					Stderr:         safeStderr,
+					RepoDir:               r.Path,
+					OutputDir:             repoOut,
+					Format:                repoFormat,
+					Suite:                 repoSuite,
+					Arch:                  repoArch,
+					Title:                 repoTitle,
+					Description:           ov.Description,
+					Distro:                ov.Distro,
+					Channel:               ov.Channel,
+					Badge:                 ov.Badge,
+					Icon:                  ov.Icon,
+					GPGKey:                ov.GPGKey,
+					CompsFile:             ov.Comps,
+					IgnoreList:            ov.IgnorePackage,
+					ExcludeArch:           ov.ExcludeArch,
+					Quiet:                 true,
+					Force:                 force,
+					PortalURL:             portalLink,
+					PackageBaseURL:        pkgBaseURL,
+					BaseURL:               pkgBaseURL,
+					SkipComponentSiblings: true,
+					HiddenSiblingDirs:     hiddenDirs,
+					Version:               version,
+					Stdout:                safeStdout,
+					Stderr:                safeStderr,
 				}
 				gen := app.NewGenerator(repoCfg)
 				if genErr := gen.Run(); genErr != nil {
@@ -766,6 +819,23 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// Dump starter configuration if requested before ApplyConfig strips hidden entries
+	if dumpConfigPath != "" {
+		rawCatalog := portal.BuildCatalog(portalCfg.Title, portalCfg.Description, effectivePortalURL, repos)
+		dumpOpts := portal.DumpConfigOptions{
+			ExistingConfig: portalCfg,
+			RawRepos:       repos,
+			Force:          force,
+		}
+		if err := portal.DumpConfigWithOptions(dumpConfigPath, rawCatalog, dumpOpts); err != nil {
+			return handleCLIError(err, stderr)
+		}
+		if !quiet {
+			_, _ = fmt.Fprintf(stdout, "Wrote starter configuration to %s\n", dumpConfigPath)
+		}
+		return app.ExitSuccess
+	}
+
 	// Build catalog and apply configuration overrides / pinned repos / external repos
 	catalog := portal.BuildCatalog(portalCfg.Title, portalCfg.Description, effectivePortalURL, repos)
 	portal.ApplyConfig(catalog, portalCfg)
@@ -773,18 +843,6 @@ func runPortal(args []string, stdout, stderr io.Writer) int {
 		for _, r := range catalog.Repos {
 			r.ConfigSnippet = r.BuildConfigSnippet(effectiveRepoURL)
 		}
-	}
-
-	// Dump starter configuration if requested
-	if dumpConfigPath != "" {
-		if err := portal.DumpConfig(dumpConfigPath, catalog); err != nil {
-			_, _ = fmt.Fprintf(stderr, "Error dumping config: %v\n", err)
-			return app.ExitIOError
-		}
-		if !quiet {
-			_, _ = fmt.Fprintf(stdout, "Wrote starter configuration to %s\n", dumpConfigPath)
-		}
-		return app.ExitSuccess
 	}
 
 	if !quiet {

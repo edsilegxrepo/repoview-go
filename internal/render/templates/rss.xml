@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+{{/*
+  OBJECTIVE: Emit a standards-compliant RSS 2.0 feed of the latest package releases per repository,
+  using explicit xmlEscape, safeURL, and cdataHTML template sanitizers for XML/CDATA safety.
+  DATA FLOW: render.Renderer.RenderRSS (.Repo, .Latest, .URL) -> latest-feed.xml.
+*/}}
 <rss version="2.0">
 <channel>
   <title>{{ .Repo.Title | xmlEscape }}</title>

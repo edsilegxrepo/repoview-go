@@ -1,4 +1,10 @@
 <!DOCTYPE html>
+{{/*
+  OBJECTIVE: Display all latest-version packages within a selected Comps/RPM group, Debian section,
+  or alphabetical letter bucket with instant client-side table filtering.
+  SECTIONS: Hero Header | Live Group Filter Bar | Package Table | Client Search/UI Runtime.
+  DATA FLOW: render.PageData (.Group.Name, .Group.Packages) -> group HTML page -> layout/search.js.
+*/}}
 <html lang="en" data-theme="dark">
 {{ template "_head.html" . }}
 <body>

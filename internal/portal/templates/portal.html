@@ -1,4 +1,11 @@
 <!DOCTYPE html>
+{{/*
+  OBJECTIVE: Render the self-contained, glassmorphic multi-repository portal UI (portal.html)
+  combining inline CSS design tokens, header stats, Repositories vs Packages/CVEs search mode,
+  facet filter pills, pinned repository cards, client config preview modal, and offline runtime JS.
+  SECTIONS: Head & Theme Init | Inline CSS Design System | Sticky Header & Toolbar | Pinned & Main Grids | Config Modal | Client JS.
+  DATA FLOW: portal.PortalContext (.Catalog, .Repos) + lazy fetch('portal-search.json') -> interactive catalog DOM.
+*/}}
 <html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
@@ -578,6 +585,274 @@
         .portal-footer a:hover {
             text-decoration: underline;
         }
+
+        /* Enhanced Search, Sort, Pinned Section, Cards & Config Modal */
+        .search-toolbar-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .search-box {
+            flex: 1;
+            min-width: 260px;
+        }
+
+        .search-clear-btn {
+            position: absolute;
+            right: 0.75rem;
+            top: 50%;
+            transform: translateY(-50%);
+            background: transparent;
+            border: none;
+            color: var(--text-subtle);
+            font-size: 1.15rem;
+            line-height: 1;
+            cursor: pointer;
+            padding: 0.15rem 0.35rem;
+            border-radius: 4px;
+        }
+
+        .search-clear-btn:hover {
+            color: var(--text-main);
+            background: var(--bg-card);
+        }
+
+        .search-clear-btn[hidden],
+        .portal-pkg-results[hidden],
+        .portal-modal[hidden] {
+            display: none !important;
+        }
+
+        .search-mode-tabs {
+            display: inline-flex;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 0.2rem;
+            gap: 0.2rem;
+        }
+
+        .mode-tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            font-weight: 600;
+            padding: 0.42rem 0.75rem;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .mode-tab-btn.active {
+            background: var(--primary);
+            color: #ffffff;
+        }
+
+        .portal-pkg-results {
+            margin-top: 0.75rem;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            max-height: 440px;
+            overflow-y: auto;
+        }
+
+        .portal-pkg-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+            text-decoration: none;
+            color: var(--text-main);
+            transition: background 0.15s ease;
+        }
+
+        .portal-pkg-item:hover,
+        .portal-pkg-item.active {
+            background: var(--primary-bg);
+        }
+
+        .portal-pkg-top {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+        }
+
+        .portal-pkg-name {
+            font-weight: 700;
+            color: var(--primary);
+        }
+
+        .portal-pkg-repo {
+            font-size: 0.72rem;
+            color: var(--text-subtle);
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        }
+
+        .portal-pkg-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.25rem;
+            margin-top: 0.15rem;
+        }
+
+        .portal-match-badge {
+            font-size: 0.66rem;
+            font-weight: 700;
+            padding: 0.08rem 0.4rem;
+            border-radius: 4px;
+            background: var(--primary-bg);
+            color: var(--primary);
+            text-transform: uppercase;
+        }
+
+        .portal-match-badge.cve {
+            background: var(--badge-raw-bg);
+            color: var(--badge-raw-text);
+        }
+
+        .portal-pkg-footer {
+            padding: 0.55rem 1rem;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            text-align: center;
+            background: var(--bg-card);
+        }
+
+        .sr-mark {
+            background: rgba(250, 204, 21, 0.28);
+            color: inherit;
+            border-radius: 2px;
+            padding: 0 1px;
+        }
+
+        .filter-right {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-left: auto;
+        }
+
+        .catalog-sort-select {
+            background: var(--bg-surface);
+            color: var(--text-main);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 0.3rem 0.6rem;
+            font-size: 0.78rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .pill-btn.zero-count {
+            opacity: 0.45;
+        }
+
+        .pill-count {
+            font-size: 0.7rem;
+            opacity: 0.8;
+            margin-left: 0.2rem;
+        }
+
+        .pinned-section {
+            margin-bottom: 2.25rem;
+        }
+
+        .section-heading {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+        }
+
+        .badge-pinned {
+            background: rgba(234, 179, 8, 0.16);
+            color: #eab308;
+        }
+
+        .card-desc {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            margin-bottom: 0.85rem;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .btn-reset-filters {
+            margin-top: 1rem;
+            background: var(--primary);
+            color: #ffffff;
+            border: none;
+            border-radius: var(--radius-sm);
+            padding: 0.55rem 1.15rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .btn-reset-filters:hover {
+            background: var(--primary-hover);
+        }
+
+        .portal-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.65);
+            backdrop-filter: blur(4px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            padding: 1rem;
+        }
+
+        .portal-modal-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            max-width: 680px;
+            width: 100%;
+            padding: 1.5rem;
+            box-shadow: var(--shadow);
+        }
+
+        .portal-modal-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+
+        .portal-modal-pre {
+            background: var(--bg-body);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 1rem;
+            overflow-x: auto;
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            font-size: 0.8rem;
+            color: var(--text-main);
+            margin-bottom: 1rem;
+        }
+
+        .portal-modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.6rem;
+        }
     </style>
 </head>
 <body>
@@ -645,13 +920,21 @@
 
         <!-- Filter & Search Toolbar -->
         <section class="filter-toolbar">
-            <div class="search-box">
-                <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="11" cy="11" r="8"></circle>
-                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                </svg>
-                <input type="text" id="catalog-search" class="search-input" placeholder="Filter repositories by title, distro, architecture, or channel... (Press '/' to focus)" autocomplete="off">
+            <div class="search-toolbar-row">
+                <div class="search-box">
+                    <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    <input type="text" id="catalog-search" class="search-input" placeholder="Filter repositories by title, distro, arch, or channel... (Press '/' to focus)" autocomplete="off">
+                    <button type="button" id="catalog-search-clear" class="search-clear-btn" aria-label="Clear search" hidden>&times;</button>
+                </div>
+                <div class="search-mode-tabs" id="portal-search-mode" role="tablist" aria-label="Search scope">
+                    <button type="button" class="mode-tab-btn active" data-search-mode="repos" role="tab" aria-selected="true">Repositories</button>
+                    <button type="button" class="mode-tab-btn" data-search-mode="packages" role="tab" aria-selected="false">Packages &amp; CVEs</button>
+                </div>
             </div>
+            <div id="portal-pkg-results" class="portal-pkg-results" role="listbox" aria-label="Cross-repository package results" hidden></div>
 
             <div class="filter-groups">
                 <div class="pill-cluster" id="format-pills">
@@ -682,24 +965,34 @@
                 </div>
                 {{ end }}
 
-                <div class="result-count" id="filter-result-count">
-                    Showing {{ len .Catalog.Repos }} of {{ len .Catalog.Repos }} repositories
+                <div class="filter-right">
+                    <label for="catalog-sort" class="pill-label" style="margin:0;">Sort:</label>
+                    <select id="catalog-sort" class="catalog-sort-select" aria-label="Sort repositories">
+                        <option value="default">Pinned / Default</option>
+                        <option value="name">Name (A-Z)</option>
+                        <option value="build">Newest Build</option>
+                        <option value="packages">Most Packages</option>
+                    </select>
+                    <div class="result-count" id="filter-result-count">
+                        Showing {{ len .Catalog.Repos }} of {{ len .Catalog.Repos }} repositories
+                    </div>
                 </div>
             </div>
         </section>
 
-        <!-- Repositories Grid -->
-        <section class="catalog-grid" id="catalog-grid">
-            {{ range .Catalog.Repos }}
-            <article class="repo-card {{ if .Badge }}has-badge{{ end }}"
+        {{ define "portal_repo_card" }}
+            <article class="repo-card {{ if .Pinned }}pinned{{ end }} {{ if .Badge }}has-badge{{ end }}"
                      data-format="{{ .Format }}"
                      data-distro="{{ .Distro }}"
                      data-arch="{{ .Arch }}"
-                     data-search="{{ .Title }} {{ .Distro }} {{ .Suite }} {{ .Channel }} {{ range .Components }}{{ . }} {{ end }}{{ .Arch }} {{ .Format }} {{ .RelPath }}">
-                
+                     data-title="{{ .Title | lower }}"
+                     data-packages="{{ .PackageCount }}"
+                     data-build="{{ if not .LastBuild.IsZero }}{{ .LastBuild.Unix }}{{ else }}0{{ end }}"
+                     data-pinned="{{ if .Pinned }}1{{ else }}0{{ end }}"
+                     data-search="{{ .Title }} {{ .Description }} {{ .Distro }} {{ .Suite }} {{ .Channel }} {{ range .Components }}{{ . }} {{ end }}{{ .Arch }} {{ .Format }} {{ .RelPath }}">
                 <div>
                     <div class="card-header">
-                        <div class="distro-icon-wrap" title="{{ .Distro }}">
+                        <div class="distro-icon-wrap" data-icon="{{ .Icon }}" title="{{ .Distro }}">
                             {{ template "distro_icon" .Icon }}
                         </div>
                         <div class="card-title-wrap">
@@ -708,7 +1001,14 @@
                         </div>
                     </div>
 
+                    {{ if .Description }}
+                    <p class="card-desc" title="{{ .Description }}">{{ .Description }}</p>
+                    {{ end }}
+
                     <div class="badge-bar">
+                        {{ if .Pinned }}
+                        <span class="badge badge-pinned">Pinned</span>
+                        {{ end }}
                         <span class="badge {{ if eq .Format "deb" }}badge-deb{{ else }}badge-rpm{{ end }}">{{ .Format | upper }}</span>
                         {{ if .Arch }}
                         <span class="badge badge-arch">{{ .Arch }}</span>
@@ -724,6 +1024,13 @@
                     </div>
 
                     <div class="card-details">
+                        {{ if .Suite }}
+                        <div class="detail-row">
+                            <span>Suite:</span>
+                            <span class="detail-val">{{ .Suite }}</span>
+                        </div>
+                        {{ end }}
+
                         {{ if .Components }}
                         <div class="detail-row">
                             <span>Components:</span>
@@ -780,23 +1087,62 @@
                         </svg>
                     </a>
                     {{ end }}
-                    <button class="btn-copy-config" data-config="{{ .ConfigSnippet }}" title="Copy package manager configuration snippet" aria-label="Copy package manager configuration snippet">
+                    <button type="button" class="btn-copy-config btn-preview-config" data-title="{{ .Title }}" data-format="{{ .Format }}" data-config="{{ .ConfigSnippet }}" title="Preview or download repository setup config" aria-label="Preview repository setup configuration">
+                        <span>Config</span>
+                    </button>
+                    <button type="button" class="btn-copy-config" data-config="{{ .ConfigSnippet }}" title="Copy package manager configuration snippet" aria-label="Copy package manager configuration snippet">
                         <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
                             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
                             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
                         </svg>
-                        <span class="copy-label">Setup</span>
+                        <span class="copy-label">Copy</span>
                     </button>
                 </div>
             </article>
+        {{ end }}
+
+        {{ if .Catalog.HasPinned }}
+        <section class="pinned-section" id="pinned-section">
+            <h2 class="section-heading">Pinned / Featured Repositories</h2>
+            <div class="catalog-grid" id="pinned-grid">
+                {{ range .Catalog.Repos }}
+                {{ if .Pinned }}
+                {{ template "portal_repo_card" . }}
+                {{ end }}
+                {{ end }}
+            </div>
+        </section>
+        {{ end }}
+
+        <!-- Repositories Grid -->
+        <section class="catalog-grid" id="catalog-grid">
+            {{ range .Catalog.Repos }}
+            {{ if not .Pinned }}
+            {{ template "portal_repo_card" . }}
+            {{ end }}
             {{ end }}
 
             <div class="empty-state" id="empty-state" style="display: none;">
                 <h3>No matching repositories found</h3>
                 <p>Try clearing filters or adjusting your search query.</p>
+                <button type="button" id="btn-reset-filters" class="btn-reset-filters">Reset Filters</button>
             </div>
         </section>
     </main>
+
+    <div id="portal-config-modal" class="portal-modal" role="dialog" aria-modal="true" aria-labelledby="portal-modal-title" hidden>
+        <div class="portal-modal-card">
+            <div class="portal-modal-head">
+                <h3 id="portal-modal-title">Repository Configuration</h3>
+                <button type="button" id="portal-modal-close" class="btn-icon" aria-label="Close config preview">&times;</button>
+            </div>
+            <pre id="portal-modal-pre" class="portal-modal-pre"></pre>
+            <div class="portal-modal-actions">
+                <button type="button" id="portal-modal-copy" class="btn-copy-config">Copy Snippet</button>
+                <button type="button" id="portal-modal-download" class="btn-browse" style="flex: 0 0 auto;">Download Config</button>
+            </div>
+        </div>
+    </div>
 
     <footer class="portal-footer">
         Generated by <a href="https://github.com/edsilegxrepo/repoview-go" target="_blank" rel="noopener">RepoView</a> Multi-Repository Portal &bull; Air-Gap Compliant Static Catalog
@@ -873,11 +1219,18 @@
             }
         })();
 
-        // Live Search, URL Synchronization, and Quick Copy Logic
+        // Live Search, Package Search, Sort, Config Preview Modal, URL Sync, and Copy Logic
         (function() {
             const searchInput = document.getElementById('catalog-search');
+            const searchClear = document.getElementById('catalog-search-clear');
+            const modeTabs = document.getElementById('portal-search-mode');
+            const pkgResults = document.getElementById('portal-pkg-results');
+            const sortSelect = document.getElementById('catalog-sort');
+            const pinnedSection = document.getElementById('pinned-section');
+            const pinnedGrid = document.getElementById('pinned-grid');
             const grid = document.getElementById('catalog-grid');
-            const cards = Array.from(grid.querySelectorAll('.repo-card'));
+            const resetBtn = document.getElementById('btn-reset-filters');
+            const cards = Array.from(document.querySelectorAll('.repo-card'));
             const emptyState = document.getElementById('empty-state');
             const countLabel = document.getElementById('filter-result-count');
 
@@ -885,32 +1238,115 @@
             let activeDistro = 'all';
             let activeArch = 'all';
             let searchQuery = '';
+            let searchMode = 'repos';
+            let portalPkgIndex = null;
+            let pkgColMap = null;
+            let isPkgLoading = false;
+            let pkgDebounce = null;
+            let activePkgIdx = -1;
+
+            function escapeHTML(str) {
+                return String(str || '').replace(/[&<>'"]/g, tag => ({
+                    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+                }[tag] || tag));
+            }
+
+            function highlightText(raw, term) {
+                const s = String(raw || '');
+                const q = String(term || '').trim();
+                if (!s || !q) return escapeHTML(s);
+                const idx = s.toLowerCase().indexOf(q.toLowerCase());
+                if (idx < 0) return escapeHTML(s);
+                return escapeHTML(s.slice(0, idx)) + '<mark class="sr-mark">' + escapeHTML(s.slice(idx, idx + q.length)) + '</mark>' + escapeHTML(s.slice(idx + q.length));
+            }
+
+            function cardMatches(card, skipDim) {
+                const fmt = card.getAttribute('data-format') || '';
+                const dist = card.getAttribute('data-distro') || '';
+                const arch = card.getAttribute('data-arch') || '';
+                const txt = (card.getAttribute('data-search') || '').toLowerCase();
+                const q = searchMode === 'repos' ? searchQuery.toLowerCase().trim() : '';
+
+                const mFmt = (skipDim === 'format' || activeFormat === 'all' || fmt === activeFormat);
+                const mDist = (skipDim === 'distro' || activeDistro === 'all' || dist === activeDistro);
+                const mArch = (skipDim === 'arch' || activeArch === 'all' || arch === activeArch);
+                const mSearch = (!q || txt.includes(q));
+                return mFmt && mDist && mArch && mSearch;
+            }
+
+            function updatePillCounts() {
+                const specs = [
+                    { id: 'format-pills', attr: 'data-filter-format', dim: 'format', cardAttr: 'data-format' },
+                    { id: 'distro-pills', attr: 'data-filter-distro', dim: 'distro', cardAttr: 'data-distro' },
+                    { id: 'arch-pills', attr: 'data-filter-arch', dim: 'arch', cardAttr: 'data-arch' }
+                ];
+                specs.forEach(spec => {
+                    const container = document.getElementById(spec.id);
+                    if (!container) return;
+                    const pills = container.querySelectorAll('.pill-btn');
+                    const candidates = cards.filter(c => cardMatches(c, spec.dim));
+                    pills.forEach(pill => {
+                        const val = pill.getAttribute(spec.attr);
+                        if (!pill.dataset.baseLabel) pill.dataset.baseLabel = pill.textContent.trim();
+                        const count = val === 'all'
+                            ? candidates.length
+                            : candidates.filter(c => (c.getAttribute(spec.cardAttr) || '') === val).length;
+                        pill.innerHTML = `${escapeHTML(pill.dataset.baseLabel)} <span class="pill-count">(${count})</span>`;
+                        if (val !== 'all' && count === 0) pill.classList.add('zero-count');
+                        else pill.classList.remove('zero-count');
+                    });
+                });
+            }
+
+            function sortCardsInContainer(container, mode) {
+                if (!container) return;
+                const list = Array.from(container.querySelectorAll(':scope > .repo-card'));
+                if (!list.length) return;
+                list.forEach((el, idx) => {
+                    if (!el.dataset.origOrder) el.dataset.origOrder = String(idx);
+                });
+                list.sort((a, b) => {
+                    if (mode === 'name') {
+                        return (a.getAttribute('data-title') || '').localeCompare(b.getAttribute('data-title') || '');
+                    }
+                    if (mode === 'packages') {
+                        return Number(b.getAttribute('data-packages') || 0) - Number(a.getAttribute('data-packages') || 0);
+                    }
+                    if (mode === 'build') {
+                        return Number(b.getAttribute('data-build') || 0) - Number(a.getAttribute('data-build') || 0);
+                    }
+                    return Number(a.dataset.origOrder || 0) - Number(b.dataset.origOrder || 0);
+                });
+                list.forEach(el => container.appendChild(el));
+                if (container === grid && emptyState) container.appendChild(emptyState);
+            }
 
             function updateFilter() {
                 let visibleCount = 0;
-                const q = searchQuery.toLowerCase().trim();
+                let visiblePinned = 0;
 
                 cards.forEach(card => {
-                    const cardFormat = card.getAttribute('data-format') || '';
-                    const cardDistro = card.getAttribute('data-distro') || '';
-                    const cardArch = card.getAttribute('data-arch') || '';
-                    const cardSearch = (card.getAttribute('data-search') || '').toLowerCase();
-
-                    let matchFormat = (activeFormat === 'all' || cardFormat === activeFormat);
-                    let matchDistro = (activeDistro === 'all' || cardDistro === activeDistro);
-                    let matchArch = (activeArch === 'all' || cardArch === activeArch);
-                    let matchSearch = (!q || cardSearch.includes(q));
-
-                    if (matchFormat && matchDistro && matchArch && matchSearch) {
+                    if (cardMatches(card, '')) {
                         card.style.display = '';
                         visibleCount++;
+                        if (card.getAttribute('data-pinned') === '1') visiblePinned++;
                     } else {
                         card.style.display = 'none';
                     }
                 });
 
+                if (pinnedSection) {
+                    pinnedSection.style.display = visiblePinned === 0 ? 'none' : '';
+                }
+                if (sortSelect) {
+                    sortCardsInContainer(pinnedGrid, sortSelect.value);
+                    sortCardsInContainer(grid, sortSelect.value);
+                }
+
+                updatePillCounts();
                 countLabel.textContent = `Showing ${visibleCount} of ${cards.length} repositories`;
                 emptyState.style.display = visibleCount === 0 ? '' : 'none';
+                if (searchClear) searchClear.hidden = searchQuery.length === 0;
                 syncURLState();
             }
 
@@ -929,45 +1365,245 @@
             function activatePill(containerId, dataAttr, val) {
                 const container = document.getElementById(containerId);
                 if (!container) return;
-                const pills = container.querySelectorAll('.pill-btn');
-                pills.forEach(p => {
-                    if (p.getAttribute(dataAttr) === val) {
-                        p.classList.add('active');
-                    } else {
-                        p.classList.remove('active');
-                    }
+                container.querySelectorAll('.pill-btn').forEach(p => {
+                    if (p.getAttribute(dataAttr) === val) p.classList.add('active');
+                    else p.classList.remove('active');
                 });
             }
 
-            function resetPills(containerId, dataAttr) {
-                activatePill(containerId, dataAttr, 'all');
+            function resetAllFilters() {
+                searchInput.value = '';
+                searchQuery = '';
+                activeFormat = 'all';
+                activeDistro = 'all';
+                activeArch = 'all';
+                activatePill('format-pills', 'data-filter-format', 'all');
+                activatePill('distro-pills', 'data-filter-distro', 'all');
+                activatePill('arch-pills', 'data-filter-arch', 'all');
+                if (pkgResults) pkgResults.hidden = true;
+                updateFilter();
             }
 
-            // Keyboard shortcuts: '/' to focus, 'Escape' to clear
+            async function loadPortalPackages() {
+                if (portalPkgIndex || isPkgLoading) return;
+                isPkgLoading = true;
+                try {
+                    const resp = await fetch('portal-search.json');
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    const json = await resp.json();
+                    if (json && Array.isArray(json.data) && Array.isArray(json.schema)) {
+                        portalPkgIndex = json;
+                        pkgColMap = {};
+                        json.schema.forEach((k, i) => { pkgColMap[k] = i; });
+                    }
+                } catch (err) {
+                    if (pkgResults) {
+                        pkgResults.innerHTML = '<div class="portal-pkg-footer">Package index unavailable offline over file:// (serve portal via HTTP for cross-repo search).</div>';
+                        pkgResults.hidden = false;
+                    }
+                    console.warn('portal-search.json load error:', err);
+                } finally {
+                    isPkgLoading = false;
+                }
+            }
+
+            function renderPortalPkgSearch(raw) {
+                if (!pkgResults || searchMode !== 'packages') return;
+                const trimmed = String(raw || '').trim();
+                if (trimmed.length < 2) {
+                    pkgResults.hidden = true;
+                    return;
+                }
+                if (!portalPkgIndex) {
+                    pkgResults.innerHTML = '<div class="portal-pkg-footer">Loading cross-repository package index...</div>';
+                    pkgResults.hidden = false;
+                    loadPortalPackages().then(() => {
+                        if (portalPkgIndex) renderPortalPkgSearch(searchInput.value);
+                    });
+                    return;
+                }
+
+                const filters = { arch: '', license: '', provides: '', tag: '', cve: '' };
+                const free = [];
+                trimmed.split(/\s+/).forEach(tok => {
+                    const idx = tok.indexOf(':');
+                    if (idx > 0 && idx < tok.length - 1) {
+                        const k = tok.slice(0, idx).toLowerCase();
+                        const v = tok.slice(idx + 1).toLowerCase();
+                        if (Object.hasOwn(filters, k)) { filters[k] = v; return; }
+                    }
+                    free.push(tok);
+                });
+                const text = free.join(' ').toLowerCase();
+                const hasFilter = Object.values(filters).some(Boolean);
+                const col = (row, k) => {
+                    const i = pkgColMap[k];
+                    return i >= 0 && i < row.length ? (row[i] || '') : '';
+                };
+
+                const matches = [];
+                for (let i = 0; i < portalPkgIndex.data.length; i++) {
+                    const row = portalPkgIndex.data[i];
+                    const name = col(row, 'n');
+                    const arch = col(row, 'a');
+                    const summary = col(row, 's');
+                    const license = col(row, 'l');
+                    const provides = col(row, 'p');
+                    const tags = col(row, 'c');
+
+                    if (filters.arch && arch.toLowerCase() !== filters.arch) continue;
+                    if (filters.license && !license.toLowerCase().includes(filters.license)) continue;
+                    if (filters.provides && !provides.toLowerCase().includes(filters.provides)) continue;
+                    if (filters.tag && !tags.toLowerCase().includes(filters.tag)) continue;
+                    if (filters.cve && !tags.toLowerCase().includes(filters.cve)) continue;
+
+                    const reasons = [];
+                    if (filters.cve) reasons.push('CVE');
+                    if (filters.tag) reasons.push('Tag');
+                    if (filters.license) reasons.push('License');
+                    if (filters.provides) reasons.push('Provides');
+
+                    let score = hasFilter && !text ? 10 : 0;
+                    if (text) {
+                        const nl = name.toLowerCase();
+                        const sl = summary.toLowerCase();
+                        const pl = provides.toLowerCase();
+                        const tl = tags.toLowerCase();
+                        const ll = license.toLowerCase();
+                        if (nl === text) { score = 100; reasons.push('Exact'); }
+                        else if (nl.startsWith(text)) { score = 80; }
+                        else if (nl.includes(text)) { score = 60; }
+                        else if (sl.includes(text)) { score = 40; reasons.push('Summary'); }
+                        else if (pl.includes(text)) { score = 25; reasons.push('Provides'); }
+                        else if (tl.includes(text)) { score = 20; reasons.push(text.startsWith('cve') ? 'CVE' : 'Tag/CVE'); }
+                        else if (ll.includes(text)) { score = 15; reasons.push('License'); }
+                    }
+                    if (score > 0) matches.push({ row, score, name, reasons });
+                }
+
+                matches.sort((a, b) => (b.score !== a.score ? b.score - a.score : a.name.localeCompare(b.name)));
+                const LIMIT = 50;
+                const top = matches.slice(0, LIMIT);
+                activePkgIdx = -1;
+
+                if (!top.length) {
+                    pkgResults.innerHTML = '<div class="portal-pkg-footer">No matching packages or CVEs found across portal repositories.</div>';
+                    pkgResults.hidden = false;
+                    return;
+                }
+
+                const html = top.map((m, idx) => {
+                    const row = m.row;
+                    const repo = portalPkgIndex.repos[Number(col(row, 'ri'))] || {};
+                    const file = String(col(row, 'f') || '').trim();
+                    const cleanFile = /^[A-Za-z0-9][A-Za-z0-9._+,@~-]*\.html$/.test(file) && !file.includes('..') ? encodeURIComponent(file) : '';
+                    const baseDir = String(repo.h || '').replace(/\/+$/, '');
+                    const href = cleanFile ? (baseDir ? `${baseDir}/${cleanFile}` : cleanFile) : '#';
+                    const badges = m.reasons.map(r => `<span class="portal-match-badge ${r.includes('CVE') ? 'cve' : ''}">${escapeHTML(r)}</span>`).join('');
+                    return `<a id="pp-opt-${idx}" role="option" href="${href}" class="portal-pkg-item">
+                        <div class="portal-pkg-top">
+                            <span class="portal-pkg-name">${highlightText(m.name, text)} <small>${escapeHTML(col(row, 'v'))}.${escapeHTML(col(row, 'a'))}</small></span>
+                            <span class="portal-pkg-repo">${escapeHTML(repo.t || '')}</span>
+                        </div>
+                        <div style="font-size:0.8rem; color:var(--text-muted);">${highlightText(col(row, 's'), text)}</div>
+                        ${badges ? `<div class="portal-pkg-badges">${badges}</div>` : ''}
+                    </a>`;
+                }).join('') + `<div class="portal-pkg-footer">Showing top ${top.length} of ${matches.length} matches</div>`;
+
+                pkgResults.innerHTML = html;
+                pkgResults.hidden = false;
+            }
+
+            if (modeTabs) {
+                modeTabs.querySelectorAll('.mode-tab-btn').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        modeTabs.querySelectorAll('.mode-tab-btn').forEach(b => {
+                            b.classList.remove('active');
+                            b.setAttribute('aria-selected', 'false');
+                        });
+                        btn.classList.add('active');
+                        btn.setAttribute('aria-selected', 'true');
+                        searchMode = btn.getAttribute('data-search-mode') || 'repos';
+                        if (searchMode === 'packages') {
+                            searchInput.placeholder = "Search packages & CVEs across all repos... (e.g. nginx, cve:CVE-2024, license:MIT)";
+                            loadPortalPackages();
+                            updateFilter();
+                            renderPortalPkgSearch(searchInput.value);
+                        } else {
+                            searchInput.placeholder = "Filter repositories by title, distro, arch, or channel... (Press '/' to focus)";
+                            if (pkgResults) pkgResults.hidden = true;
+                            updateFilter();
+                        }
+                    });
+                });
+            }
+
+            // Keyboard shortcuts: '/' focuses search; Escape only clears/blurs search when active
             window.addEventListener('keydown', (e) => {
-                if (e.key === '/' && document.activeElement !== searchInput) {
+                if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
                     e.preventDefault();
                     searchInput.focus();
                 } else if (e.key === 'Escape') {
-                    searchInput.value = '';
-                    searchQuery = '';
-                    activeFormat = 'all';
-                    activeDistro = 'all';
-                    activeArch = 'all';
-                    resetPills('format-pills', 'data-filter-format');
-                    resetPills('distro-pills', 'data-filter-distro');
-                    resetPills('arch-pills', 'data-filter-arch');
+                    const modal = document.getElementById('portal-config-modal');
+                    if (modal && !modal.hidden) {
+                        modal.hidden = true;
+                        return;
+                    }
+                    if (document.activeElement === searchInput || (pkgResults && !pkgResults.hidden)) {
+                        searchInput.value = '';
+                        searchQuery = '';
+                        if (pkgResults) pkgResults.hidden = true;
+                        searchInput.blur();
+                        updateFilter();
+                    }
+                }
+            });
+
+            searchInput.addEventListener('keydown', (e) => {
+                if (searchMode !== 'packages' || !pkgResults || pkgResults.hidden) return;
+                const items = pkgResults.querySelectorAll('.portal-pkg-item');
+                if (!items.length) return;
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    activePkgIdx = (activePkgIdx + 1) % items.length;
+                    items.forEach((el, idx) => el.classList.toggle('active', idx === activePkgIdx));
+                    items[activePkgIdx].scrollIntoView({ block: 'nearest' });
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    activePkgIdx = activePkgIdx <= 0 ? items.length - 1 : activePkgIdx - 1;
+                    items.forEach((el, idx) => el.classList.toggle('active', idx === activePkgIdx));
+                    items[activePkgIdx].scrollIntoView({ block: 'nearest' });
+                } else if (e.key === 'Enter' && activePkgIdx >= 0) {
+                    e.preventDefault();
+                    const href = items[activePkgIdx].getAttribute('href');
+                    if (href && href !== '#') window.location.href = href;
+                }
+            });
+
+            searchInput.addEventListener('input', (e) => {
+                searchQuery = e.target.value;
+                if (searchClear) searchClear.hidden = searchQuery.length === 0;
+                if (searchMode === 'packages') {
+                    if (pkgDebounce) clearTimeout(pkgDebounce);
+                    pkgDebounce = setTimeout(() => renderPortalPkgSearch(searchQuery), 80);
+                } else {
                     updateFilter();
                 }
             });
 
-            // Search input handler
-            searchInput.addEventListener('input', (e) => {
-                searchQuery = e.target.value;
-                updateFilter();
-            });
+            if (searchClear) {
+                searchClear.addEventListener('click', () => {
+                    searchInput.value = '';
+                    searchQuery = '';
+                    if (pkgResults) pkgResults.hidden = true;
+                    updateFilter();
+                    searchInput.focus();
+                });
+            }
 
-            // Pill clicks helper
+            if (resetBtn) resetBtn.addEventListener('click', resetAllFilters);
+            if (sortSelect) sortSelect.addEventListener('change', updateFilter);
+
             function bindPills(containerId, dataAttr, stateSetter) {
                 const container = document.getElementById(containerId);
                 if (!container) return;
@@ -986,7 +1622,17 @@
             bindPills('distro-pills', 'data-filter-distro', val => activeDistro = val);
             bindPills('arch-pills', 'data-filter-arch', val => activeArch = val);
 
-            // Clipboard copy with fallback for insecure HTTP intranet mirrors
+            // Clipboard copy & snippet URL resolution
+            function resolveSnippetURL(rawSnippet) {
+                let snippet = rawSnippet || '';
+                if (window.location.origin && window.location.origin !== 'null' && !window.location.origin.startsWith('file:')) {
+                    const portalBase = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/');
+                    snippet = snippet.replace(/(baseurl=)(?!https?:\/\/)(.*)/g, '$1' + portalBase + '$2');
+                    snippet = snippet.replace(/(URIs: )(?!https?:\/\/)(.*)/g, '$1' + portalBase + '$2');
+                }
+                return snippet;
+            }
+
             function copyText(text) {
                 if (navigator.clipboard && window.isSecureContext) {
                     return navigator.clipboard.writeText(text);
@@ -1013,22 +1659,63 @@
                 });
             }
 
-            // Quick Setup Snippet Copy Buttons
-            document.querySelectorAll('.btn-copy-config').forEach(btn => {
+            // Config Preview & Download Modal
+            const cfgModal = document.getElementById('portal-config-modal');
+            const cfgModalTitle = document.getElementById('portal-modal-title');
+            const cfgModalPre = document.getElementById('portal-modal-pre');
+            const cfgModalClose = document.getElementById('portal-modal-close');
+            const cfgModalCopy = document.getElementById('portal-modal-copy');
+            const cfgModalDownload = document.getElementById('portal-modal-download');
+            let activeModalFile = 'repository.repo';
+
+            document.querySelectorAll('.btn-preview-config').forEach(btn => {
                 btn.addEventListener('click', (e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    let snippet = btn.getAttribute('data-config') || '';
+                    const title = btn.getAttribute('data-title') || 'Repository Configuration';
+                    const fmt = btn.getAttribute('data-format') || 'rpm';
+                    const snippet = resolveSnippetURL(btn.getAttribute('data-config'));
+                    const slug = title.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-|-$/g, '') || 'repository';
+                    activeModalFile = fmt === 'deb' ? `${slug}.sources` : `${slug}.repo`;
+                    if (cfgModalTitle) cfgModalTitle.textContent = `${title} (${fmt.toUpperCase()})`;
+                    if (cfgModalPre) cfgModalPre.textContent = snippet;
+                    if (cfgModal) cfgModal.hidden = false;
+                });
+            });
 
-                    // In browser, if snippet uses relative paths, resolve them against current window location
-                    if (window.location.origin && window.location.origin !== 'null' && !window.location.origin.startsWith('file:')) {
-                        const portalBase = window.location.origin + window.location.pathname.replace(/\/[^\/]*$/, '/');
-                        snippet = snippet.replace(/(baseurl=)(?!https?:\/\/)(.*)/g, '$1' + portalBase + '$2');
-                        snippet = snippet.replace(/(URIs: )(?!https?:\/\/)(.*)/g, '$1' + portalBase + '$2');
-                    }
+            if (cfgModalClose && cfgModal) cfgModalClose.addEventListener('click', () => { cfgModal.hidden = true; });
+            if (cfgModal) cfgModal.addEventListener('click', (e) => { if (e.target === cfgModal) cfgModal.hidden = true; });
+            if (cfgModalCopy && cfgModalPre) {
+                cfgModalCopy.addEventListener('click', () => {
+                    copyText(cfgModalPre.textContent || '').then(() => {
+                        cfgModalCopy.textContent = 'Copied!';
+                        setTimeout(() => { cfgModalCopy.textContent = 'Copy Snippet'; }, 1500);
+                    }).catch(() => {});
+                });
+            }
+            if (cfgModalDownload && cfgModalPre) {
+                cfgModalDownload.addEventListener('click', () => {
+                    const blob = new Blob([(cfgModalPre.textContent || '') + '\n'], { type: 'text/plain;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = activeModalFile;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                });
+            }
 
+            // Quick Setup Snippet Copy Buttons
+            document.querySelectorAll('.btn-copy-config:not(.btn-preview-config):not(#portal-modal-copy)').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const snippet = resolveSnippetURL(btn.getAttribute('data-config'));
                     copyText(snippet).then(() => {
                         const label = btn.querySelector('.copy-label');
+                        if (!label) return;
                         const orig = label.textContent;
                         label.textContent = 'Copied!';
                         btn.classList.add('copied');
@@ -1036,39 +1723,30 @@
                             label.textContent = orig;
                             btn.classList.remove('copied');
                         }, 2000);
-                    }).catch(err => {
-                        console.error('Copy failed:', err);
-                    });
+                    }).catch(err => console.error('Copy failed:', err));
                 });
             });
 
-            // Restore initial state from URL query parameters
+            // Restore URL parameters & compute initial pill counts
             (function loadURLState() {
                 const params = new URLSearchParams(window.location.search);
-                let changed = false;
                 if (params.has('q')) {
                     searchQuery = params.get('q');
                     searchInput.value = searchQuery;
-                    changed = true;
                 }
                 if (params.has('format')) {
                     activeFormat = params.get('format');
                     activatePill('format-pills', 'data-filter-format', activeFormat);
-                    changed = true;
                 }
                 if (params.has('distro')) {
                     activeDistro = params.get('distro');
                     activatePill('distro-pills', 'data-filter-distro', activeDistro);
-                    changed = true;
                 }
                 if (params.has('arch')) {
                     activeArch = params.get('arch');
                     activatePill('arch-pills', 'data-filter-arch', activeArch);
-                    changed = true;
                 }
-                if (changed) {
-                    updateFilter();
-                }
+                updateFilter();
             })();
         })();
     </script>

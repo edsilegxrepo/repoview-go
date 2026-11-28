@@ -1,5 +1,14 @@
 package app
 
+// OBJECTIVES:
+// Verify parent portal discovery, relative portal link computation, architecture/distro
+// inference helpers, and repoview.json descriptor emission in package app.
+//
+// TEST STRATEGY:
+// Uses ephemeral t.TempDir() directory trees containing synthetic portal.yaml, portal.yml,
+// and RepoView-Portal HTML signatures alongside unit assertions on package metadata slices
+// and marshaled RepoDescriptor JSON contracts.
+
 import (
 	"encoding/json"
 	"os"

@@ -96,6 +96,12 @@ func (s *StateStore) CheckChanged(filename string, content []byte) (string, bool
 	return hash, false
 }
 
+// Entry represents a tracked output filename and its content SHA-256 hex digest.
+type Entry struct {
+	Filename string
+	Hash     string
+}
+
 // MarkWritten commits the SHA-256 digest for a successfully written file and marks state dirty.
 func (s *StateStore) MarkWritten(filename, hash string) {
 	s.mu.Lock()
@@ -104,6 +110,22 @@ func (s *StateStore) MarkWritten(filename, hash string) {
 	if oldHash, exists := s.state[filename]; !exists || oldHash != hash {
 		s.state[filename] = hash
 		s.dirty = true
+	}
+}
+
+// MarkWrittenBatch commits a batch of written file digests under a single write lock acquisition.
+func (s *StateStore) MarkWrittenBatch(entries []Entry) {
+	if len(entries) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, e := range entries {
+		if oldHash, exists := s.state[e.Filename]; !exists || oldHash != e.Hash {
+			s.state[e.Filename] = e.Hash
+			s.dirty = true
+		}
 	}
 }
 
@@ -146,7 +168,6 @@ func (s *StateStore) Save() error {
 
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
-	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(s.state); err != nil {
 		return fmt.Errorf("failed to encode state json: %w", err)
 	}

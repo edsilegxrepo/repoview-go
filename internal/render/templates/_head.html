@@ -1,4 +1,9 @@
 {{ define "_head.html" }}
+{{/*
+  OBJECTIVE: Render common HTML <head> metadata, dark/light anti-flash theme initializer,
+  embedded stylesheet reference, and optional RSS discovery link across repository views.
+  DATA FLOW: render.PageData (.PageTitle, .PageKind, .Robots) -> shared <head> fragment.
+*/}}
 <head>
   <meta charset="utf-8">
   <title>{{ .PageTitle }}</title>

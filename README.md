@@ -1,7 +1,7 @@
 # RepoView-Go
 
 [![Go Version](https://img.shields.io/badge/Go-1.26%2B-blue.svg)](https://golang.org)
-[![Coverage](https://img.shields.io/badge/Coverage-83.1%25-brightgreen.svg)](TESTING.md)
+[![Coverage](https://img.shields.io/badge/Coverage-83.3%25-brightgreen.svg)](TESTING.md)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Air--Gap Compliant](https://img.shields.io/badge/Air--Gap-100%25%20Compliant-success.svg)](ARCHITECTURE.md)
 
@@ -118,7 +118,7 @@ All third-party dependencies are continuously audited using `govulncheck` and pi
 The RepoView-Go codebase has been engineered to meet rigorous enterprise software standards:
 
 - **Modular Architecture**: Clean separation of concerns between Data Access Layer (`internal/repo`), Domain Logic (`internal/logic`), Presentation (`internal/render`), and State Management (`internal/state`).
-- **Strict Error Handling**: Adheres to Go 1.13+ error wrapping (`fmt.Errorf("...: %w", err)`). Domain errors are categorized into granular CLI exit codes (`ExitSuccess`, `ExitUsageError`, `ExitRepoMetadataError`, `ExitRenderError`).
+- **Strict Error Handling**: Adheres to Go 1.13+ error wrapping (`fmt.Errorf("...: %w", err)`). Domain errors are categorized into granular CLI exit codes (`ExitSuccess`, `ExitUsageError`, `ExitRepoMetadataError`, `ExitTemplateError`, `ExitIOError`, `ExitPartialFailure`, `ExitConfigError`, `ExitSafetyError`).
 - **Race-Free Concurrency**: Verified using Go's thread race detector:
   ```bash
   go test -race ./...
@@ -126,18 +126,18 @@ The RepoView-Go codebase has been engineered to meet rigorous enterprise softwar
   Synchronized access to shared data structures is guaranteed via `sync.RWMutex`, `sync.Mutex`, and `sync/atomic` counters.
 - **Memory Optimization (On-Demand Loading)**: For repositories with 50,000+ packages, package file lists are loaded into memory on-demand only during package page rendering and immediately freed via `defer` pointer nulling, keeping resident RAM below 200 MB.
 - **Batch Database Processing**: SQLite changelogs and dependencies are fetched using dynamic SQL parameter blocks in chunks of 500 packages, eliminating per-package round-trips.
-- **Comprehensive Test Coverage**: Tested to **83.1% statement coverage** across the entire codebase, with every individual package independently exceeding 80%:
-  - `cmd/repoview`: **82.5%**
+- **Comprehensive Test Coverage**: Tested to **83.3% total statement coverage** across the entire codebase, with every individual package independently exceeding 80%:
+  - `cmd/repoview`: **81.7%**
   - `internal/app`: **82.5%**
   - `internal/logic`: **81.8%**
-  - `internal/models`: **90.6%**
-  - `internal/portal`: **81.1%**
-  - `internal/render`: **86.2%**
-  - `internal/repo`: **82.9%**
-  - `internal/repo/deb`: **84.2%**
-  - `internal/state`: **87.1%**
+  - `internal/models`: **88.3%**
+  - `internal/portal`: **81.6%**
+  - `internal/render`: **85.4%**
+  - `internal/repo`: **83.1%**
+  - `internal/repo/deb`: **85.9%**
+  - `internal/state`: **95.7%**
   - `internal/taxonomy`: **88.6%**
-  - `internal/util`: **82.0%**
+  - `internal/util`: **82.8%**
 - **Zero Repository Pollution**: All unit and integration test fixtures execute exclusively within `t.TempDir()` sandboxes.
 
 ---
@@ -164,10 +164,12 @@ Usage: repoview [options] <repodir>
 | `--comps` | `string` | *(repodata)* | Path to an alternative `comps.xml` package group definition file (RPM). |
 | `--portal-url` | `string` | `auto` | URL or relative path to parent multi-repo catalog portal (`auto`, `none`, or custom path). |
 | `--gpgkey` | `string` | *(Empty)* | GPG public key URL or path for client snippets (enables `gpgcheck=1`). |
+| `--dump-config` | `string` | *(None)* | Inspect repository and emit an annotated starter `repoview.yaml` (safe non-clobber/merge with `--force`), then exit. |
 | `--workers` | `int` | *(Auto)* | Parallel worker count (1–16). |
 | `--ignore-package` | `string list` | *(None)* | Glob pattern to exclude packages by name or NVRA (e.g. `*debuginfo*`). Can be repeated. |
 | `--exclude-arch` | `string list` | *(None)* | Hardware architecture to exclude (e.g. `src`, `i686`). Can be repeated. |
 | `--force` | `bool` | `false` | Force complete regeneration of all HTML pages, bypassing incremental state cache. |
+| `--fsync` | `bool` | `false` | Sync every derived group/package HTML page individually to disk (slower; critical index/state files always fsync). |
 | `--quiet` | `bool` | `false` | Suppress non-essential informational console output. |
 | `--version` | `bool` | `false` | Print application version and build metadata, then exit. |
 
@@ -189,13 +191,13 @@ Usage: repoview portal [options] [repodir]
 | `--repo-url` | `string` | *(Auto)* | Public base URL where raw packages/metadata are hosted (for `.rpm`/`.deb` download links and `.repo`/`.sources` configs). |
 | `--title` | `string` | `Enterprise Package Repositories` | Portal catalog title displayed in header banner. |
 | `--description` | `string` | *(None)* | Optional description or subtitle text rendered beneath the portal header. |
-| `--config` | `string` | *(portal.yaml)* | Path to optional YAML configuration file for overrides, branding, and pinned repos. |
-| `--dump-config` | `string` | *(None)* | Dump auto-discovered repository tree to a starter `portal.yaml` file and exit. |
-| `--max-depth` | `int` | `5` | Maximum directory recursion depth during repository discovery. |
+| `--config` | `string` | *(portal.yaml)* | Path to optional YAML configuration file for overrides, branding, and `pinned` / `hidden` repos. |
+| `--dump-config` | `string` | *(None)* | Dump auto-discovered repository tree to a starter `portal.yaml` (refuses overwrite without `--force`; merges with `--force`) and exit. |
+| `--max-depth` | `int` | `7` | Maximum directory recursion depth during repository discovery (supports `.ddeb` debug trees). |
 | `--require-rendered` | `bool` | `false` | Only catalog repositories that already have generated repoview pages. |
 | `--render-missing` | `bool` | `false` | Automatically generates repoview pages for unrendered raw repositories in parallel. |
 | `--render-all` | `bool` | `false` | Force generates repoview pages for all discovered repositories in parallel. |
-| `--workers` | `int` | `4` | Concurrency worker pool size for batch rendering (1–16, default: `NumCPU * 2`). |
+| `--workers` | `int` | *(Auto)* | Concurrency worker pool size for batch rendering (`NumCPU * 2`, clamped `1–16`). |
 | `--force` | `bool` | `false` | Force overwrite existing `index.html` even if not previously created by RepoView. |
 | `--quiet` | `bool` | `false` | Suppress non-essential informational console output. |
 | `--version` | `bool` | `false` | Print application version and build metadata, then exit. |
@@ -393,7 +395,7 @@ Generated repository portal in /var/www/html/portal (3 repositories, 2104 packag
 The generated portal provides:
 - **Zero Pollution / Read-Only Mirror Friendly**: All visual artifacts, state stores (`state.json`), and descriptors are generated into `--portal-home`. Raw mirror directories can be mounted strictly read-only (`0555`) or managed via `rsync --delete` without losing UI files.
 - **Decoupled URL Topologies**: `--portal-url` manages UI browsing and RSS links, while `--repo-url` powers package download links and client `.repo`/`.sources` setup snippets.
-- **Instant Client-Side Filtering**: Interactive text search (`/` shortcut), format pills (`RPM`, `DEB`), distro pills (`el9`, `ubu24`), and architecture filters (`x86_64`, `amd64`).
+- **Instant Client-Side & Cross-Repo Filtering**: Interactive text search (`/` shortcut), **`Repositories`** vs **`Packages & CVEs`** search toggle (`portal-search.json`), format/distro/arch/suite filter pills, sort controls, and pinned sections (`pinned: true`).
 - **Two-Way Navigation**: Each child repository view automatically includes a **`← All Repositories`** breadcrumb link back to the portal home page.
 - **Copy-Ready Client Snippets**: One-click `.repo` and Deb822 `.sources` configurations for developers.
 - **Aggregated RSS Feed**: `portal-feed.xml` merges release updates across all repositories in descending chronological order.
@@ -413,6 +415,7 @@ When using detached mode, Nginx can host the portal UI and package repositories 
 /var/www/html/portal/                   <- Detached Portal Home (--portal-home)
 ├── index.html                          <- Top-Level Portal Catalog
 ├── portal-feed.xml                     <- Aggregated Portal Feed
+├── portal-search.json                  <- Cross-Repository Package & CVE Search Index
 ├── el9/base/x86_64/
 │   ├── index.html                      <- Child Repo Web View
 │   ├── search.json                     <- Package Search Index
@@ -534,7 +537,12 @@ server {
         try_files $uri =404;
     }
 
-    # 2. Search Index, Metadata Descriptors & RSS Feeds - Always revalidate
+    # 2. Protect incremental state cache if stored inside web root, then serve JSON/XML
+    location ~* state\.json$ {
+        deny all;
+        return 404;
+    }
+
     location ~* \.(json|xml)$ {
         add_header Cache-Control "public, no-cache, must-revalidate";
         try_files $uri =404;
@@ -546,8 +554,8 @@ server {
         try_files $uri =404;
     }
 
-    # 4. Immutable Package Binaries (RPM / DEB) - 30-day immutable cache
-    location ~* \.(rpm|deb|tar\.gz|tar\.xz)$ {
+    # 4. Immutable Package Binaries (RPM / DEB / DDEB) - 30-day immutable cache
+    location ~* \.(rpm|deb|ddeb|tar\.gz|tar\.xz)$ {
         add_header Cache-Control "public, max-age=2592000, immutable";
         try_files $uri =404;
     }
@@ -565,6 +573,10 @@ server {
 }
 ```
 
+> **Operational Notes:**
+> - **State Isolation:** Prefer `--state-dir /var/cache/repoview` outside the web-served root (in addition to blocking `state.json` in Nginx) so incremental state inventories are never exposed over HTTP.
+> - **Scratch Disk Sizing (`TMPDIR`):** Decompressing multi-hundred-MB `primary.sqlite`/`other.sqlite` databases writes temporary files to `os.TempDir()` (capped at `4 GiB`). On Linux hosts where `/tmp` is a small RAM-backed `tmpfs`, set `TMPDIR` to disk-backed storage.
+
 ---
 
 ### Containerized Deployment (Unprivileged Docker)
@@ -574,7 +586,7 @@ Build and run RepoView-Go inside an isolated, non-root container:
 **`Dockerfile`:**
 ```dockerfile
 # Build Stage
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -619,7 +631,7 @@ For deep technical insights into RepoView-Go's architectural design, operational
 - **[TESTING.md](TESTING.md)**:
   - Test suite architecture and defect-first testing principles.
   - Positive and negative test category matrices with Mermaid logical execution flowcharts.
-  - Comprehensive inventory table of all 64 test functions and subtests with success criteria.
-  - Live E2E integration test specifications using real RPM repositories (2,036 packages) and live `net/http` loopback servers.
-  - Detailed code coverage report verifying **83.1% total statement coverage** (>80% across all packages).
+  - Comprehensive inventory of all unit tests, micro-benchmarks, and pure-Go E2E matrix specs (`RPM-01`–`05`, `DEB-01`–`03`, `DDEB-01`–`02`, `MIX-01`–`05`, `SEC-01`–`02`).
+  - Cross-platform integration test suite with synthetic pure-Go fixtures, optional live mirror validation, and ephemeral `net/http` loopback servers.
+  - Detailed code coverage report verifying **83.3% total statement coverage** (>80% across all packages).
   - Step-by-step test execution scripts for both **Bash** and **PowerShell**.

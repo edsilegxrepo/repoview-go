@@ -1,5 +1,23 @@
 // Package taxonomy provides unified architecture, distribution, channel, and
 // icon classification helpers shared between single-repository builds and the multi-repo portal.
+//
+// OBJECTIVES:
+// Centralize repository classification rules so repoview builds and portal scans
+// agree consistently on architectures, OS families, release channels, and SVG icons.
+//
+// CORE COMPONENTS:
+//   - PathPatternRule / Rules: Declarative custom path-matching & distro alias config.
+//   - DetectPrimaryArch / DetectArchFromPath: Concrete hardware architecture resolution.
+//   - InferDistroAndChannelWithRules / MatchPathRules: Hierarchy and slug parsers.
+//   - MatchDistroIconWithRules: Embedded distribution badge/icon resolver.
+//
+// FUNCTIONALITY:
+//   - Evaluates custom path_patterns first, then falls back cleanly across APT dists,
+//     3-level RPM hierarchies, 2-level layouts, and hyphen/dot directory slugs.
+//
+// DATA FLOW:
+//
+//	repo path / []*models.Package + Rules -> InferDistroAndChannelWithRules -> distro, channel, arch, icon
 package taxonomy
 
 import (
@@ -9,6 +27,8 @@ import (
 
 	"github.com/edsilegxrepo/repoview/internal/models"
 )
+
+// --- Declarative Configuration Types ---
 
 // PathPatternRule allows users to declare custom enterprise repository path layouts
 // in portal.yaml (for example "repos/{distro}/{channel}/{arch}").
@@ -25,6 +45,8 @@ type Rules struct {
 	PathPatterns  []PathPatternRule `yaml:"path_patterns,omitempty"`
 	DistroAliases map[string]string `yaml:"distro_aliases,omitempty"`
 }
+
+// --- Architecture Recognition & Primary Selection ---
 
 var knownArchitectures = map[string]bool{
 	"x86_64":      true,
@@ -149,6 +171,8 @@ func DetectArchFromPath(repoDir string) string {
 	}
 	return "unknown"
 }
+
+// --- Path Rules, Distro & Channel Inference ---
 
 // InferDistroAndChannel extracts distro and channel names from directory layouts.
 func InferDistroAndChannel(repoDir string) (string, string) {
@@ -302,6 +326,8 @@ func TokenizeSlug(dirName string) (distro, channel, arch string) {
 	distro, channel = InferDistroAndChannel(clean)
 	return distro, channel, arch
 }
+
+// --- Branding Icon Matching & Helpers ---
 
 // MatchDistroIcon assigns a default SVG icon name based on distro name keywords.
 func MatchDistroIcon(distro string) string {

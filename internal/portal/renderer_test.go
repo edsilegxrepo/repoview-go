@@ -226,3 +226,57 @@ func TestRenderer_WritePortal_SafetyGuard(t *testing.T) {
 		t.Errorf("foreign index was not replaced with portal HTML")
 	}
 }
+
+func TestRenderer_PortalSearchIndexAndPinnedUI(t *testing.T) {
+	portalOut := t.TempDir()
+	childOut := filepath.Join(portalOut, "el9", "base", "x86_64", "repoview")
+	if err := os.MkdirAll(childOut, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	searchJSON := `{"schema":["n","v","a","s","f","g","l","p","t"],"data":[["nginx","1.24.0-2.el9","x86_64","HTTP server","nginx.html","Web","BSD","webserver","CVE-2024-9999"],["curl","8.5.0-1.el9","x86_64","Transfer tool","curl.html","Net","MIT","",""]]}`
+	if err := os.WriteFile(filepath.Join(childOut, "search.json"), []byte(searchJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewRenderer("")
+	if err != nil {
+		t.Fatalf("NewRenderer failed: %v", err)
+	}
+
+	catalog := createMockCatalog()
+	catalog.Repos[0].Pinned = true
+	catalog.Repos[0].Description = "Core EL9 Base Packages"
+
+	if err := r.WritePortal(portalOut, portalOut, catalog, false); err != nil {
+		t.Fatalf("WritePortal failed: %v", err)
+	}
+
+	htmlData, err := os.ReadFile(filepath.Join(portalOut, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	htmlText := string(htmlData)
+	for _, want := range []string{
+		`id="pinned-section"`,
+		`repo-card pinned`,
+		`Core EL9 Base Packages`,
+		`<span>Suite:</span>`,
+		`id="catalog-sort"`,
+		`id="btn-reset-filters"`,
+		`id="portal-search-mode"`,
+		`id="portal-config-modal"`,
+	} {
+		if !strings.Contains(htmlText, want) {
+			t.Errorf("portal HTML missing UI element %q", want)
+		}
+	}
+
+	portalSearchBytes, err := os.ReadFile(filepath.Join(portalOut, "portal-search.json"))
+	if err != nil {
+		t.Fatalf("expected portal-search.json to be written: %v", err)
+	}
+	searchStr := string(portalSearchBytes)
+	if !strings.Contains(searchStr, "CVE-2024-9999") || !strings.Contains(searchStr, "el9/base/x86_64/repoview") {
+		t.Errorf("unexpected portal-search.json content: %s", searchStr)
+	}
+}

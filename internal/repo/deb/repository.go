@@ -1,3 +1,23 @@
+// Package deb implements Debian and Ubuntu APT repository discovery, Release
+// integrity verification, Deb822 Packages ingestion, and .deb/.ddeb introspection.
+//
+// OBJECTIVES:
+// Provide a complete, external-tool-free RepoReader backend for Debian/Ubuntu repositories
+// supporting compressed multi-component indexes and single-pass package rendering enrichment.
+//
+// CORE COMPONENTS:
+//   - DebRepository: RepoReader and PackageRenderEnricher implementation backed by DebRepoLocations.
+//   - GetAllPackages: Verifies Release SHA-256 digests, decompresses indexes, parses Deb822 stanzas,
+//     and deduplicates packages across component slices.
+//   - EnrichForRender / ReadPackageFiles: Single-pass archive metadata, files, changelog, and license extraction.
+//
+// FUNCTIONALITY:
+//   - Enforces util.ResolveContainedPath containment checks on Filename paths read from indexes.
+//   - Supports .deb and .ddeb payloads and infers build timestamps from ar container headers.
+//
+// DATA FLOW:
+//
+//	DebRepoLocations -> GetAllPackages (Release SHA-256 + Packages*) -> EnrichForRender -> models.Package
 package deb
 
 import (
@@ -15,6 +35,8 @@ import (
 	"github.com/edsilegxrepo/repoview/internal/util"
 	"pault.ag/go/debian/control"
 )
+
+// --- Debian Repository Reader & Verification ---
 
 // DebRepository implements repo.RepoReader for Debian package repositories.
 type DebRepository struct {
@@ -183,6 +205,52 @@ func (r *DebRepository) ReadPackageFiles(repoDir string, pkg *models.Package) ([
 		pkg.TimeBuild = cl.Date
 	}
 	return files, nil
+}
+
+// EnrichForRender extracts maintainer details, ar build timestamps, file manifests,
+// fallback licenses, and changelogs in a single .deb archive open pass.
+func (r *DebRepository) EnrichForRender(repoDir string, pkg *models.Package) error {
+	if pkg == nil || pkg.LocationHref == "" {
+		return nil
+	}
+	if pkg.Details != nil && len(pkg.Details.Files) > 0 {
+		return nil
+	}
+	debPath := r.resolveDebPath(repoDir, pkg.LocationHref)
+	if debPath == "" {
+		return fmt.Errorf("package file not found for %s", pkg.LocationHref)
+	}
+	if pkg.Details != nil {
+		files, err := r.ReadPackageFiles(repoDir, pkg)
+		if err == nil && len(files) > 0 {
+			pkg.Details.Files = files
+		}
+		return err
+	}
+
+	details, ts, files, cl, detectedLicense, err := ReadDebRenderMetadata(debPath)
+	if pkg.TimeBuild <= 0 && ts > 0 {
+		pkg.TimeBuild = ts
+	}
+	if err != nil {
+		return err
+	}
+	if details == nil {
+		details = &models.PackageDetails{}
+	}
+	details.Files = files
+	pkg.Details = details
+	if pkg.Changelog == nil && cl != nil {
+		pkg.Changelog = cl
+		pkg.Changelogs = []*models.ChangelogEntry{cl}
+	}
+	if pkg.License == "" && detectedLicense != "" {
+		pkg.License = detectedLicense
+	}
+	if pkg.TimeBuild <= 0 && cl != nil && cl.Date > 0 {
+		pkg.TimeBuild = cl.Date
+	}
+	return nil
 }
 
 // resolveDebPath locates the .deb file on disk, checking repoDir and locs.BaseDir
