@@ -15,6 +15,7 @@
 	"priority": "optional",
 	"install_path": "/usr/bin",
 	"cgo": true,
+	"glibc": "2.28",
 	"history": [
 		"* Fri Nov 27 2026 Mis Center <support@criticalsys.net> - <version>-<release>",
 		"- Packaged to new code release"
